@@ -1,0 +1,8 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+backend/uploads/
+backend/test_*.py
+backend/test_*.xlsx

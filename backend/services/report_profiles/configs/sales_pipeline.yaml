@@ -1,0 +1,23 @@
+name: sales_pipeline
+
+required_entities:
+  - customer
+  - revenue
+
+kpis:
+  - total_revenue
+  - average_check
+  - unique_customers
+  - unique_managers
+
+charts:
+  - revenue_by_customer
+  - revenue_by_manager
+  - monthly_trend
+
+insights:
+  - top_customer
+  - top_manager
+  - best_month
+
+summary: sales_summary

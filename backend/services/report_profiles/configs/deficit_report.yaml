@@ -1,0 +1,20 @@
+name: deficit_report
+
+required_entities:
+  - customer
+  - deficit
+
+kpis:
+  - total_deficit
+  - unique_customers
+  - unique_departments
+
+charts:
+  - deficit_by_manager
+  - deficit_by_department
+
+insights:
+  - top_customer
+  - top_department
+
+summary: deficit_summary

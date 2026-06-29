@@ -1,0 +1,330 @@
+import pandas as pd
+
+SEMANTIC_ALIASES: dict[str, list[str]] = {
+    "sales": [
+        "продажа",
+        "продажи",
+        "продаж",
+        "sales",
+        "sale",
+    ],
+    "revenue": [
+        "выручка",
+        "выручк",
+        "revenue",
+        "доход",
+    ],
+    "amount": [
+        "amount",
+        "сумма",
+        "сумм",
+    ],
+    "income": [
+        "income",
+        "доход",
+    ],
+    "client": [
+        "клиент",
+        "клиентов",
+        "клиентам",
+        "customer",
+        "buyer",
+        "покупател",
+    ],
+    "manager": [
+        "менеджер",
+        "менеджеров",
+        "менеджерам",
+        "manager",
+        "seller",
+        "продавец",
+    ],
+    "region": [
+        "регион",
+        "регионам",
+        "регионов",
+        "region",
+        "область",
+        "city",
+        "город",
+        "городам",
+    ],
+    "date": [
+        "дата",
+        "date",
+        "period",
+        "период",
+    ],
+    "month": [
+        "month",
+        "месяц",
+        "месяцам",
+        "месяцев",
+    ],
+    "year": [
+        "year",
+        "год",
+        "годам",
+        "годов",
+    ],
+}
+
+SEMANTIC_TO_DTYPES: dict[str, str] = {
+    "sales": "numeric",
+    "revenue": "numeric",
+    "amount": "numeric",
+    "income": "numeric",
+    "client": "categorical",
+    "manager": "categorical",
+    "region": "categorical",
+    "date": "datetime",
+    "month": "datetime",
+    "year": "datetime",
+}
+
+
+def _normalize(text: str) -> str:
+    return str(text).lower().strip()
+
+
+def _get_columns_by_dtype(df: pd.DataFrame, dtype: str) -> list[str]:
+    if dtype == "numeric":
+        return df.select_dtypes(include="number").columns.tolist()
+
+    if dtype in {"datetime", "date"}:
+        datetime_cols = df.select_dtypes(
+            include=["datetime", "datetimetz"]
+        ).columns.tolist()
+
+        for col in df.columns:
+            if col in datetime_cols:
+                continue
+
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                datetime_cols.append(col)
+
+        return list(dict.fromkeys(datetime_cols))
+
+    return df.select_dtypes(
+        include=["object", "string", "category"]
+    ).columns.tolist()
+
+
+def _aliases_for_semantic(semantic: str) -> list[str]:
+    aliases = list(SEMANTIC_ALIASES.get(semantic, []))
+
+    if semantic in {"sales", "revenue", "amount", "income"}:
+        for key in ("sales", "revenue", "amount", "income"):
+            if key != semantic:
+                aliases.extend(SEMANTIC_ALIASES.get(key, []))
+
+    return list(dict.fromkeys(aliases))
+
+
+def _match_columns_by_aliases(
+    question: str,
+    candidates: list[str],
+    aliases: list[str],
+) -> list[str]:
+    matched: list[str] = []
+    question_has_alias = any(alias in question for alias in aliases)
+
+    for col in candidates:
+        col_norm = _normalize(col)
+        col_parts = col_norm.replace("_", " ").replace("-", " ").split()
+
+        if any(alias in col_norm or col_norm in alias for alias in aliases):
+            matched.append(col)
+            continue
+
+        if any(part in aliases for part in col_parts):
+            matched.append(col)
+            continue
+
+        if question_has_alias and any(
+            alias in question and (part in alias or alias in part)
+            for alias in aliases
+            for part in col_parts
+            if len(part) > 2
+        ):
+            matched.append(col)
+
+    return list(dict.fromkeys(matched))
+
+
+def _detect_semantics_in_question(question: str) -> list[str]:
+    question_norm = _normalize(question)
+    detected: list[str] = []
+
+    for semantic, aliases in SEMANTIC_ALIASES.items():
+        if any(alias in question_norm for alias in aliases):
+            detected.append(semantic)
+
+    return detected
+
+
+def resolve_semantic_column(
+    df: pd.DataFrame,
+    question: str,
+    semantic: str,
+    dtype: str | None = None,
+) -> str | None:
+    resolved_dtype = dtype or SEMANTIC_TO_DTYPES.get(semantic, "categorical")
+    aliases = _aliases_for_semantic(semantic)
+    question_norm = _normalize(question)
+    candidates = _get_columns_by_dtype(df, resolved_dtype)
+
+    if not candidates:
+        return None
+
+    if not any(alias in question_norm for alias in aliases):
+        alias_matches = _match_columns_by_aliases(
+            question_norm,
+            candidates,
+            aliases,
+        )
+
+        if len(alias_matches) == 1:
+            return alias_matches[0]
+
+        if len(alias_matches) > 1:
+            return None
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        return None
+
+    alias_matches = _match_columns_by_aliases(
+        question_norm,
+        candidates,
+        aliases,
+    )
+
+    if len(alias_matches) == 1:
+        return alias_matches[0]
+
+    if len(alias_matches) > 1:
+        return None
+
+    return resolve_column(df, question, dtype=resolved_dtype)
+
+
+def resolve_group_and_value_columns(
+    df: pd.DataFrame,
+    question: str,
+) -> tuple[str | None, str | None]:
+    question_norm = _normalize(question)
+    group_col = None
+
+    group_priority = [
+        ("region", ["по регион", "регионам", "регионов", "регион"]),
+        ("manager", ["по менеджер", "менеджерам", "менеджеров", "менеджер"]),
+        ("client", ["по клиент", "клиентам", "клиентов", "клиент"]),
+    ]
+
+    for semantic, markers in group_priority:
+        if any(marker in question_norm for marker in markers):
+            group_col = resolve_semantic_column(
+                df,
+                question,
+                semantic,
+                dtype="categorical",
+            )
+            break
+
+    if group_col is None:
+        for semantic in ("region", "manager", "client"):
+            if semantic in _detect_semantics_in_question(question):
+                group_col = resolve_semantic_column(
+                    df,
+                    question,
+                    semantic,
+                    dtype="categorical",
+                )
+                if group_col:
+                    break
+
+    value_col = None
+    for semantic in ("revenue", "sales", "amount", "income"):
+        value_col = resolve_semantic_column(
+            df,
+            question,
+            semantic,
+            dtype="numeric",
+        )
+        if value_col:
+            break
+
+    if value_col is None:
+        value_col = resolve_column(df, question, dtype="numeric")
+
+    return group_col, value_col
+
+
+def resolve_column(
+    df: pd.DataFrame,
+    question: str,
+    dtype: str = "numeric",
+) -> str | None:
+    question_norm = _normalize(question)
+    candidates = _get_columns_by_dtype(df, dtype)
+
+    if not candidates:
+        return None
+
+    for col in candidates:
+        col_norm = _normalize(col)
+
+        if col_norm == question_norm or col_norm in question_norm:
+            return col
+
+    for col in candidates:
+        col_norm = _normalize(col)
+        col_parts = col_norm.replace("_", " ").replace("-", " ").split()
+
+        if any(len(part) > 2 and part in question_norm for part in col_parts):
+            return col
+
+        if len(col_norm) > 2 and any(
+            word in col_norm
+            for word in question_norm.split()
+            if len(word) > 2
+        ):
+            return col
+
+    detected_semantics = _detect_semantics_in_question(question_norm)
+
+    for semantic in detected_semantics:
+        aliases = _aliases_for_semantic(semantic)
+        alias_matches = _match_columns_by_aliases(
+            question_norm,
+            candidates,
+            aliases,
+        )
+
+        if len(alias_matches) == 1:
+            return alias_matches[0]
+
+    alias_matches: list[str] = []
+
+    for aliases in SEMANTIC_ALIASES.values():
+        if not any(alias in question_norm for alias in aliases):
+            continue
+
+        alias_matches.extend(
+            _match_columns_by_aliases(question_norm, candidates, aliases)
+        )
+
+    alias_matches = list(dict.fromkeys(alias_matches))
+
+    if len(alias_matches) == 1:
+        return alias_matches[0]
+
+    if len(alias_matches) > 1:
+        return None
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None

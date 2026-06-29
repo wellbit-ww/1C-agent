@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pandas
+openpyxl
+python-multipart
+langchain
+langchain-ollama
+python-dotenv
+plotly
