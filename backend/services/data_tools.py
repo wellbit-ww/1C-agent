@@ -1,3 +1,5 @@
+import warnings
+
 import pandas as pd
 
 from services.column_resolver import (
@@ -11,9 +13,16 @@ def _error(message: str) -> dict:
     return {"error": message}
 
 
+_DEFICIT_MARKERS = ("дефицит", "неоплаченн", "остаток", "задолженность")
+
+
 def _resolve_numeric_column(df, question: str | None) -> str | None:
     if question:
-        for semantic in ("revenue", "sales", "amount", "income"):
+        semantics = ["revenue", "sales", "amount", "income"]
+        if any(m in question.lower() for m in _DEFICIT_MARKERS):
+            semantics.insert(0, "deficit")
+
+        for semantic in semantics:
             col = resolve_semantic_column(
                 df,
                 question,
@@ -32,7 +41,7 @@ def _resolve_categorical_column(df, question: str | None) -> str | None:
     if not question:
         return resolve_column(df, "", dtype="categorical")
 
-    for semantic in ("client", "manager", "region"):
+    for semantic in ("client", "manager", "region", "department"):
         col = resolve_semantic_column(
             df,
             question,
@@ -259,8 +268,20 @@ def detect_date_columns(df):
             date_columns.append(col)
             continue
 
-        if df[col].dtype == object:
-            parsed = pd.to_datetime(df[col], errors="coerce")
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]):
+            series = df[col].dropna()
+            if series.empty:
+                continue
+
+            # object-колонки с числами («К оплате» и т.п.) — не даты:
+            # иначе to_datetime трактует их как unix-timestamp и даёт 1970
+            numeric_ratio = pd.to_numeric(series, errors="coerce").notna().mean()
+            if numeric_ratio >= 0.8:
+                continue
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
             valid_ratio = parsed.notna().mean()
 
             if valid_ratio >= 0.5:
@@ -310,10 +331,13 @@ def _group_by_period(df, question: str | None, period: str):
         return _error(f"Не удалось найти подходящие колонки в таблице: {' и '.join(missing)}")
 
     working_df = df.copy()
-    working_df[date_col] = pd.to_datetime(
-        working_df[date_col],
-        errors="coerce",
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        working_df[date_col] = pd.to_datetime(
+            working_df[date_col],
+            errors="coerce",
+            dayfirst=True,
+        )
 
     if working_df[date_col].isna().all():
         return _error("Колонка даты не содержит валидных значений")

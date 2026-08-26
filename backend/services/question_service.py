@@ -44,17 +44,18 @@ def detect_intent(question: str):
     if "распределение выручки" in q:
         return "chart_revenue"
 
+    if "динамик" in q or "тренд" in q:
+        return "trend_month"
+
     if any(
         marker in q
         for marker in (
             "по месяц",
             "по месяцам",
-            "динамик",
-            "тренд",
         )
     ) and any(
         marker in q
-        for marker in ("продаж", "выручк", "доход", "sales", "revenue")
+        for marker in ("продаж", "выручк", "доход", "дефицит", "sales", "revenue")
     ):
         return "trend_month"
 
@@ -73,7 +74,10 @@ def detect_intent(question: str):
     if any(
         marker in q
         for marker in ("лучш", "топ", "лидер", "больше всего")
-    ) and "клиент" in q:
+    ) and any(
+        marker in q
+        for marker in ("клиент", "заказчик", "контрагент")
+    ):
         return "top_client"
 
     if any(
@@ -102,7 +106,15 @@ def detect_intent(question: str):
 
     if any(
         marker in q
-        for marker in ("по регион", "по менеджер", "по клиент", "группир")
+        for marker in (
+            "по регион",
+            "по менеджер",
+            "по клиент",
+            "по заказчик",
+            "по подразделен",
+            "по отдел",
+            "группир",
+        )
     ):
         if "средн" in q:
             return "group_mean"
@@ -129,6 +141,15 @@ def detect_intent(question: str):
 
     if "список колонок" in q:
         return "columns"
+
+    if any(
+        marker in q
+        for marker in ("дефицит", "задолжен", "неоплач")
+    ) and any(
+        marker in q
+        for marker in ("общ", "сумм", "всего", "сколько")
+    ):
+        return "sum"
 
     if "общая сумма" in q or "выручк" in q or "сумма продаж" in q:
         return "sum"

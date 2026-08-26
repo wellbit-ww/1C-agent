@@ -24,7 +24,7 @@ class DeficitProfile(ReportProfile):
         def_col = self._get_deficit_col(df)
         if def_col:
             total_def = df[def_col].sum()
-            kpis.append({"label": "Общий дефицит", "value": self._format_number(total_sum)}) # Will fix total_def -> total_def
+            kpis.append({"label": "Общий дефицит", "value": self._format_number(total_def)})
             
         client_col = resolve_semantic_column(df, "", semantic="client", dtype="categorical")
         if client_col:

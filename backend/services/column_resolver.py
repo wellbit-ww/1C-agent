@@ -27,6 +27,9 @@ SEMANTIC_ALIASES: dict[str, list[str]] = {
         "клиент",
         "клиентов",
         "клиентам",
+        "заказчик",
+        "контрагент",
+        "компания",
         "customer",
         "buyer",
         "покупател",
@@ -38,6 +41,19 @@ SEMANTIC_ALIASES: dict[str, list[str]] = {
         "manager",
         "seller",
         "продавец",
+        "ответственный",
+    ],
+    "department": [
+        "подразделение",
+        "отдел",
+        "департамент",
+        "служба",
+    ],
+    "deficit": [
+        "дефицит",
+        "неоплаченн",
+        "остаток",
+        "задолженность",
     ],
     "region": [
         "регион",
@@ -74,13 +90,52 @@ SEMANTIC_TO_DTYPES: dict[str, str] = {
     "revenue": "numeric",
     "amount": "numeric",
     "income": "numeric",
+    "deficit": "numeric",
     "client": "categorical",
     "manager": "categorical",
+    "department": "categorical",
     "region": "categorical",
     "date": "datetime",
     "month": "datetime",
     "year": "datetime",
 }
+
+_MONEY_HINTS = ("руб", "₽", "rub")
+
+
+def _tiebreak_matches(
+    df: pd.DataFrame,
+    matches: list[str],
+    semantic: str,
+    dtype: str,
+) -> str | None:
+    """Выбирает одну колонку из нескольких совпавших по алиасам.
+
+    Для денежных колонок 1С типична пара «сумма в валюте» / «сумма в рублях» —
+    суммировать можно только рублёвую. Для категорий документ-ссылка
+    («Заказ клиента САУП-…») почти уникальна в каждой строке, а сущность
+    («Заказчик») повторяется — побеждает меньшая кардинальность.
+    """
+    if not matches:
+        return None
+
+    if dtype == "numeric":
+        rub = [c for c in matches if any(h in _normalize(c) for h in _MONEY_HINTS)]
+        if len(rub) == 1:
+            return rub[0]
+        ordered = [c for c in df.columns if c in matches]
+        return ordered[0] if ordered else None
+
+    if dtype == "categorical":
+        def cardinality_ratio(col: str) -> float:
+            series = df[col]
+            if len(series) > 5000:
+                series = series.sample(5000, random_state=0)
+            return series.nunique() / max(len(series), 1)
+
+        return min(matches, key=cardinality_ratio)
+
+    return None
 
 
 def _normalize(text: str) -> str:
@@ -188,7 +243,7 @@ def resolve_semantic_column(
             return alias_matches[0]
 
         if len(alias_matches) > 1:
-            return None
+            return _tiebreak_matches(df, alias_matches, semantic, resolved_dtype)
 
         if len(candidates) == 1:
             return candidates[0]
@@ -205,7 +260,7 @@ def resolve_semantic_column(
         return alias_matches[0]
 
     if len(alias_matches) > 1:
-        return None
+        return _tiebreak_matches(df, alias_matches, semantic, resolved_dtype)
 
     return resolve_column(df, question, dtype=resolved_dtype)
 
@@ -219,8 +274,9 @@ def resolve_group_and_value_columns(
 
     group_priority = [
         ("region", ["по регион", "регионам", "регионов", "регион"]),
-        ("manager", ["по менеджер", "менеджерам", "менеджеров", "менеджер"]),
-        ("client", ["по клиент", "клиентам", "клиентов", "клиент"]),
+        ("manager", ["по менеджер", "менеджерам", "менеджеров", "менеджер", "по ответственн"]),
+        ("client", ["по клиент", "клиентам", "клиентов", "клиент", "по заказчик", "по компани"]),
+        ("department", ["по подразделен", "по отдел", "по департамент", "по служб"]),
     ]
 
     for semantic, markers in group_priority:
@@ -234,7 +290,7 @@ def resolve_group_and_value_columns(
             break
 
     if group_col is None:
-        for semantic in ("region", "manager", "client"):
+        for semantic in ("region", "manager", "client", "department"):
             if semantic in _detect_semantics_in_question(question):
                 group_col = resolve_semantic_column(
                     df,
@@ -246,7 +302,11 @@ def resolve_group_and_value_columns(
                     break
 
     value_col = None
-    for semantic in ("revenue", "sales", "amount", "income"):
+    money_semantics = ["revenue", "sales", "amount", "income"]
+    if any(m in question_norm for m in SEMANTIC_ALIASES["deficit"]):
+        money_semantics.insert(0, "deficit")
+
+    for semantic in money_semantics:
         value_col = resolve_semantic_column(
             df,
             question,
@@ -322,7 +382,7 @@ def resolve_column(
         return alias_matches[0]
 
     if len(alias_matches) > 1:
-        return None
+        return _tiebreak_matches(df, alias_matches, "", dtype)
 
     if len(candidates) == 1:
         return candidates[0]

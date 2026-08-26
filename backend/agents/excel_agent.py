@@ -146,6 +146,12 @@ class ExcelAgent:
             }
         }
 
+    def handle_chat_message(self, file_id: str, file_path: str, question: str) -> dict:
+        """Новый обработчик чата: возвращает {"answer": str, "charts": [...]}."""
+        df = self._load_dataframe(file_id, file_path)
+        from services.chat_service import handle_question
+        return handle_question(df, question)
+
     def answer_question(
         self,
         file_id: str,

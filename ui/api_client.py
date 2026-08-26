@@ -2,7 +2,7 @@ import requests
 
 
 API_BASE_URL = "http://127.0.0.1:8000"
-REQUEST_TIMEOUT = 120
+REQUEST_TIMEOUT = 300
 
 
 class ApiClientError(Exception):
@@ -84,6 +84,22 @@ def analyze_file(uploaded_file, base_url: str = API_BASE_URL) -> dict:
         raise ApiClientError("Backend недоступен") from exc
 
 
+def get_full_report(file_id: str, filename: str | None = None, base_url: str = API_BASE_URL) -> dict:
+    try:
+        response = requests.post(
+            _build_url("/report", base_url),
+            json={
+                "file_id": file_id,
+                "filename": filename,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        _raise_for_response(response)
+        return response.json()
+    except requests.RequestException as exc:
+        raise ApiClientError("Backend недоступен") from exc
+
+
 def get_dashboard(file_id: str, base_url: str = API_BASE_URL) -> dict:
     try:
         response = requests.post(
@@ -148,7 +164,7 @@ def get_detailed_table(file_id: str, base_url: str = API_BASE_URL) -> list[dict]
 
     return payload.get("data", [])
 
-def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> str:
+def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> dict:
     try:
         response = requests.post(
             _build_url("/chat", base_url),
@@ -166,4 +182,7 @@ def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> str:
     if "error" in payload:
         raise ApiClientError(str(payload["error"]))
 
-    return str(payload.get("answer", "Ответ не получен"))
+    return {
+        "answer": str(payload.get("answer", "Ответ не получен")),
+        "charts": list(payload.get("charts", [])),
+    }

@@ -11,7 +11,7 @@ from services.exceptions import (
     InvalidFileError,
     OllamaUnavailableError,
 )
-from models.schemas import ChatRequest, InsightsRequest, ChartRequest, ProfileRequest, DashboardRequest, TableRequest
+from models.schemas import ChatRequest, InsightsRequest, ChartRequest, ProfileRequest, DashboardRequest, TableRequest, ReportRequest
 
 
 app = FastAPI(
@@ -102,16 +102,14 @@ async def chat(
 ):
     file_path = _get_file_path_or_404(request.file_id)
 
-    answer = _handle_service_errors(
-        agent.answer_question,
+    result = _handle_service_errors(
+        agent.handle_chat_message,
         request.file_id,
         file_path,
         request.question,
     )
 
-    return {
-        "answer": answer,
-    }
+    return result
 
 
 @app.post("/insights")
@@ -166,6 +164,29 @@ async def dashboard(
     )
 
     return data
+@app.post("/report")
+async def full_report(
+    request: ReportRequest,
+):
+    file_path = _get_file_path_or_404(request.file_id)
+
+    df = _handle_service_errors(
+        agent._load_dataframe,
+        request.file_id,
+        file_path,
+    )
+
+    from services.report_service import get_full_report
+
+    report = _handle_service_errors(
+        get_full_report,
+        df,
+        request.filename or Path(file_path).name,
+    )
+
+    return report
+
+
 @app.post("/table")
 async def detailed_table(
     request: TableRequest,

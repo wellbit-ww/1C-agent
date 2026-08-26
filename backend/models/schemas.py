@@ -25,3 +25,8 @@ class DashboardRequest(BaseModel):
 
 class TableRequest(BaseModel):
     file_id: str
+
+
+class ReportRequest(BaseModel):
+    file_id: str
+    filename: str | None = None
