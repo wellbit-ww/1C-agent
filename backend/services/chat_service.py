@@ -33,7 +33,19 @@ logger = logging.getLogger(__name__)
 # Уровень 1: ключевые слова
 # ---------------------------------------------------------------------------
 
-_CHART_MARKERS = ("график", "диаграмм", "построй", "нарисуй", "визуализ")
+_CHART_MARKERS = (
+    "график",
+    "диаграмм",
+    "построй",
+    "нарисуй",
+    "визуализ",
+    "кругов",
+    "пирог",
+    "разбивк",
+    "распределен",
+    "столбик",
+    "гистограм",
+)
 
 _GROUP_KEYWORDS = {
     "client": ("клиент", "заказчик", "контрагент", "компани", "покупател"),
@@ -42,7 +54,7 @@ _GROUP_KEYWORDS = {
     "department": ("подразделен", "отдел", "департамент", "служб"),
 }
 
-_DEFICIT_MARKERS = ("дефицит", "задолжен", "неоплач", "остаток")
+_DEFICIT_MARKERS = ("дефицит", "задолжен", "неоплач", "остаток", "долг", "дебиторк")
 
 _PERIOD_KEYWORDS = {
     "month": ("по месяц", "динамик", "тренд"),
@@ -106,14 +118,29 @@ def _keyword_chart_action(q: str) -> dict | None:
         "value_semantic": _value_semantic_from_text(q),
     }
 
+    # явно названный тип диаграммы («круговая», «столбчатая») важнее периода:
+    # «круговая по месяцам» — это pie по месячным срезам, а не line
+    explicit_type = None
     if "кругов" in q or "пирог" in q:
-        action["chart_type"] = "pie"
+        explicit_type = "pie"
+    elif "столб" in q or "гистограм" in q:
+        explicit_type = "bar"
+    elif "линейн" in q or "линия" in q:
+        explicit_type = "line"
 
-    for period, markers in _PERIOD_KEYWORDS.items():
+    period = None
+    for candidate, markers in _PERIOD_KEYWORDS.items():
         if any(marker in q for marker in markers):
-            action["chart_type"] = "line"
-            action["period"] = period
+            period = candidate
             break
+
+    if explicit_type:
+        action["chart_type"] = explicit_type
+        if period:
+            action["period"] = period
+    elif period:
+        action["chart_type"] = "line"
+        action["period"] = period
 
     return action
 
@@ -232,7 +259,8 @@ def _extract_json(text: str) -> dict | list | None:
 
 
 def _llm_classify(question: str, df: pd.DataFrame) -> list[dict] | None:
-    columns = ", ".join(str(c) for c in df.columns[:40])
+    # длинный список колонок раздувает prompt-eval на CPU — ограничиваем
+    columns = ", ".join(str(c) for c in df.columns[:25])
     prompt = _LLM_PROMPT.format(columns=columns, question=question)
 
     try:
@@ -366,12 +394,23 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
         func = _PERIOD_FUNCS.get(period, data_tools.group_by_month)
         data = func(df, q)
         if "error" in data or not data.get("groups"):
+            logger.warning(
+                "period chart failed: %s | columns=%s | dates=%s",
+                data.get("error"),
+                list(df.columns),
+                data_tools.detect_date_columns(df)["columns"],
+            )
             return {
                 "answer": "Не удалось построить график динамики: "
                 f"{data.get('error', 'нет данных')}."
             }
         title = f"{data['value_column']} {_PERIOD_LABELS[period]}"
-        chart = create_line_chart(data, title=title)
+        if chart_type == "pie":
+            chart = create_pie_chart(data, title=title)
+        elif chart_type == "bar":
+            chart = create_bar_chart(data, title=title)
+        else:
+            chart = create_line_chart(data, title=title)
         if "error" in chart:
             return {"answer": chart["error"]}
         best = max(data["groups"].items(), key=lambda x: x[1])
@@ -429,6 +468,12 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
 
     grouped = grouped.head(top_n)
     if grouped.empty:
+        logger.warning(
+            "chart failed: empty groups | group_col=%s value_col=%s columns=%s",
+            group_col,
+            value_col,
+            list(df.columns),
+        )
         return {"answer": "Нет данных для построения диаграммы."}
 
     data = {

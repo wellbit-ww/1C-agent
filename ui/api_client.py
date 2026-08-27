@@ -1,8 +1,10 @@
+import os
+
 import requests
 
 
-API_BASE_URL = "http://127.0.0.1:8000"
-REQUEST_TIMEOUT = 300
+API_BASE_URL = os.getenv("EXCEL_AGENT_API_URL", "http://127.0.0.1:8000")
+REQUEST_TIMEOUT = int(os.getenv("EXCEL_AGENT_REQUEST_TIMEOUT", "300"))
 
 
 class ApiClientError(Exception):

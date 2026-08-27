@@ -1,14 +1,7 @@
-import os
-
 from langchain_ollama import ChatOllama
 
+from config import MAIN_MODEL, OLLAMA_BASE_URL, ROUTER_MODEL
 from services.exceptions import OllamaUnavailableError
-
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-MAIN_MODEL = os.getenv("EXCEL_AGENT_MODEL", "qwen3:8b")
-# для классификации запросов можно назначить более лёгкую модель,
-# например EXCEL_AGENT_ROUTER_MODEL=qwen3:4b
-ROUTER_MODEL = os.getenv("EXCEL_AGENT_ROUTER_MODEL", MAIN_MODEL)
 
 llm = ChatOllama(
     model=MAIN_MODEL,
@@ -32,7 +25,7 @@ def _get_router_llm() -> ChatOllama:
             reasoning=False,
             # классификация должна вернуть короткий JSON — обрезаем,
             # чтобы зависшая генерация не блокировала чат
-            num_predict=512,
+            num_predict=300,
         )
     return _router_llm
 

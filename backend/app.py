@@ -1,11 +1,28 @@
+import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
+from config import (
+    CORS_ORIGINS,
+    MAIN_MODEL,
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_MB,
+    OLLAMA_BASE_URL,
+    OLLAMA_HEALTHCHECK_TIMEOUT,
+    ROUTER_MODEL,
+)
 from agents.excel_agent import ExcelAgent
-from services.excel_service import read_excel, validate_excel_filename
+from services.excel_service import (
+    read_excel,
+    validate_excel_content,
+    validate_excel_filename,
+)
 from services.cache_service import set_dataframe
-from services.storage_service import save_file, get_file
+from services.storage_service import get_file, get_original_name, save_upload
 from services.exceptions import (
     EmptyDataFrameError,
     InvalidFileError,
@@ -13,15 +30,55 @@ from services.exceptions import (
 )
 from models.schemas import ChatRequest, InsightsRequest, ChartRequest, ProfileRequest, DashboardRequest, TableRequest, ReportRequest
 
+logger = logging.getLogger("excel_agent")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _check_ollama_availability()
+    yield
+
 
 app = FastAPI(
     title="Excel AI Agent",
+    lifespan=lifespan,
 )
 
-UPLOAD_DIR = Path("uploads")
-UPLOAD_DIR.mkdir(exist_ok=True)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 agent = ExcelAgent()
+
+
+def _check_ollama_availability() -> None:
+    """Не роняет сервис, только честно логирует состояние LLM-бэкенда."""
+    try:
+        response = httpx.get(
+            f"{OLLAMA_BASE_URL}/api/tags",
+            timeout=OLLAMA_HEALTHCHECK_TIMEOUT,
+        )
+        models = {m.get("name", "") for m in response.json().get("models", [])}
+    except Exception as exc:
+        logger.warning(
+            "Ollama недоступна (%s): %s. LLM-функции вернут 503, "
+            "статистика и графики будут работать.",
+            OLLAMA_BASE_URL,
+            exc,
+        )
+        return
+
+    for model in {MAIN_MODEL, ROUTER_MODEL}:
+        if not any(model in name for name in models):
+            logger.warning(
+                "Модель %s не найдена в Ollama. Установите: ollama pull %s",
+                model,
+                model,
+            )
 
 
 def _get_file_path_or_404(file_id: str) -> str:
@@ -52,19 +109,38 @@ def root():
     }
 
 
+async def _read_upload_securely(file: UploadFile) -> tuple[str, str]:
+    """Валидирует и сохраняет upload, возвращает (file_id, file_path).
+
+    Имя на диске генерируется нами, размер ограничен, содержимое
+    проверяется по магическим байтам.
+    """
+    try:
+        validate_excel_filename(file.filename)
+
+        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Файл больше допустимого размера {MAX_UPLOAD_MB} МБ",
+            )
+
+        validate_excel_content(data, file.filename)
+    except InvalidFileError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    file_id = save_upload(data, file.filename)
+    return file_id, get_file(file_id)
+
+
 @app.post("/upload")
 async def upload_excel(
     file: UploadFile = File(...),
 ):
+    file_id, file_path = await _read_upload_securely(file)
+
     try:
-        validate_excel_filename(file.filename)
-        file_path = UPLOAD_DIR / file.filename
-
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
-
-        file_id = save_file(str(file_path))
-        df = read_excel(str(file_path))
+        df = read_excel(file_path)
         set_dataframe(file_id, df)
     except (InvalidFileError, EmptyDataFrameError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -78,16 +154,11 @@ async def upload_excel(
 async def analyze_excel(
     file: UploadFile = File(...),
 ):
-    validate_excel_filename(file.filename)
-
-    file_path = UPLOAD_DIR / file.filename
-
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
+    _, file_path = await _read_upload_securely(file)
 
     description = _handle_service_errors(
         agent.analyze_file,
-        str(file_path),
+        file_path,
     )
 
     return {
@@ -181,7 +252,7 @@ async def full_report(
     report = _handle_service_errors(
         get_full_report,
         df,
-        request.filename or Path(file_path).name,
+        request.filename or get_original_name(request.file_id) or Path(file_path).name,
     )
 
     return report
