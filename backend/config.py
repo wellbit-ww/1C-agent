@@ -39,3 +39,20 @@ MAIN_MODEL = os.getenv("EXCEL_AGENT_MODEL", "qwen3:8b")
 ROUTER_MODEL = os.getenv("EXCEL_AGENT_ROUTER_MODEL", MAIN_MODEL)
 # Таймаут health-check при старте, секунды
 OLLAMA_HEALTHCHECK_TIMEOUT = float(os.getenv("EXCEL_AGENT_OLLAMA_HC_TIMEOUT", "3"))
+
+# Персистентность (Фаза 1): SQLite + parquet-кэш
+DATA_DIR = Path(
+    os.getenv("EXCEL_AGENT_DATA_DIR", BACKEND_DIR / "data")
+).resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = Path(os.getenv("EXCEL_AGENT_DB", DATA_DIR / "agent.db"))
+CACHE_DIR = Path(
+    os.getenv("EXCEL_AGENT_CACHE_DIR", DATA_DIR / "cache")
+).resolve()
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# Сколько часов parquet-кэш считается свежим; старше — перепарсинг из исходника
+CACHE_TTL_HOURS = float(os.getenv("EXCEL_AGENT_CACHE_TTL_HOURS", "72"))
+
+# Чат: сколько последних сообщений учитывать как контекст диалога
+CHAT_HISTORY_LIMIT = int(os.getenv("EXCEL_AGENT_CHAT_HISTORY_LIMIT", "20"))
+CHAT_HISTORY_CONTEXT = int(os.getenv("EXCEL_AGENT_CHAT_HISTORY_CONTEXT", "6"))

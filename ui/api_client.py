@@ -102,6 +102,19 @@ def get_full_report(file_id: str, filename: str | None = None, base_url: str = A
         raise ApiClientError("Backend недоступен") from exc
 
 
+def get_history(file_id: str, base_url: str = API_BASE_URL) -> dict:
+    try:
+        response = requests.post(
+            _build_url("/history", base_url),
+            json={"file_id": file_id},
+            timeout=30,
+        )
+        _raise_for_response(response)
+        return response.json()
+    except requests.RequestException as exc:
+        raise ApiClientError("Backend недоступен") from exc
+
+
 def get_dashboard(file_id: str, base_url: str = API_BASE_URL) -> dict:
     try:
         response = requests.post(
@@ -165,6 +178,39 @@ def get_detailed_table(file_id: str, base_url: str = API_BASE_URL) -> list[dict]
         raise ApiClientError("Backend недоступен") from exc
 
     return payload.get("data", [])
+
+def _post_json(path: str, payload: dict, base_url: str = API_BASE_URL) -> dict:
+    try:
+        response = requests.post(
+            _build_url(path, base_url),
+            json=payload,
+            timeout=REQUEST_TIMEOUT,
+        )
+        _raise_for_response(response)
+        return response.json()
+    except requests.RequestException as exc:
+        raise ApiClientError("Backend недоступен") from exc
+
+
+def dashboard_generate(file_id: str, request: str, base_url: str = API_BASE_URL) -> dict:
+    return _post_json("/dashboard/generate", {"file_id": file_id, "request": request}, base_url)
+
+
+def dashboard_edit(file_id: str, request: str, base_url: str = API_BASE_URL) -> dict:
+    return _post_json("/dashboard/edit", {"file_id": file_id, "request": request}, base_url)
+
+
+def dashboard_pin(file_id: str, tile: dict, base_url: str = API_BASE_URL) -> dict:
+    return _post_json("/dashboard/pin", {"file_id": file_id, "tile": tile}, base_url)
+
+
+def dashboard_save_spec(file_id: str, spec: dict, base_url: str = API_BASE_URL) -> dict:
+    return _post_json("/dashboard/spec", {"file_id": file_id, "spec": spec}, base_url)
+
+
+def dashboard_comments(file_id: str, base_url: str = API_BASE_URL) -> dict:
+    return _post_json("/dashboard/comments", {"file_id": file_id}, base_url)
+
 
 def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> dict:
     try:

@@ -125,7 +125,7 @@ class ExcelAgent:
         df = self._load_dataframe(file_id, file_path)
         from services.report_service import get_profile_for_df
         report_type, profile = get_profile_for_df(df)
-        
+
         summary = ""
         if hasattr(profile, "get_summary"):
             summary = profile.get_summary(df)
@@ -133,24 +133,45 @@ class ExcelAgent:
         from services.insights_service import _get_date_period
         period = _get_date_period(df) or "Не определен"
 
-        return {
+        result = {
             "report_type": report_type,
             "summary": summary,
             "kpis": profile.get_kpis(df),
-            "charts": profile.get_charts(df),
+            "charts": [],
             "insights": profile.get_insights(df),
             "metadata": {
                 "rows": len(df),
                 "columns": len(df.columns),
-                "period": period
+                "period": period,
+                "column_names": [str(c) for c in df.columns],
             }
         }
 
-    def handle_chat_message(self, file_id: str, file_path: str, question: str) -> dict:
+        # вкладочный дашборд (v2): сначала пользовательская спека из SQLite,
+        # иначе дефолтная спека профиля; без спек — старый плоский список
+        from services import dashboard_service
+
+        spec = dashboard_service.get_current_spec(file_id, df)
+        if spec is not None:
+            from services.dashboard_engine import render_spec
+            result["tabs"] = render_spec(df, spec)["tabs"]
+            result["spec"] = spec.model_dump()
+        else:
+            result["charts"] = profile.get_charts(df)
+
+        return result
+
+    def handle_chat_message(
+        self,
+        file_id: str,
+        file_path: str,
+        question: str,
+        history: list[dict] | None = None,
+    ) -> dict:
         """Новый обработчик чата: возвращает {"answer": str, "charts": [...]}."""
         df = self._load_dataframe(file_id, file_path)
         from services.chat_service import handle_question
-        return handle_question(df, question)
+        return handle_question(df, question, history=history)
 
     def answer_question(
         self,

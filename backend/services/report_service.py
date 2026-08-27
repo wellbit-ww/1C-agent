@@ -58,8 +58,9 @@ _default_profile = DefaultProfile()
 
 class ConfigAdapterProfile(ReportProfile):
     """Adapter to map new Config-Driven ReportEngine to the old ReportProfile interface."""
-    def __init__(self, engine: ReportEngine):
+    def __init__(self, engine: ReportEngine, legacy: "ReportProfile | None" = None):
         self.engine = engine
+        self.legacy = legacy
 
     def get_kpis(self, df: pd.DataFrame) -> list[dict[str, Any]]:
         return self.engine.get_kpis(df)
@@ -69,9 +70,15 @@ class ConfigAdapterProfile(ReportProfile):
 
     def get_insights(self, df: pd.DataFrame) -> list[str]:
         return self.engine.get_insights(df)
-        
+
     def get_summary(self, df: pd.DataFrame) -> str:
         return self.engine.get_summary(df)
+
+    def get_dashboard_spec(self, df: pd.DataFrame):
+        # реестр YAML не умеет спеки — делегируем legacy-профилю, если он умеет
+        if self.legacy is not None and hasattr(self.legacy, "get_dashboard_spec"):
+            return self.legacy.get_dashboard_spec(df)
+        return None
 
 def get_profile_for_df(df: pd.DataFrame) -> tuple[str, ReportProfile]:
     report_type = detect_report_type(df)
@@ -85,7 +92,7 @@ def get_profile_for_df(df: pd.DataFrame) -> tuple[str, ReportProfile]:
     if config:
         logger.info(f"Используется Metadata Profile: {config.name}")
         engine = ReportEngine(config)
-        return report_type, ConfigAdapterProfile(engine)
+        return report_type, ConfigAdapterProfile(engine, legacy=_old_profiles.get(report_type))
 
     # 2. Fallback to Old Hardcoded Profiles
     logger.info("Metadata Profile не найден, fallback на старые профили.")

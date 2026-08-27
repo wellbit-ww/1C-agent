@@ -59,7 +59,7 @@ class TestFastPathCharts:
 class TestFallback:
     def test_unknown_question_gives_hints(self, sales_df, monkeypatch):
         # LLM недоступна/не распознала -> подсказки вместо пустого ответа
-        monkeypatch.setattr(chat_service, "_llm_classify", lambda q, df: None)
+        monkeypatch.setattr(chat_service, "_llm_classify", lambda *a, **kw: None)
         result = chat_service.handle_question(sales_df, "qwerty asdfgh")
         assert result["charts"] == []
         assert len(result["answer"]) > 30

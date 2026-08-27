@@ -8,11 +8,17 @@ from api_client import (
     ApiClientError,
     chat,
     check_backend,
+    dashboard_comments,
+    dashboard_edit,
+    dashboard_generate,
+    dashboard_pin,
+    dashboard_save_spec,
     get_insights,
     generate_chart,
     get_dashboard,
     get_detailed_table,
     get_full_report,
+    get_history,
     upload_file,
 )
 
@@ -45,6 +51,9 @@ def init_session_state() -> None:
 
     if "report" not in st.session_state:
         st.session_state.report = None
+
+    if "dashboard_comments" not in st.session_state:
+        st.session_state.dashboard_comments = {}
 
 
 def render_sidebar(backend_ok: bool, backend_status: str) -> None:
@@ -93,10 +102,23 @@ def render_upload_block(uploaded_file) -> None:
 
         st.session_state.file_id = file_id
         st.session_state.uploaded_filename = uploaded_file.name
-        st.session_state.messages = []
+        # если этот файл уже загружали раньше — подтягиваем прошлую переписку
+        try:
+            history = get_history(file_id)
+            st.session_state.messages = [
+                {
+                    "role": m["role"],
+                    "content": m["content"],
+                    "charts": m.get("charts", []),
+                }
+                for m in history.get("messages", [])
+            ]
+        except ApiClientError:
+            st.session_state.messages = []
         st.session_state.detailed_table = None
         st.session_state.insights = []
         st.session_state.report = None
+        st.session_state.dashboard_comments = {}
         st.session_state.view = "main"
 
         st.success("✅ Файл успешно загружен")
@@ -230,6 +252,180 @@ def _render_charts_grid(charts: list) -> None:
                     st.plotly_chart(fig, use_container_width=True)
 
 
+_CHART_TYPES = ["bar", "hbar", "pie", "line", "area"]
+_AGGS = ["sum", "mean", "count"]
+_UNITS = ["auto", "rub", "k", "mln", "mlrd"]
+
+
+def _apply_dashboard_result(result: dict) -> None:
+    """Обновить session_state.dashboard новыми вкладками/спекой."""
+    db = st.session_state.dashboard or {}
+    db["tabs"] = result.get("tabs", [])
+    if "spec" in result:
+        db["spec"] = result["spec"]
+    st.session_state.dashboard = db
+    st.session_state.dashboard_comments = {}
+
+
+def _render_dashboard_toolbar(db: dict) -> None:
+    """NL-генерация/правка дашборда + комментарии ИИ + простой редактор."""
+    file_id = st.session_state.file_id
+
+    col_input, col_gen, col_edit, col_comments = st.columns([5, 2, 2, 2])
+    request_text = col_input.text_input(
+        "Что изменить в дашборде?",
+        placeholder="Например: собери дашборд по менеджерам с воронкой",
+        key="dash_nl_request",
+        label_visibility="collapsed",
+    )
+    if col_gen.button("✨ Сгенерировать", use_container_width=True, disabled=not request_text):
+        try:
+            with st.spinner("ИИ собирает дашборд..."):
+                _apply_dashboard_result(dashboard_generate(file_id, request_text))
+            st.rerun()
+        except ApiClientError as exc:
+            st.error(f"Генерация не удалась: {exc}")
+    if col_edit.button("🛠 Применить правку", use_container_width=True, disabled=not request_text):
+        try:
+            with st.spinner("ИИ редактирует дашборд..."):
+                _apply_dashboard_result(dashboard_edit(file_id, request_text))
+            st.rerun()
+        except ApiClientError as exc:
+            st.error(f"Правка не удалась: {exc}")
+    if col_comments.button("💬 Комментарии ИИ", use_container_width=True):
+        try:
+            with st.spinner("ИИ анализирует вкладки..."):
+                result = dashboard_comments(file_id)
+            st.session_state.dashboard_comments = result.get("comments", {})
+        except ApiClientError as exc:
+            st.error(f"Комментарии недоступны: {exc}")
+
+    _render_spec_editor(db)
+
+
+def _render_spec_editor(db: dict) -> None:
+    spec = db.get("spec")
+    if not spec:
+        return
+    column_names = db.get("metadata", {}).get("column_names", [])
+
+    with st.expander("🧩 Простой редактор тайлов"):
+        st.caption("Настройки применяются после кнопки «Сохранить дашборд».")
+        for tab_i, tab in enumerate(spec.get("tabs", [])):
+            st.markdown(f"**Вкладка: {tab['title']}**")
+            for tile_i, tile in enumerate(tab.get("tiles", [])):
+                key = f"ed_{tab_i}_{tile_i}"
+                cols = st.columns([3, 1.4, 1.4, 1.2, 1.4, 0.8])
+                tile["title"] = cols[0].text_input(
+                    "Название", tile["title"], key=f"{key}_t", label_visibility="collapsed"
+                )
+                tile["chart_type"] = cols[1].selectbox(
+                    "Тип", _CHART_TYPES,
+                    index=_CHART_TYPES.index(tile.get("chart_type", "bar")),
+                    key=f"{key}_c", label_visibility="collapsed",
+                )
+                tile["agg"] = cols[2].selectbox(
+                    "Агрегат", _AGGS,
+                    index=_AGGS.index(tile.get("agg", "sum")),
+                    key=f"{key}_a", label_visibility="collapsed",
+                )
+                tile["top_n"] = cols[3].number_input(
+                    "Топ-N", 1, 50, int(tile.get("top_n", 10)),
+                    key=f"{key}_n", label_visibility="collapsed",
+                )
+                tile["unit"] = cols[4].selectbox(
+                    "Единицы", _UNITS,
+                    index=_UNITS.index(tile.get("unit", "auto")),
+                    key=f"{key}_u", label_visibility="collapsed",
+                )
+                tile["_delete"] = cols[5].checkbox("🗑", key=f"{key}_d")
+
+            with st.popover("＋ Добавить график", use_container_width=False):
+                new_title = st.text_input("Название", key=f"add_{tab_i}_title")
+                new_type = st.selectbox("Тип", _CHART_TYPES, key=f"add_{tab_i}_type")
+                new_kind = st.selectbox(
+                    "Источник", ["group", "period", "columns_pattern"], key=f"add_{tab_i}_kind"
+                )
+                new_group = new_value = new_period = new_pattern = None
+                if new_kind == "group":
+                    new_group = st.selectbox("Колонка группировки", column_names, key=f"add_{tab_i}_g")
+                if new_kind in ("group", "period"):
+                    new_value = st.selectbox(
+                        "Метрика (пусто = count)", ["—"] + column_names, key=f"add_{tab_i}_v"
+                    )
+                if new_kind == "period":
+                    new_period = st.selectbox("Период", ["month", "quarter", "year"], key=f"add_{tab_i}_p")
+                if new_kind == "columns_pattern":
+                    new_pattern = st.text_input("Окончание колонок", "(сумма)", key=f"add_{tab_i}_pat")
+                if st.button("Добавить", key=f"add_{tab_i}_btn"):
+                    source = {"kind": new_kind}
+                    if new_group:
+                        source["group_column"] = new_group
+                    if new_value and new_value != "—":
+                        source["value_column"] = new_value
+                    if new_period:
+                        source["period"] = new_period
+                    if new_pattern:
+                        source["columns_pattern"] = new_pattern
+                    tab.setdefault("tiles", []).append(
+                        {
+                            "title": new_title or "Новый график",
+                            "chart_type": new_type,
+                            "source": source,
+                            "agg": "sum",
+                            "top_n": 10,
+                            "unit": "auto",
+                            "target_line": None,
+                            "sort": "desc",
+                        }
+                    )
+                    st.rerun()
+
+        if st.button("💾 Сохранить дашборд", type="primary"):
+            clean_tabs = []
+            for tab in spec.get("tabs", []):
+                tiles = [
+                    {k: v for k, v in tile.items() if not k.startswith("_")}
+                    for tile in tab.get("tiles", [])
+                    if not tile.get("_delete")
+                ]
+                clean_tabs.append({"title": tab["title"], "tiles": tiles})
+            try:
+                with st.spinner("Сохраняю и перерисовываю..."):
+                    _apply_dashboard_result(
+                        dashboard_save_spec(st.session_state.file_id, {"tabs": clean_tabs})
+                    )
+                st.rerun()
+            except ApiClientError as exc:
+                st.error(f"Не сохранилось: {exc}")
+
+
+def _render_tabs(tabs: list) -> None:
+    """Вкладочный дашборд v2: st.tabs + сетка тайлов по 2 в ряд."""
+    comments = st.session_state.get("dashboard_comments", {})
+    tab_titles = [t["title"] for t in tabs]
+    for tab_obj, tab_data in zip(st.tabs(tab_titles), tabs):
+        with tab_obj:
+            comment = comments.get(tab_data["title"])
+            if comment:
+                st.info(f"💬 {comment}")
+            tiles = [t for t in tab_data.get("tiles", [])]
+            for i in range(0, len(tiles), 2):
+                cols = st.columns(2)
+                for j, col in enumerate(cols):
+                    idx = i + j
+                    if idx >= len(tiles):
+                        break
+                    tile = tiles[idx]
+                    with col:
+                        st.markdown(f"**{tile['title']}**")
+                        if "error" in tile:
+                            st.warning(f"Не удалось построить: {tile['error']}")
+                        elif "plotly_json" in tile:
+                            fig = pio.from_json(tile["plotly_json"])
+                            st.plotly_chart(fig, use_container_width=True)
+
+
 def render_dashboard_block() -> None:
     if st.session_state.get("dashboard"):
         db = st.session_state.dashboard
@@ -280,8 +476,12 @@ def render_dashboard_block() -> None:
                 else:
                     st.warning(f"🟡 {insight}")
 
-        # Charts Grid
-        if db.get("charts"):
+        # Charts: вкладки v2 или плоский список (fallback)
+        if db.get("tabs"):
+            st.write("### 📈 Дашборд")
+            _render_dashboard_toolbar(db)
+            _render_tabs(db["tabs"])
+        elif db.get("charts"):
             st.write("### 📈 Графики")
             _render_charts_grid(db["charts"])
 
@@ -496,11 +696,26 @@ _DEFAULT_CHAT_SUGGESTIONS = [
 ]
 
 
-def _render_message_charts(message: dict) -> None:
-    for chart in message.get("charts", []):
+def _render_message_charts(message: dict, msg_idx: int = 0) -> None:
+    for chart_i, chart in enumerate(message.get("charts", [])):
         if "plotly_json" in chart:
             fig = pio.from_json(chart["plotly_json"])
             st.plotly_chart(fig, use_container_width=True)
+        pin_spec = chart.get("pin_spec")
+        # пин доступен, когда у текущего файла есть вкладочный дашборд
+        if pin_spec and st.session_state.get("dashboard", {}).get("tabs"):
+            if st.button(
+                "📌 На дашборд",
+                key=f"pin_{msg_idx}_{chart_i}",
+                help="Закрепить этот график на первой вкладке дашборда",
+            ):
+                try:
+                    result = dashboard_pin(st.session_state.file_id, pin_spec)
+                    st.toast(result.get("message", "Закреплено"), icon="📌")
+                    with st.spinner("Обновляю дашборд..."):
+                        st.session_state.dashboard = get_dashboard(st.session_state.file_id)
+                except ApiClientError as exc:
+                    st.warning(str(exc))
 
 
 def render_chat_block() -> None:
@@ -527,10 +742,10 @@ def render_chat_block() -> None:
             st.session_state.pending_question = suggestion
 
     # История
-    for message in st.session_state.messages:
+    for msg_idx, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            _render_message_charts(message)
+            _render_message_charts(message, msg_idx)
 
     pending = st.session_state.get("pending_question")
     st.session_state.pending_question = None
@@ -577,9 +792,9 @@ def render_chat_block() -> None:
 
     with st.chat_message("assistant"):
         st.markdown(answer)
-        for chart in charts:
-            fig = pio.from_json(chart["plotly_json"])
-            st.plotly_chart(fig, use_container_width=True)
+        _render_message_charts(
+            {"charts": charts}, msg_idx=len(st.session_state.messages)
+        )
 
 
 def main() -> None:

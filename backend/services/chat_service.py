@@ -215,7 +215,7 @@ _LLM_PROMPT = """/no_think
 Ты — роутер запросов к Excel-таблице. Преобразуй вопрос пользователя в JSON-команду (или список команд для составного вопроса).
 
 Колонки таблицы: {columns}
-
+{history_block}
 Возможные команды:
 - {{"action": "stat", "operation": "row_count"|"column_count"|"columns"|"sum"|"mean"|"max"|"min"|"unique_count"|"null_count"|"duplicates_count"}}
 - {{"action": "stat", "operation": "top", "semantic": "<группа>", "n": 5}}
@@ -227,6 +227,7 @@ _LLM_PROMPT = """/no_think
 
 <группа>: client, manager, region, department. <метрика>: revenue, deficit, amount.
 Если вопрос составной («и», «а также») — верни список команд: [{{...}}, {{...}}].
+Если вопрос-уточнение («а по менеджерам?», «а теперь круговая») — учитывай контекст диалога.
 Ответь строго одним JSON, без пояснений и без markdown.
 
 Вопрос: {question}"""
@@ -258,10 +259,34 @@ def _extract_json(text: str) -> dict | list | None:
     return None
 
 
-def _llm_classify(question: str, df: pd.DataFrame) -> list[dict] | None:
+def _build_history_block(history: list[dict] | None) -> str:
+    """Компактный контекст диалога для follow-up вопросов («а по менеджерам?»)."""
+    if not history:
+        return ""
+
+    from config import CHAT_HISTORY_CONTEXT
+
+    lines = []
+    for message in history[-CHAT_HISTORY_CONTEXT:]:
+        role = "Пользователь" if message.get("role") == "user" else "Ассистент"
+        text = str(message.get("content", ""))[:150]
+        lines.append(f"{role}: {text}")
+
+    return "Контекст диалога:\n" + "\n".join(lines) + "\n"
+
+
+def _llm_classify(
+    question: str,
+    df: pd.DataFrame,
+    history: list[dict] | None = None,
+) -> list[dict] | None:
     # длинный список колонок раздувает prompt-eval на CPU — ограничиваем
     columns = ", ".join(str(c) for c in df.columns[:25])
-    prompt = _LLM_PROMPT.format(columns=columns, question=question)
+    prompt = _LLM_PROMPT.format(
+        columns=columns,
+        history_block=_build_history_block(history),
+        question=question,
+    )
 
     try:
         raw = classify(prompt)
@@ -413,6 +438,17 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
             chart = create_line_chart(data, title=title)
         if "error" in chart:
             return {"answer": chart["error"]}
+        chart["pin_spec"] = {
+            "title": title,
+            "chart_type": chart_type if chart_type in ("bar", "pie", "line") else "line",
+            "source": {
+                "kind": "period",
+                "period": period,
+                "value_column": data.get("value_column"),
+            },
+            "agg": "sum",
+            "sort": "none",
+        }
         best = max(data["groups"].items(), key=lambda x: x[1])
         total = sum(data["groups"].values())
         return {
@@ -490,6 +526,17 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
     if "error" in chart:
         return {"answer": chart["error"]}
 
+    chart["pin_spec"] = {
+        "title": title,
+        "chart_type": "pie" if chart_type == "pie" else "bar",
+        "source": {
+            "kind": "group",
+            "group_column": group_col,
+            "value_column": value_col,
+        },
+        "agg": agg,
+        "top_n": top_n,
+    }
     leaders = ", ".join(
         f"{name} ({_fmt(value)})" for name, value in list(grouped.items())[:3]
     )
@@ -539,32 +586,41 @@ def _help_answer(df: pd.DataFrame) -> dict:
 # Точка входа
 # ---------------------------------------------------------------------------
 
-def handle_question(df: pd.DataFrame, question: str) -> dict:
-    """Возвращает {"answer": str, "charts": [chart_dict, ...]}."""
-    q = question.lower().strip()
+# маркеры, которые делают часть составного вопроса «самостоятельной» просьбой
+_INTENT_MARKERS = _CHART_MARKERS + (
+    "топ",
+    "лучш",
+    "сколько",
+    "сумм",
+    "общ",
+    "средн",
+    "максим",
+    "миним",
+    "динамик",
+    "инсайт",
+    "выручк",
+    "дефицит",
+)
 
-    # 1. Быстрый путь: явный запрос графика по ключевым словам
-    chart_action = _keyword_chart_action(q)
-    if chart_action:
-        chart_action["question"] = question
-        result = _exec_chart(df, chart_action)
-        return {"answer": result["answer"], "charts": [result["chart"]] if result.get("chart") else []}
+_COMPOUND_SEPARATORS = re.compile(r"\s+(?:и|а также|также|плюс)\s+")
 
-    # 2. Быстрый путь: известные keyword-интенты статистики/трендов
-    stat_action = _keyword_stat_action(question)
-    if stat_action:
-        stat_action["question"] = question
-        if stat_action.get("action") == "chart":
-            result = _exec_chart(df, stat_action)
-        else:
-            result = _exec_stat(df, stat_action)
-        return {"answer": result["answer"], "charts": [result["chart"]] if result.get("chart") else []}
 
-    # 3. LLM-классификация в JSON (поддерживает составные вопросы)
-    actions = _llm_classify(question, df)
-    if not actions:
-        return {"answer": _help_answer(df)["answer"], "charts": []}
+def _is_compound(q: str) -> bool:
+    """Составной вопрос: минимум две части с самостоятельными просьбами.
 
+    Для них быстрый путь отвечает только на первую часть — поэтому
+    такие вопросы сначала отправляем в LLM-разбор (он вернёт список команд).
+    """
+    parts = [part.strip() for part in _COMPOUND_SEPARATORS.split(q) if part.strip()]
+    if len(parts) < 2:
+        return False
+    meaningful = sum(
+        1 for part in parts if any(marker in part for marker in _INTENT_MARKERS)
+    )
+    return meaningful >= 2
+
+
+def _execute_actions(df: pd.DataFrame, question: str, actions: list[dict]) -> dict:
     answers: list[str] = []
     charts: list[dict] = []
 
@@ -587,3 +643,43 @@ def handle_question(df: pd.DataFrame, question: str) -> dict:
             charts.append(result["chart"])
 
     return {"answer": "\n\n".join(answers), "charts": charts}
+
+
+def handle_question(
+    df: pd.DataFrame,
+    question: str,
+    history: list[dict] | None = None,
+) -> dict:
+    """Возвращает {"answer": str, "charts": [chart_dict, ...]}."""
+    q = question.lower().strip()
+
+    # 0. Составной вопрос — приоритет LLM-разбора (вернёт список команд).
+    # Если LLM недоступна — проваливаемся в быстрый путь (частичный ответ).
+    if _is_compound(q):
+        actions = _llm_classify(question, df, history)
+        if actions:
+            return _execute_actions(df, question, actions)
+
+    # 1. Быстрый путь: явный запрос графика по ключевым словам
+    chart_action = _keyword_chart_action(q)
+    if chart_action:
+        chart_action["question"] = question
+        result = _exec_chart(df, chart_action)
+        return {"answer": result["answer"], "charts": [result["chart"]] if result.get("chart") else []}
+
+    # 2. Быстрый путь: известные keyword-интенты статистики/трендов
+    stat_action = _keyword_stat_action(question)
+    if stat_action:
+        stat_action["question"] = question
+        if stat_action.get("action") == "chart":
+            result = _exec_chart(df, stat_action)
+        else:
+            result = _exec_stat(df, stat_action)
+        return {"answer": result["answer"], "charts": [result["chart"]] if result.get("chart") else []}
+
+    # 3. LLM-классификация в JSON (поддерживает составные вопросы и контекст)
+    actions = _llm_classify(question, df, history)
+    if not actions:
+        return {"answer": _help_answer(df)["answer"], "charts": []}
+
+    return _execute_actions(df, question, actions)

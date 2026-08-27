@@ -30,3 +30,22 @@ class TableRequest(BaseModel):
 class ReportRequest(BaseModel):
     file_id: str
     filename: str | None = None
+
+
+class HistoryRequest(BaseModel):
+    file_id: str
+
+
+class DashboardGenerateRequest(BaseModel):
+    file_id: str
+    request: str
+
+
+class DashboardPinRequest(BaseModel):
+    file_id: str
+    tile: dict
+
+
+class DashboardSpecSaveRequest(BaseModel):
+    file_id: str
+    spec: dict

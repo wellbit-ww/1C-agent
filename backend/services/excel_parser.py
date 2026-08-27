@@ -253,12 +253,50 @@ def _parse_flat_rows(rows: list[tuple[tuple, int]]) -> pd.DataFrame | None:
     return df.reset_index(drop=True)
 
 
+def _parse_csv(file_path: str) -> dict[str, pd.DataFrame]:
+    """CSV из 1С: обычно cp1251 и разделитель «;» — всё это нюхаем."""
+    from pathlib import Path
+
+    df = None
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            df = pd.read_csv(
+                file_path,
+                sep=None,
+                engine="python",
+                encoding=encoding,
+                dtype=str,
+            )
+            break
+        except (UnicodeDecodeError, pd.errors.ParserError) as exc:
+            last_error = exc
+    if df is None:
+        raise ValueError(f"Не удалось прочитать CSV: {last_error}")
+
+    # та же чистка, что в xlsx-парсере: тире -> пусто, «1 234,56» -> число
+    for col in df.columns:
+        df[col] = df[col].map(_coerce_scalar)
+        numeric_ratio = pd.to_numeric(df[col], errors="coerce").notna().mean()
+        if numeric_ratio >= 0.8:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df.columns = _dedupe([_clean_name(c) for c in df.columns])
+    df = df.dropna(axis=1, how="all")
+    name = Path(file_path).stem
+    return {name: df} if not df.empty else {}
+
+
 def parse_excel(file_path: str) -> dict[str, pd.DataFrame]:
     """Читает все видимые листы и возвращает {имя_листа: DataFrame}.
 
     Листы с outline-уровнями разбираются как иерархические отчёты 1С,
     остальные — как плоские таблицы с эвристическим поиском шапки.
+    CSV обрабатывается отдельной веткой (нюх разделителя и кодировки).
     """
+    if str(file_path).lower().endswith(".csv"):
+        return _parse_csv(file_path)
+
     wb = openpyxl.load_workbook(file_path, data_only=True)
     sheets: dict[str, pd.DataFrame] = {}
 

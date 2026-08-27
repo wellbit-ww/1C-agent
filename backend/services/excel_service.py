@@ -5,7 +5,7 @@ import pandas as pd
 from services.exceptions import EmptyDataFrameError, InvalidFileError
 from services.excel_parser import parse_excel
 
-ALLOWED_EXTENSIONS = {".xlsx", ".xls"}
+ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 
 # Магические байты: .xlsx — это ZIP-архив, .xls — OLE2 compound document
 _XLSX_SIGNATURE = b"PK\x03\x04"
@@ -20,7 +20,7 @@ def validate_excel_filename(filename: str | None) -> None:
 
     if extension not in ALLOWED_EXTENSIONS:
         raise InvalidFileError(
-            "Поддерживаются только файлы .xlsx и .xls"
+            "Поддерживаются только файлы .xlsx, .xls и .csv"
         )
 
 
@@ -31,6 +31,11 @@ def validate_excel_content(data: bytes, filename: str | None) -> None:
         raise InvalidFileError("Файл слишком мал или пуст")
 
     extension = Path(filename or "").suffix.lower()
+
+    # у CSV нет магических байтов — текстовый формат проверяется при парсинге
+    if extension == ".csv":
+        return
+
     is_xlsx = data.startswith(_XLSX_SIGNATURE)
     is_xls = data.startswith(_XLS_SIGNATURE)
 

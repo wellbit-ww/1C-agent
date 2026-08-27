@@ -7,6 +7,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import (
+    CHAT_HISTORY_LIMIT,
     CORS_ORIGINS,
     MAIN_MODEL,
     MAX_UPLOAD_BYTES,
@@ -21,6 +22,7 @@ from services.excel_service import (
     validate_excel_content,
     validate_excel_filename,
 )
+from services import db_service
 from services.cache_service import set_dataframe
 from services.storage_service import get_file, get_original_name, save_upload
 from services.exceptions import (
@@ -28,7 +30,19 @@ from services.exceptions import (
     InvalidFileError,
     OllamaUnavailableError,
 )
-from models.schemas import ChatRequest, InsightsRequest, ChartRequest, ProfileRequest, DashboardRequest, TableRequest, ReportRequest
+from models.schemas import (
+    ChatRequest,
+    DashboardGenerateRequest,
+    DashboardPinRequest,
+    DashboardRequest,
+    DashboardSpecSaveRequest,
+    HistoryRequest,
+    InsightsRequest,
+    ChartRequest,
+    ProfileRequest,
+    TableRequest,
+    ReportRequest,
+)
 
 logger = logging.getLogger("excel_agent")
 
@@ -173,14 +187,40 @@ async def chat(
 ):
     file_path = _get_file_path_or_404(request.file_id)
 
+    history = db_service.get_chat_history(
+        request.file_id, limit=CHAT_HISTORY_LIMIT
+    )
+
     result = _handle_service_errors(
         agent.handle_chat_message,
         request.file_id,
         file_path,
         request.question,
+        history,
     )
 
+    if result is not None:
+        try:
+            db_service.add_chat_message(request.file_id, "user", request.question)
+            db_service.add_chat_message(
+                request.file_id, "assistant", result["answer"], result.get("charts")
+            )
+        except Exception as exc:
+            logger.warning("Не удалось сохранить сообщения чата: %s", exc)
+
     return result
+
+
+@app.post("/history")
+async def chat_history(
+    request: HistoryRequest,
+):
+    _get_file_path_or_404(request.file_id)
+    return {
+        "messages": db_service.get_chat_history(
+            request.file_id, limit=CHAT_HISTORY_LIMIT
+        )
+    }
 
 
 @app.post("/insights")
@@ -235,6 +275,113 @@ async def dashboard(
     )
 
     return data
+
+
+# ---------------------------------------------------------------------------
+# Дашборды v2: NL-генерация/редактирование, пин из чата, комментарии
+# ---------------------------------------------------------------------------
+
+def _render_and_respond(df, spec) -> dict:
+    from services.dashboard_engine import render_spec
+
+    rendered = render_spec(df, spec)
+    return {"tabs": rendered["tabs"], "spec": spec.model_dump()}
+
+
+def _load_df(file_id: str, file_path: str):
+    return _handle_service_errors(agent._load_dataframe, file_id, file_path)
+
+
+@app.post("/dashboard/generate")
+async def dashboard_generate(request: DashboardGenerateRequest):
+    """Собрать дашборд с нуля по текстовому запросу (LLM -> спека)."""
+    from services import dashboard_service
+
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _load_df(request.file_id, file_path)
+    spec = _handle_service_errors(dashboard_service.generate_spec_nl, df, request.request)
+    if spec is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Не удалось собрать дашборд по запросу — попробуйте переформулировать",
+        )
+    dashboard_service.save_spec(request.file_id, spec)
+    return _render_and_respond(df, spec)
+
+
+@app.post("/dashboard/edit")
+async def dashboard_edit(request: DashboardGenerateRequest):
+    """Отредактировать текущий дашборд текстовой командой."""
+    from services import dashboard_service
+
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _load_df(request.file_id, file_path)
+    current = dashboard_service.get_current_spec(request.file_id, df)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Нет дашборда для редактирования")
+    spec = _handle_service_errors(
+        dashboard_service.generate_spec_nl, df, request.request, current
+    )
+    if spec is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Не удалось применить правку — попробуйте переформулировать",
+        )
+    dashboard_service.save_spec(request.file_id, spec)
+    return _render_and_respond(df, spec)
+
+
+@app.post("/dashboard/pin")
+async def dashboard_pin(request: DashboardPinRequest):
+    """Закрепить график из чата на первой вкладке дашборда."""
+    from services import dashboard_service
+
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _load_df(request.file_id, file_path)
+    ok, message = _handle_service_errors(
+        dashboard_service.pin_tile, request.file_id, df, request.tile
+    )
+    if not ok:
+        raise HTTPException(status_code=422, detail=message)
+    return {"ok": True, "message": message}
+
+
+@app.post("/dashboard/spec")
+async def dashboard_spec_save(request: DashboardSpecSaveRequest):
+    """Сохранить спеку из простого редактора UI."""
+    from models.dashboard_spec import DashboardSpec
+    from pydantic import ValidationError
+    from services import dashboard_service
+
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _load_df(request.file_id, file_path)
+    try:
+        spec = DashboardSpec.model_validate(request.spec)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"Невалидная спека: {exc.errors()[0]['msg']}")
+    dashboard_service.save_spec(request.file_id, spec)
+    return _render_and_respond(df, spec)
+
+
+@app.post("/dashboard/comments")
+async def dashboard_comments(request: DashboardRequest):
+    """Авто-комментарии LLM к вкладкам (кэшируются по хэшу данных)."""
+    from services import dashboard_service
+
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _load_df(request.file_id, file_path)
+    spec = dashboard_service.get_current_spec(request.file_id, df)
+    if spec is None:
+        raise HTTPException(status_code=404, detail="Нет дашборда для комментариев")
+    from services.dashboard_engine import render_spec
+
+    rendered = render_spec(df, spec)
+    comments = _handle_service_errors(
+        dashboard_service.generate_comments, request.file_id, df, rendered["tabs"]
+    )
+    return {"comments": comments}
+
+
 @app.post("/report")
 async def full_report(
     request: ReportRequest,

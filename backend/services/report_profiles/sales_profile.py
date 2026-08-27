@@ -4,6 +4,7 @@ from services.report_profiles.base_profile import ReportProfile
 from services.data_tools import group_sum, get_top_n, group_by_month
 from services.chart_service import create_bar_chart, create_region_chart, create_monthly_trend_chart
 from services.column_resolver import resolve_semantic_column
+from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
 
 class SalesProfile(ReportProfile):
     def _format_number(self, value: float) -> str:
@@ -60,6 +61,116 @@ class SalesProfile(ReportProfile):
             
         return charts
         
+    def get_dashboard_spec(self, df: pd.DataFrame) -> DashboardSpec:
+        """Вкладочный дашборд «Воронка / Менеджеры / Клиенты» (эталон 1С)."""
+        sum_col = resolve_semantic_column(df, "", semantic="sales", dtype="numeric")
+        total = float(df[sum_col].sum()) if sum_col else None
+
+        funnel_tab = Tab(
+            title="Воронка",
+            tiles=[
+                Tile(
+                    title="Этапы продаж по сумме",
+                    chart_type="hbar",
+                    source=TileSource(kind="columns_pattern", columns_pattern="(сумма)"),
+                    unit="auto",
+                    sort="desc",
+                ),
+                Tile(
+                    title="Этапы продаж по количеству",
+                    chart_type="hbar",
+                    source=TileSource(kind="columns_pattern", columns_pattern="(количество)"),
+                    unit="auto",
+                    sort="desc",
+                ),
+                Tile(
+                    title="Динамика продаж по месяцам",
+                    chart_type="area",
+                    source=TileSource(kind="period", period="month", value_semantic="revenue"),
+                    unit="auto",
+                    sort="none",
+                ),
+                Tile(
+                    title="Распределение сделок по подразделениям",
+                    chart_type="pie",
+                    source=TileSource(kind="group", group_semantic="department"),
+                    agg="count",
+                    top_n=12,
+                ),
+            ],
+        )
+
+        managers_tab = Tab(
+            title="Менеджеры",
+            tiles=[
+                Tile(
+                    title="Средний чек по менеджерам",
+                    chart_type="bar",
+                    source=TileSource(
+                        kind="group", group_semantic="manager", value_semantic="revenue"
+                    ),
+                    agg="mean",
+                    top_n=15,
+                    unit="auto",
+                ),
+                Tile(
+                    title="Сумма по менеджерам",
+                    chart_type="bar",
+                    source=TileSource(
+                        kind="group", group_semantic="manager", value_semantic="revenue"
+                    ),
+                    agg="sum",
+                    top_n=15,
+                    unit="auto",
+                    target_line=total,
+                ),
+                Tile(
+                    title="Продажи по менеджерам",
+                    chart_type="bar",
+                    source=TileSource(kind="group", group_semantic="manager"),
+                    agg="count",
+                    top_n=15,
+                    unit="auto",
+                ),
+            ],
+        )
+
+        clients_tab = Tab(
+            title="Клиенты",
+            tiles=[
+                Tile(
+                    title="Сумма по клиентам",
+                    chart_type="hbar",
+                    source=TileSource(
+                        kind="group", group_semantic="client", value_semantic="revenue"
+                    ),
+                    agg="sum",
+                    top_n=10,
+                    unit="auto",
+                ),
+                Tile(
+                    title="Средний чек по клиентам",
+                    chart_type="hbar",
+                    source=TileSource(
+                        kind="group", group_semantic="client", value_semantic="revenue"
+                    ),
+                    agg="mean",
+                    top_n=10,
+                    unit="auto",
+                ),
+                Tile(
+                    title="Продажи по клиентам",
+                    chart_type="hbar",
+                    source=TileSource(kind="group", group_semantic="client"),
+                    agg="count",
+                    top_n=10,
+                    unit="auto",
+                ),
+            ],
+        )
+
+        return DashboardSpec(tabs=[funnel_tab, managers_tab, clients_tab])
+
     def get_insights(self, df: pd.DataFrame) -> list[str]:
         insights = []
         
