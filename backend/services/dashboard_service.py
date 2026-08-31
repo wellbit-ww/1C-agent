@@ -11,7 +11,7 @@ from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
 from config import OLLAMA_BASE_URL, ROUTER_MODEL, MAIN_MODEL
-from models.dashboard_spec import DashboardSpec, Tile
+from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
 from services import db_service
 from services.exceptions import OllamaUnavailableError
 
@@ -31,8 +31,11 @@ def get_current_spec(file_id: str, df: pd.DataFrame) -> DashboardSpec | None:
             db_service.delete_dashboard_spec(file_id)
 
     from services.report_service import get_profile_for_df
+    from services.storage_service import get_original_name
 
-    _, profile = get_profile_for_df(df)
+    _, profile = get_profile_for_df(
+        df, filename=get_original_name(file_id)
+    )
     builder = getattr(profile, "get_dashboard_spec", None)
     if builder is None:
         return None
@@ -84,7 +87,7 @@ def _get_spec_llm() -> ChatOllama:
             base_url=OLLAMA_BASE_URL,
             temperature=0,
             reasoning=False,
-            num_predict=2000,
+            num_predict=2500,
         )
     return _spec_llm
 
@@ -92,36 +95,261 @@ def _get_spec_llm() -> ChatOllama:
 _SPEC_PROMPT = """Ты конфигуратор BI-дашборда. По просьбе пользователя собери JSON-спеку дашборда для Excel-таблицы.
 
 Схема (строго):
-{{"tabs": [{{"title": "Имя вкладки", "tiles": [{{"title": "...", "chart_type": "bar|hbar|pie|line|area", "source": {{...}}, "agg": "sum|mean|count", "top_n": 10, "unit": "auto|rub|k|mln|mlrd", "target_line": null, "sort": "desc|asc|none"}}]}}]}}
+{"tabs": [{"title": "Имя вкладки", "tiles": [{"title": "...", "chart_type": "bar|hbar|pie|line|area", "source": {...}, "agg": "sum|mean|count", "top_n": 10, "unit": "auto|rub|k|mln|mlrd", "target_line": null, "sort": "desc|asc|none"}]}]}
 
 Варианты source:
-- {{"kind": "group", "group_column": "<колонка>", "value_column": "<колонка>"}} — группировка по категории
-- {{"kind": "period", "period": "month|quarter|year", "value_column": "<колонка>"}} — динамика по дате
-- {{"kind": "columns_pattern", "columns_pattern": "(сумма)"}} — агрегат по КАЖДОЙ колонке с таким окончанием (воронка этапов)
+- {"kind": "group", "group_column": "<колонка>", "value_column": "<колонка>"} — группировка по категории
+- {"kind": "period", "period": "month|quarter|year", "value_column": "<колонка>"} — динамика по дате
+- {"kind": "columns_pattern", "columns_pattern": "(сумма)"} — агрегат по КАЖДОЙ колонке с таким окончанием (воронка этапов)
 
 Правила:
-- Используй ТОЛЬКО колонки из списка ниже, имена копируй посимвольно.
+- Используй ТОЛЬКО колонки из списка ниже, имена копируй посимвольно. Не выдумывай колонки (в том числе «инвестиции»), если их нет в списке.
+- chart_type ТОЛЬКО: bar, hbar, pie, line, area. Для воронки — hbar + source.kind=columns_pattern. ЗАПРЕЩЕНО chart_type=funnel.
 - value_column нужен для agg sum/mean; для agg=count его можно опустить.
 - 1–4 вкладки, 1–4 тайла на вкладку.
-{mode_block}
-Колонки таблицы: {columns}
-
-Запрос пользователя: {request}
+__MODE_BLOCK__
+Колонки таблицы: __COLUMNS__
+Запрос пользователя: __REQUEST__
 
 Ответ — ТОЛЬКО валидный JSON без markdown и пояснений."""
 
+_FUNNEL_HINT = re.compile(r"воронк|этап", re.I)
+
+_CHART_ALIASES = {
+    "funnel": "hbar",
+    "воронка": "hbar",
+    "histogram": "bar",
+    "hist": "bar",
+    "column": "bar",
+    "columns": "bar",
+    "donut": "pie",
+    "doughnut": "pie",
+    "scatter": "bar",
+    "table": "bar",
+    "kpi": "bar",
+    "horizontalbar": "hbar",
+    "horizontal_bar": "hbar",
+}
+
+_KIND_ALIASES = {
+    "funnel": "columns_pattern",
+    "stages": "columns_pattern",
+    "pipeline": "columns_pattern",
+    "воронка": "columns_pattern",
+    "aggregate": "group",
+    "groupby": "group",
+    "category": "group",
+    "time": "period",
+    "timeseries": "period",
+    "trend": "period",
+}
+
+_AGG_ALIASES = {
+    "average": "mean",
+    "avg": "mean",
+    "total": "sum",
+    "len": "count",
+    "size": "count",
+}
+
+_VALID_CHARTS = {"bar", "hbar", "pie", "line", "area"}
+_VALID_AGGS = {"sum", "mean", "count"}
+_VALID_KINDS = {"group", "columns_pattern", "period"}
+_VALID_PERIODS = {"month", "quarter", "year"}
+_VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
+_VALID_SORTS = {"desc", "asc", "none"}
+
+_GROUP_HINTS = (
+    ("менеджер", "менеджер"),
+    ("клиент", "клиент"),
+    ("компани", "компани"),
+    ("подраздел", "подраздел"),
+    ("поставщик", "поставщик"),
+    ("город", "город"),
+    ("регион", "регион"),
+)
+
 
 def _extract_json(text: str) -> str | None:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    return match.group(0) if match else None
+    if not text:
+        return None
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
+    blob = fence.group(1) if fence else cleaned
+    start = blob.find("{")
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        obj, _ = decoder.raw_decode(blob[start:])
+        return json.dumps(obj, ensure_ascii=False)
+    except json.JSONDecodeError:
+        pass
+    candidate = re.sub(r",\s*([}\]])", r"\1", blob[start:])
+    match = re.search(r"\{.*\}", candidate, re.DOTALL)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(0))
+        return json.dumps(obj, ensure_ascii=False)
+    except json.JSONDecodeError:
+        return match.group(0)
 
 
-def generate_spec_nl(
+def _normalize_chart(value) -> str:
+    v = str(value or "bar").lower().strip().replace("-", "_").replace(" ", "")
+    if v in _VALID_CHARTS:
+        return v
+    if v in _CHART_ALIASES:
+        return _CHART_ALIASES[v]
+    if "pie" in v or "donut" in v:
+        return "pie"
+    if "area" in v:
+        return "area"
+    if "line" in v:
+        return "line"
+    if "hbar" in v or "horizontal" in v:
+        return "hbar"
+    return "bar"
+
+
+def _best_column(df: pd.DataFrame, name) -> str | None:
+    if not name:
+        return None
+    name = str(name).strip()
+    if name in df.columns:
+        return name
+    lowered = name.lower()
+    for col in df.columns:
+        if str(col).strip().lower() == lowered:
+            return col
+    matches = [
+        col for col in df.columns
+        if lowered in str(col).lower() or str(col).lower() in lowered
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda col: abs(len(str(col)) - len(name)))
+
+
+def _has_pattern(df: pd.DataFrame, pattern: str) -> bool:
+    return any(str(c).endswith(pattern) for c in df.columns)
+
+
+def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
+    if not isinstance(tile, dict):
+        return None
+    title = str(tile.get("title") or "График")[:120]
+    chart = _normalize_chart(tile.get("chart_type"))
+    source = tile.get("source") if isinstance(tile.get("source"), dict) else {}
+    kind_raw = str(source.get("kind") or "group").lower().strip()
+    kind = _KIND_ALIASES.get(kind_raw, kind_raw)
+    if kind not in _VALID_KINDS:
+        if source.get("columns_pattern") or "funnel" in kind_raw or "ворон" in kind_raw:
+            kind = "columns_pattern"
+        elif source.get("period"):
+            kind = "period"
+        else:
+            kind = "group"
+
+    src: dict = {"kind": kind}
+    if kind == "columns_pattern":
+        pattern = str(source.get("columns_pattern") or "(сумма)")
+        if not _has_pattern(df, pattern):
+            pattern = next(
+                (p for p in ("(сумма)", "(количество)") if _has_pattern(df, p)),
+                None,
+            )
+        if not pattern:
+            return None
+        src["columns_pattern"] = pattern
+        if chart not in ("bar", "hbar"):
+            chart = "hbar"
+    elif kind == "period":
+        period = str(source.get("period") or "month").lower()
+        src["period"] = period if period in _VALID_PERIODS else "month"
+        value_column = _best_column(df, source.get("value_column"))
+        if value_column:
+            src["value_column"] = value_column
+        if source.get("value_semantic"):
+            src["value_semantic"] = source["value_semantic"]
+        if "value_column" not in src and "value_semantic" not in src:
+            return None
+    else:
+        group_column = _best_column(df, source.get("group_column"))
+        if group_column:
+            src["group_column"] = group_column
+        elif source.get("group_semantic"):
+            src["group_semantic"] = source["group_semantic"]
+        else:
+            return None
+        value_column = _best_column(df, source.get("value_column"))
+        if value_column:
+            src["value_column"] = value_column
+        if source.get("value_semantic"):
+            src["value_semantic"] = source["value_semantic"]
+
+    agg = _AGG_ALIASES.get(str(tile.get("agg") or "sum").lower(), str(tile.get("agg") or "sum").lower())
+    if agg not in _VALID_AGGS:
+        agg = "sum"
+    unit = str(tile.get("unit") or "auto").lower()
+    if unit not in _VALID_UNITS:
+        unit = "auto"
+    sort = str(tile.get("sort") or "desc").lower()
+    if sort not in _VALID_SORTS:
+        sort = "desc"
+    try:
+        top_n = int(tile.get("top_n") or 10)
+    except (TypeError, ValueError):
+        top_n = 10
+
+    out = {
+        "title": title,
+        "chart_type": chart,
+        "source": src,
+        "agg": agg,
+        "top_n": max(1, min(50, top_n)),
+        "unit": unit,
+        "sort": sort,
+    }
+    if tile.get("target_line") is not None:
+        try:
+            out["target_line"] = float(tile["target_line"])
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _coerce_spec_dict(data: dict, df: pd.DataFrame) -> dict:
+    if not isinstance(data, dict):
+        return {"tabs": []}
+    if "tabs" not in data and ("tiles" in data or "title" in data):
+        data = {"tabs": [data]}
+    tabs_in = data.get("tabs")
+    if not isinstance(tabs_in, list):
+        return {"tabs": []}
+    tabs = []
+    for tab in tabs_in:
+        if not isinstance(tab, dict):
+            continue
+        tiles_in = tab.get("tiles") or []
+        if not isinstance(tiles_in, list):
+            continue
+        tiles = [t for t in (_coerce_tile(tile, df) for tile in tiles_in) if t]
+        if tiles:
+            tabs.append({
+                "title": str(tab.get("title") or "Обзор")[:80],
+                "tiles": tiles[:8],
+            })
+    data["tabs"] = tabs[:8]
+    return data
+
+
+def _build_spec_prompt(
     df: pd.DataFrame,
     request: str,
-    current_spec: DashboardSpec | None = None,
-) -> DashboardSpec | None:
-    """LLM -> JSON -> pydantic-валидация. При любой ошибке — None (fallback)."""
+    current_spec: DashboardSpec | None,
+) -> str:
     if current_spec is not None:
         mode_block = (
             "Это РЕДАКТИРОВАНИЕ: возьми текущую спеку ниже и примени правку пользователя "
@@ -130,12 +358,136 @@ def generate_spec_nl(
         )
     else:
         mode_block = "Собери спеку с нуля по запросу.\n"
-
-    prompt = _SPEC_PROMPT.format(
-        mode_block=mode_block,
-        columns=", ".join(df.columns[:60]),
-        request=request,
+    return (
+        _SPEC_PROMPT
+        .replace("__MODE_BLOCK__", mode_block)
+        .replace("__COLUMNS__", ", ".join(str(c) for c in df.columns[:60]))
+        .replace("__REQUEST__", request or "")
     )
+
+
+def build_spec_from_request(df: pd.DataFrame, request: str) -> DashboardSpec | None:
+    """Детерминированная спека по ключевым словам запроса (без LLM)."""
+    q = (request or "").lower()
+    tabs: list[Tab] = []
+
+    if _FUNNEL_HINT.search(q) and _has_pattern(df, "(сумма)"):
+        tiles = [
+            Tile(
+                title="Воронка — сумма по этапам",
+                chart_type="hbar",
+                source=TileSource(kind="columns_pattern", columns_pattern="(сумма)"),
+                unit="auto",
+                sort="none",
+            )
+        ]
+        if _has_pattern(df, "(количество)"):
+            tiles.append(
+                Tile(
+                    title="Воронка — количество по этапам",
+                    chart_type="hbar",
+                    source=TileSource(kind="columns_pattern", columns_pattern="(количество)"),
+                    agg="sum",
+                    sort="none",
+                )
+            )
+        tabs.append(Tab(title="Воронка", tiles=tiles))
+
+    from services.generic_dashboard import pick_groupers, pick_metrics
+
+    metrics = pick_metrics(df)
+    groupers = pick_groupers(df)
+    overview: list[Tile] = []
+    used: set[str] = set()
+    want_pie = any(w in q for w in ("кругов", "пирог", "donut"))
+
+    for word, needle in _GROUP_HINTS:
+        if word not in q:
+            continue
+        col = next((c for c in df.columns if needle in str(c).lower()), None)
+        if col is None or col in used:
+            continue
+        used.add(str(col))
+        if metrics:
+            overview.append(
+                Tile(
+                    title=f"{metrics[0]} по «{col}»",
+                    chart_type="pie" if want_pie and len(overview) == 0 else "hbar",
+                    source=TileSource(
+                        kind="group",
+                        group_column=col,
+                        value_column=metrics[0],
+                    ),
+                    agg="sum",
+                    top_n=10,
+                    unit="auto",
+                )
+            )
+        else:
+            overview.append(
+                Tile(
+                    title=f"Количество по «{col}»",
+                    chart_type="pie" if want_pie else "bar",
+                    source=TileSource(kind="group", group_column=col),
+                    agg="count",
+                    top_n=10,
+                )
+            )
+
+    if "инвест" in q:
+        inv_col = next((c for c in df.columns if "инвест" in str(c).lower()), None)
+        if inv_col and groupers:
+            g = next((c for c in groupers if c != inv_col), groupers[0])
+            overview.append(
+                Tile(
+                    title=f"{inv_col} по «{g}»",
+                    chart_type="hbar",
+                    source=TileSource(kind="group", group_column=g, value_column=inv_col),
+                    agg="sum",
+                    top_n=10,
+                    unit="auto",
+                )
+            )
+
+    if overview:
+        tabs.append(Tab(title="Обзор", tiles=overview[:4]))
+
+    if any(w in q for w in ("динамик", "месяц", "квартал")):
+        from services import data_tools
+
+        dates = data_tools.detect_date_columns(df).get("columns") or []
+        if dates and metrics:
+            tabs.append(
+                Tab(
+                    title="Динамика",
+                    tiles=[
+                        Tile(
+                            title=f"Динамика «{metrics[0]}» по месяцам",
+                            chart_type="area",
+                            source=TileSource(
+                                kind="period",
+                                period="month",
+                                value_column=metrics[0],
+                            ),
+                            unit="auto",
+                            sort="none",
+                        )
+                    ],
+                )
+            )
+
+    if not tabs:
+        return None
+    return DashboardSpec(tabs=tabs[:8])
+
+
+def generate_spec_nl(
+    df: pd.DataFrame,
+    request: str,
+    current_spec: DashboardSpec | None = None,
+) -> DashboardSpec | None:
+    """LLM -> JSON -> coerce -> pydantic. При любой ошибке разбора — None."""
+    prompt = _build_spec_prompt(df, request, current_spec)
     try:
         raw = _get_spec_llm().invoke(prompt).content
     except Exception as exc:
@@ -146,10 +498,57 @@ def generate_spec_nl(
         logger.warning("LLM не вернула JSON спеки: %.200s", raw)
         return None
     try:
-        return DashboardSpec.model_validate_json(json_text)
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        logger.warning("LLM вернула не-JSON спеку: %.200s", json_text)
+        return None
+    if not isinstance(data, dict):
+        return None
+    data = _coerce_spec_dict(data, df)
+    try:
+        return DashboardSpec.model_validate(data)
     except ValidationError as exc:
         logger.warning("LLM вернула невалидную спеку: %s", exc)
         return None
+
+
+def assemble_spec(
+    df: pd.DataFrame,
+    request: str,
+    current_spec: DashboardSpec | None = None,
+    fallback: DashboardSpec | None = None,
+) -> tuple[DashboardSpec | None, str | None]:
+    """Собрать спеку: ключевые слова / LLM / профиль. warning — если это запасной вариант."""
+    if current_spec is None and _FUNNEL_HINT.search(request or ""):
+        keyword_spec = build_spec_from_request(df, request)
+        if keyword_spec is not None:
+            return keyword_spec, None
+
+    spec = None
+    try:
+        spec = generate_spec_nl(df, request, current_spec)
+    except OllamaUnavailableError:
+        logger.warning("Ollama недоступна при сборке дашборда — используем запасной вариант")
+
+    if spec is not None:
+        return spec, None
+
+    if current_spec is not None:
+        return current_spec, "ИИ не смог применить правку — дашборд без изменений"
+
+    keyword_spec = build_spec_from_request(df, request)
+    if keyword_spec is not None:
+        return keyword_spec, "ИИ не собрал спеку — дашборд собран по запросу автоматически"
+
+    if fallback is not None:
+        return fallback, "ИИ не собрал спеку — показан исходный дашборд"
+
+    from services.generic_dashboard import build_generic_spec
+
+    generic = build_generic_spec(df)
+    if generic is not None:
+        return generic, "ИИ не собрал спеку — собран универсальный дашборд"
+    return None, None
 
 
 # ---------------------------------------------------------------------------

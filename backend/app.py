@@ -253,7 +253,11 @@ async def profile_report(
     )
     
     from services.report_service import get_profile_for_df
-    report_type, profile = get_profile_for_df(df)
+    from services.storage_service import get_original_name
+
+    report_type, profile = get_profile_for_df(
+        df, filename=get_original_name(request.file_id)
+    )
     
     return {
         "report_type": report_type,
@@ -294,19 +298,29 @@ def _load_df(file_id: str, file_path: str):
 
 @app.post("/dashboard/generate")
 async def dashboard_generate(request: DashboardGenerateRequest):
-    """Собрать дашборд с нуля по текстовому запросу (LLM -> спека)."""
+    """Собрать дашборд с нуля по текстовому запросу (LLM -> спека, иначе запасной)."""
     from services import dashboard_service
 
     file_path = _get_file_path_or_404(request.file_id)
     df = _load_df(request.file_id, file_path)
-    spec = _handle_service_errors(dashboard_service.generate_spec_nl, df, request.request)
+    fallback = dashboard_service.get_current_spec(request.file_id, df)
+    spec, warning = _handle_service_errors(
+        dashboard_service.assemble_spec,
+        df,
+        request.request,
+        None,
+        fallback,
+    )
     if spec is None:
         raise HTTPException(
             status_code=422,
             detail="Не удалось собрать дашборд по запросу — попробуйте переформулировать",
         )
     dashboard_service.save_spec(request.file_id, spec)
-    return _render_and_respond(df, spec)
+    payload = _render_and_respond(df, spec)
+    if warning:
+        payload["warning"] = warning
+    return payload
 
 
 @app.post("/dashboard/edit")
@@ -319,8 +333,12 @@ async def dashboard_edit(request: DashboardGenerateRequest):
     current = dashboard_service.get_current_spec(request.file_id, df)
     if current is None:
         raise HTTPException(status_code=404, detail="Нет дашборда для редактирования")
-    spec = _handle_service_errors(
-        dashboard_service.generate_spec_nl, df, request.request, current
+    spec, warning = _handle_service_errors(
+        dashboard_service.assemble_spec,
+        df,
+        request.request,
+        current,
+        current,
     )
     if spec is None:
         raise HTTPException(
@@ -328,7 +346,10 @@ async def dashboard_edit(request: DashboardGenerateRequest):
             detail="Не удалось применить правку — попробуйте переформулировать",
         )
     dashboard_service.save_spec(request.file_id, spec)
-    return _render_and_respond(df, spec)
+    payload = _render_and_respond(df, spec)
+    if warning:
+        payload["warning"] = warning
+    return payload
 
 
 @app.post("/dashboard/pin")

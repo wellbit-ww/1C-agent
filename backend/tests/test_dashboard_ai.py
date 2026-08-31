@@ -142,6 +142,50 @@ class TestNlGeneration:
         dashboard_service.generate_spec_nl(sales_df, "убери второй график", _spec())
         assert "Текущая спека" in captured["prompt"]
 
+    def test_funnel_chart_type_is_coerced(self, sales_df, monkeypatch):
+        payload = {
+            "tabs": [{
+                "title": "Воронка",
+                "tiles": [{
+                    "title": "Этапы",
+                    "chart_type": "funnel",
+                    "source": {"kind": "funnel", "columns_pattern": "(сумма)"},
+                }],
+            }]
+        }
+        monkeypatch.setattr(
+            dashboard_service, "_get_spec_llm", lambda: _FakeLLM(json.dumps(payload))
+        )
+        result = dashboard_service.generate_spec_nl(sales_df, "воронка")
+        assert result is not None
+        tile = result.tabs[0].tiles[0]
+        assert tile.chart_type == "hbar"
+        assert tile.source.kind == "columns_pattern"
+
+    def test_json_extracted_from_think_and_fences(self, sales_df, monkeypatch):
+        spec = _spec(title="Из markdown")
+        wrapped = f"<think>думаю</think>\n```json\n{spec.model_dump_json()}\n```"
+        monkeypatch.setattr(dashboard_service, "_get_spec_llm", lambda: _FakeLLM(wrapped))
+        result = dashboard_service.generate_spec_nl(sales_df, "клиенты")
+        assert result is not None
+        assert result.tabs[0].tiles[0].title == "Из markdown"
+
+    def test_request_with_braces_does_not_crash(self, sales_df, monkeypatch):
+        monkeypatch.setattr(
+            dashboard_service, "_get_spec_llm", lambda: _FakeLLM(_spec().model_dump_json())
+        )
+        result = dashboard_service.generate_spec_nl(sales_df, "фильтр {статус}")
+        assert result is not None
+
+    def test_keyword_funnel_spec_without_llm(self, sales_df):
+        spec = dashboard_service.build_spec_from_request(
+            sales_df, "собери дашборд по инвестициям с воронкой"
+        )
+        assert spec is not None
+        assert spec.tabs[0].title == "Воронка"
+        assert spec.tabs[0].tiles[0].source.kind == "columns_pattern"
+        assert spec.tabs[0].tiles[0].source.columns_pattern == "(сумма)"
+
 
 class TestComments:
     def test_comments_cached_by_data_hash(self, sales_df, monkeypatch):
@@ -217,7 +261,7 @@ class TestEndpoints:
         assert response.json()["tabs"][0]["tiles"][0]["title"] == "NL-дашборд"
         db_service.delete_dashboard_spec(sales_file_id)
 
-    def test_generate_endpoint_422_on_llm_failure(self, client, sales_file_id, monkeypatch):
+    def test_generate_falls_back_when_llm_fails(self, client, sales_file_id, monkeypatch):
         monkeypatch.setattr(
             dashboard_service, "_get_spec_llm", lambda: _FakeLLM("бред без json")
         )
@@ -225,4 +269,28 @@ class TestEndpoints:
             "/dashboard/generate",
             json={"file_id": sales_file_id, "request": "непонятный запрос"},
         )
-        assert response.status_code == 422
+        assert response.status_code == 200, response.text
+        assert response.json()["tabs"]
+        assert response.json().get("warning")
+        db_service.delete_dashboard_spec(sales_file_id)
+
+    def test_generate_funnel_request_skips_llm(self, client, sales_file_id, monkeypatch):
+        def _fail():
+            raise RuntimeError("LLM не должен вызываться для запроса с воронкой")
+
+        monkeypatch.setattr(dashboard_service, "_get_spec_llm", _fail)
+        response = client.post(
+            "/dashboard/generate",
+            json={
+                "file_id": sales_file_id,
+                "request": "собери дашборд по инвестициям с воронкой",
+            },
+        )
+        assert response.status_code == 200, response.text
+        kinds = [
+            tile["source"]["kind"]
+            for tab in response.json()["spec"]["tabs"]
+            for tile in tab["tiles"]
+        ]
+        assert "columns_pattern" in kinds
+        db_service.delete_dashboard_spec(sales_file_id)

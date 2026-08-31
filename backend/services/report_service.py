@@ -21,38 +21,42 @@ _old_profiles = {
 
 class DefaultProfile(ReportProfile):
     def get_kpis(self, df: pd.DataFrame) -> list[dict[str, Any]]:
-        return [
-            {"label": "Количество строк", "value": len(df)},
-            {"label": "Количество колонок", "value": len(df.columns)},
-        ]
-        
+        from services.generic_dashboard import generic_kpis
+        return generic_kpis(df)
+
     def get_charts(self, df: pd.DataFrame) -> list[dict[str, Any]]:
         from services.chart_service import create_bar_chart
-        
+        from services.generic_dashboard import pick_groupers, pick_metrics
+
         charts = []
-        numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
-        cat_cols = df.select_dtypes(include=['object', 'string']).columns.tolist()
-        
-        if numeric_cols and cat_cols:
-            num_col = numeric_cols[0]
-            cat_col = cat_cols[0]
-            
-            # Group by cat_col and sum num_col, get top 10
-            grouped = df.groupby(cat_col)[num_col].sum().sort_values(ascending=False).head(10)
-            
-            data = {
-                "groups": grouped.to_dict(),
-                "group_column": cat_col,
-                "value_column": num_col
-            }
-            
-            charts.append(create_bar_chart(data, title=f"ТОП-10 {cat_col} по {num_col}"))
-            
+        metrics = pick_metrics(df)
+        groupers = pick_groupers(df)
+        if metrics and groupers:
+            grouped = (
+                df.groupby(groupers[0])[metrics[0]]
+                .sum()
+                .sort_values(ascending=False)
+                .head(10)
+            )
+            charts.append(
+                create_bar_chart(
+                    {
+                        "groups": grouped.to_dict(),
+                        "group_column": groupers[0],
+                        "value_column": metrics[0],
+                    },
+                    title=f"ТОП-10 {groupers[0]} по {metrics[0]}",
+                )
+            )
         return charts
 
     def get_insights(self, df: pd.DataFrame) -> list[str]:
         from services.insights_service import get_basic_insights
         return get_basic_insights(df)
+
+    def get_dashboard_spec(self, df: pd.DataFrame):
+        from services.generic_dashboard import build_generic_spec
+        return build_generic_spec(df)
 
 _default_profile = DefaultProfile()
 
@@ -75,13 +79,17 @@ class ConfigAdapterProfile(ReportProfile):
         return self.engine.get_summary(df)
 
     def get_dashboard_spec(self, df: pd.DataFrame):
-        # реестр YAML не умеет спеки — делегируем legacy-профилю, если он умеет
         if self.legacy is not None and hasattr(self.legacy, "get_dashboard_spec"):
-            return self.legacy.get_dashboard_spec(df)
-        return None
+            spec = self.legacy.get_dashboard_spec(df)
+            if spec is not None:
+                return spec
+        from services.generic_dashboard import build_generic_spec
+        return build_generic_spec(df)
 
-def get_profile_for_df(df: pd.DataFrame) -> tuple[str, ReportProfile]:
-    report_type = detect_report_type(df)
+def get_profile_for_df(
+    df: pd.DataFrame, filename: str | None = None
+) -> tuple[str, ReportProfile]:
+    report_type = detect_report_type(df, filename=filename)
     logger.info(f"Обнаружен тип отчета: {report_type}")
     
     entities = detect_entities(df.columns.tolist())
@@ -190,7 +198,7 @@ def get_full_report(df: pd.DataFrame, filename: str | None = None) -> dict[str, 
     from services.insights_service import _get_date_period
     from services.summary_service import build_report_narrative
 
-    report_type, profile = get_profile_for_df(df)
+    report_type, profile = get_profile_for_df(df, filename=filename)
 
     metadata = {
         "filename": filename,
