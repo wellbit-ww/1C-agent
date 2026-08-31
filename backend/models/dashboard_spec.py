@@ -17,12 +17,14 @@ class TileSource(BaseModel):
     """Откуда брать данные для тайла.
 
     group — группировка по категориальной колонке (семантика или явное имя);
-    columns_pattern — воронка: агрегат по КАЖДОЙ колонке, чьё имя
-    заканчивается на pattern (например «(сумма)» в отчёте этапов продаж);
+    columns_pattern — агрегат по КАЖДОЙ колонке с таким окончанием
+    (сколько прошло через этап, если в 1С заполнены все пройденные стадии);
+    current_stage — воронка «как в 1С»: сделка целиком на ПОСЛЕДНЕМ
+    заполненном этапе (сумма сделки или число сделок);
     period — динамика по дате.
     """
 
-    kind: Literal["group", "columns_pattern", "period"]
+    kind: Literal["group", "columns_pattern", "period", "current_stage"]
     group_semantic: str | None = None
     group_column: str | None = None
     value_semantic: str | None = None

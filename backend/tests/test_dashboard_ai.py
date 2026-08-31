@@ -160,7 +160,7 @@ class TestNlGeneration:
         assert result is not None
         tile = result.tabs[0].tiles[0]
         assert tile.chart_type == "hbar"
-        assert tile.source.kind == "columns_pattern"
+        assert tile.source.kind == "current_stage"
 
     def test_json_extracted_from_think_and_fences(self, sales_df, monkeypatch):
         spec = _spec(title="Из markdown")
@@ -183,7 +183,7 @@ class TestNlGeneration:
         )
         assert spec is not None
         assert spec.tabs[0].title == "Воронка"
-        assert spec.tabs[0].tiles[0].source.kind == "columns_pattern"
+        assert spec.tabs[0].tiles[0].source.kind == "current_stage"
         assert spec.tabs[0].tiles[0].source.columns_pattern == "(сумма)"
 
 
@@ -292,5 +292,5 @@ class TestEndpoints:
             for tab in response.json()["spec"]["tabs"]
             for tile in tab["tiles"]
         ]
-        assert "columns_pattern" in kinds
+        assert "current_stage" in kinds
         db_service.delete_dashboard_spec(sales_file_id)

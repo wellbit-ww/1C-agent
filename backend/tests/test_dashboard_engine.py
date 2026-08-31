@@ -1,6 +1,7 @@
 """Тесты движка дашбордов: spec-валидация, воронка, единицы, рендер."""
 import json
 
+import pandas as pd
 import pytest
 from pydantic import ValidationError
 
@@ -67,6 +68,82 @@ class TestFunnel:
         values_scaled = fig["data"][0]["x"]
         idx = labels.index("новая сделка")
         assert values_scaled[idx] * 1e9 == pytest.approx(expected_new, rel=0.01)
+
+    def test_current_stage_counts_deals_not_qty_column(self, sales_df):
+        tile = _tile(
+            title="Текущий этап",
+            chart_type="hbar",
+            source={"kind": "current_stage", "columns_pattern": "(сумма)"},
+            agg="count",
+            sort="none",
+        )
+        result = render_spec(sales_df, DashboardSpec(tabs=[Tab(title="T", tiles=[tile])]))
+        tile_out = result["tabs"][0]["tiles"][0]
+        assert "error" not in tile_out
+        fig = json.loads(tile_out["plotly_json"])
+        labels = list(fig["data"][0]["y"])
+        values = list(fig["data"][0]["x"])
+        # hbar переворачивает: первая стадия сверху
+        assert labels[-1] == "новая сделка"
+        assert values[-1] == pytest.approx(1002)
+
+    def test_current_stage_uses_deal_amount(self, sales_df):
+        tile = _tile(
+            title="Сумма на этапе",
+            chart_type="hbar",
+            source={
+                "kind": "current_stage",
+                "columns_pattern": "(сумма)",
+                "value_column": "сумма по сделке",
+            },
+            sort="none",
+        )
+        result = render_spec(sales_df, DashboardSpec(tabs=[Tab(title="T", tiles=[tile])]))
+        tile_out = result["tabs"][0]["tiles"][0]
+        attributed = tile_out["stats"]["total"]
+        sum_cols = [c for c in sales_df.columns if str(c).endswith("(сумма)")]
+        has_stage = (
+            sales_df[sum_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .ne(0)
+            .any(axis=1)
+        )
+        expected = float(sales_df.loc[has_stage, "сумма по сделке"].sum())
+        assert attributed == pytest.approx(expected, rel=0.001)
+        assert expected < float(sales_df["сумма по сделке"].sum())
+
+    def test_current_stage_not_equal_to_column_sum_when_cumulative(self):
+        df = pd.DataFrame(
+            {
+                "сумма по сделке": [100.0, 200.0],
+                "лид (сумма)": [100.0, 200.0],
+                "оплата (сумма)": [pd.NA, 200.0],
+            }
+        )
+        stock = _tile(
+            chart_type="hbar",
+            source={
+                "kind": "current_stage",
+                "columns_pattern": "(сумма)",
+                "value_column": "сумма по сделке",
+            },
+            sort="none",
+        )
+        throughput = _tile(
+            chart_type="hbar",
+            source={"kind": "columns_pattern", "columns_pattern": "(сумма)"},
+            sort="none",
+        )
+        spec = DashboardSpec(tabs=[Tab(title="T", tiles=[throughput, stock])])
+        tiles = render_spec(df, spec)["tabs"][0]["tiles"]
+        thru = json.loads(tiles[0]["plotly_json"])
+        curr = json.loads(tiles[1]["plotly_json"])
+        thru_map = dict(zip(thru["data"][0]["y"], thru["data"][0]["x"]))
+        curr_map = dict(zip(curr["data"][0]["y"], curr["data"][0]["x"]))
+        assert thru_map["лид"] == pytest.approx(300)
+        assert curr_map["лид"] == pytest.approx(100)
+        assert curr_map["оплата"] == pytest.approx(200)
 
 
 class TestRender:

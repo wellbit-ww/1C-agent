@@ -112,9 +112,9 @@ def _group_data(df: pd.DataFrame, tile: Tile) -> dict:
 
 
 def _columns_pattern_data(df: pd.DataFrame, tile: Tile) -> dict:
-    """Воронка: агрегат по каждой колонке, оканчивающейся на pattern."""
+    """Агрегат по каждой колонке, оканчивающейся на pattern (проход через этап)."""
     pattern = tile.source.columns_pattern or ""
-    matched = [c for c in df.columns if c.endswith(pattern)]
+    matched = [c for c in df.columns if str(c).endswith(pattern)]
     if not matched:
         return {"error": f"Нет колонок с шаблоном «{pattern}»"}
 
@@ -129,7 +129,7 @@ def _columns_pattern_data(df: pd.DataFrame, tile: Tile) -> dict:
             value = series.sum()
         if pd.isna(value):
             continue
-        label = col[: -len(pattern)].strip() if pattern else col
+        label = col[: -len(pattern)].strip() if pattern else str(col)
         values[label] = float(value)
 
     if not values:
@@ -143,6 +143,86 @@ def _columns_pattern_data(df: pd.DataFrame, tile: Tile) -> dict:
     # sort == "none": порядок колонок = бизнес-порядок этапов воронки
 
     return {"groups": dict(items), "group_column": pattern, "value_column": None}
+
+
+def _stage_labels(columns: list, pattern: str) -> list[str]:
+    if not pattern:
+        return [str(c) for c in columns]
+    return [str(c)[: -len(pattern)].strip() or str(c) for c in columns]
+
+
+def _last_filled_stage_index(numeric: pd.DataFrame) -> pd.Series:
+    """Индекс последнего ненулевого этапа по строке; -1 если ни одного."""
+    filled = numeric.notna() & numeric.ne(0)
+    has = filled.any(axis=1)
+    reversed_cols = filled.iloc[:, ::-1]
+    last_name = reversed_cols.idxmax(axis=1)
+    positions = {c: i for i, c in enumerate(numeric.columns)}
+    idx = last_name.map(positions).astype(int)
+    return idx.where(has, other=-1).astype(int)
+
+
+def _current_stage_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Воронка 1С: каждая сделка на последнем заполненном этапе."""
+    pattern = tile.source.columns_pattern or "(сумма)"
+    matched = [c for c in df.columns if str(c).endswith(pattern)]
+    if not matched:
+        matched = [
+            c for c in df.columns
+            if str(c).endswith("(сумма)") or str(c).endswith("(количество)")
+        ]
+        # keep one family: prefer (сумма)
+        sum_cols = [c for c in matched if str(c).endswith("(сумма)")]
+        matched = sum_cols or matched
+        pattern = "(сумма)" if sum_cols else (tile.source.columns_pattern or "")
+    if not matched:
+        return {"error": "Нет колонок этапов для воронки «текущий этап»"}
+
+    numeric = df[matched].apply(pd.to_numeric, errors="coerce")
+    stage_idx = _last_filled_stage_index(numeric)
+    labels = _stage_labels(matched, pattern)
+    valid = stage_idx >= 0
+    groups = {label: 0.0 for label in labels}
+    value_col = None
+
+    if not valid.any():
+        return {"error": "Не удалось определить текущий этап ни у одной строки"}
+
+    if tile.agg == "count":
+        counts = stage_idx[valid].value_counts()
+        for pos, count in counts.items():
+            groups[labels[int(pos)]] = float(count)
+    else:
+        value_col = _resolve_value_column(df, tile)
+        if value_col:
+            amounts = pd.to_numeric(df[value_col], errors="coerce")
+        else:
+            arr = numeric.to_numpy()
+            amounts = pd.Series(
+                [
+                    arr[i, int(pos)] if pos >= 0 else float("nan")
+                    for i, pos in enumerate(stage_idx.tolist())
+                ],
+                index=df.index,
+            )
+        staged = amounts[valid].groupby(stage_idx[valid])
+        aggregated = staged.mean() if tile.agg == "mean" else staged.sum()
+        for pos, value in aggregated.items():
+            if pd.isna(value):
+                continue
+            groups[labels[int(pos)]] = float(value)
+
+    items = list(groups.items())
+    if tile.sort == "desc":
+        items.sort(key=lambda x: -x[1])
+    elif tile.sort == "asc":
+        items.sort(key=lambda x: x[1])
+
+    return {
+        "groups": dict(items),
+        "group_column": "current_stage",
+        "value_column": value_col,
+    }
 
 
 def _period_data(df: pd.DataFrame, tile: Tile) -> dict:
@@ -167,6 +247,8 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
     kind = tile.source.kind
     if kind == "columns_pattern":
         return _columns_pattern_data(df, tile)
+    if kind == "current_stage":
+        return _current_stage_data(df, tile)
     if kind == "period":
         return _period_data(df, tile)
     return _group_data(df, tile)
@@ -187,7 +269,10 @@ _LAYOUT = dict(
 def _render_figure(tile: Tile, data: dict) -> go.Figure:
     labels = list(data["groups"].keys())
     values = list(data["groups"].values())
-    scale, suffix = _resolve_scale(tile.unit, values)
+    if tile.agg == "count":
+        scale, suffix = 1.0, ""
+    else:
+        scale, suffix = _resolve_scale(tile.unit, values)
     scaled = [v / scale for v in values]
     texts = [_fmt_scaled(v, scale, suffix) for v in values]
 

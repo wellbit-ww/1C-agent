@@ -182,7 +182,7 @@ async def analyze_excel(
 
 
 @app.post("/chat")
-async def chat(
+def chat(
     request: ChatRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)
@@ -297,7 +297,7 @@ def _load_df(file_id: str, file_path: str):
 
 
 @app.post("/dashboard/generate")
-async def dashboard_generate(request: DashboardGenerateRequest):
+def dashboard_generate(request: DashboardGenerateRequest):
     """Собрать дашборд с нуля по текстовому запросу (LLM -> спека, иначе запасной)."""
     from services import dashboard_service
 
@@ -324,7 +324,7 @@ async def dashboard_generate(request: DashboardGenerateRequest):
 
 
 @app.post("/dashboard/edit")
-async def dashboard_edit(request: DashboardGenerateRequest):
+def dashboard_edit(request: DashboardGenerateRequest):
     """Отредактировать текущий дашборд текстовой командой."""
     from services import dashboard_service
 
@@ -385,7 +385,7 @@ async def dashboard_spec_save(request: DashboardSpecSaveRequest):
 
 
 @app.post("/dashboard/comments")
-async def dashboard_comments(request: DashboardRequest):
+def dashboard_comments(request: DashboardRequest):
     """Авто-комментарии LLM к вкладкам (кэшируются по хэшу данных)."""
     from services import dashboard_service
 
@@ -438,9 +438,12 @@ async def detailed_table(
         file_path,
     )
 
-    # Return top 100 rows for display
-    # Replace NaNs with None to ensure JSON serializability
-    data = df.head(100).fillna("").to_dict(orient="records")
+    from services.report_service import _safe_sample_cell
+
+    data = [
+        {str(k): _safe_sample_cell(v) for k, v in row.items()}
+        for row in df.head(100).to_dict(orient="records")
+    ]
 
     return {"data": data}
 

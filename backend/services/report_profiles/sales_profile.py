@@ -62,7 +62,15 @@ class SalesProfile(ReportProfile):
         return charts
         
     def get_dashboard_spec(self, df: pd.DataFrame) -> DashboardSpec:
-        """Вкладочный дашборд «Воронка / Менеджеры / Клиенты» (эталон 1С)."""
+        """Вкладочный дашборд «Воронка / Менеджеры / Клиенты» (эталон 1С).
+
+        Если колонок воронки нет — универсальная спека по фактическим колонкам.
+        """
+        has_funnel = any(str(c).endswith("(сумма)") for c in df.columns)
+        if not has_funnel:
+            from services.generic_dashboard import build_generic_spec
+            return build_generic_spec(df)
+
         sum_col = resolve_semantic_column(df, "", semantic="sales", dtype="numeric")
         total = float(df[sum_col].sum()) if sum_col else None
 
@@ -70,18 +78,26 @@ class SalesProfile(ReportProfile):
             title="Воронка",
             tiles=[
                 Tile(
-                    title="Этапы продаж по сумме",
+                    title="Сделки на текущем этапе (сумма)",
                     chart_type="hbar",
-                    source=TileSource(kind="columns_pattern", columns_pattern="(сумма)"),
+                    source=TileSource(
+                        kind="current_stage",
+                        columns_pattern="(сумма)",
+                        value_semantic="revenue",
+                    ),
                     unit="auto",
-                    sort="desc",
+                    sort="none",
                 ),
                 Tile(
-                    title="Этапы продаж по количеству",
+                    title="Сделки на текущем этапе (количество)",
                     chart_type="hbar",
-                    source=TileSource(kind="columns_pattern", columns_pattern="(количество)"),
+                    source=TileSource(
+                        kind="current_stage",
+                        columns_pattern="(сумма)",
+                    ),
+                    agg="count",
                     unit="auto",
-                    sort="desc",
+                    sort="none",
                 ),
                 Tile(
                     title="Динамика продаж по месяцам",

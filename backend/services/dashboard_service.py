@@ -100,11 +100,12 @@ _SPEC_PROMPT = """Ты конфигуратор BI-дашборда. По про
 Варианты source:
 - {"kind": "group", "group_column": "<колонка>", "value_column": "<колонка>"} — группировка по категории
 - {"kind": "period", "period": "month|quarter|year", "value_column": "<колонка>"} — динамика по дате
-- {"kind": "columns_pattern", "columns_pattern": "(сумма)"} — агрегат по КАЖДОЙ колонке с таким окончанием (воронка этапов)
+- {"kind": "current_stage", "columns_pattern": "(сумма)", "value_column": "<колонка суммы сделки>"} — воронка 1С: сделка на ПОСЛЕДНЕМ заполненном этапе
+- {"kind": "columns_pattern", "columns_pattern": "(сумма)"} — сумма КАЖДОЙ колонки-этапа (проход через этап)
 
 Правила:
 - Используй ТОЛЬКО колонки из списка ниже, имена копируй посимвольно. Не выдумывай колонки (в том числе «инвестиции»), если их нет в списке.
-- chart_type ТОЛЬКО: bar, hbar, pie, line, area. Для воронки — hbar + source.kind=columns_pattern. ЗАПРЕЩЕНО chart_type=funnel.
+- chart_type ТОЛЬКО: bar, hbar, pie, line, area. Для воронки — hbar + source.kind=current_stage, sort=none. ЗАПРЕЩЕНО chart_type=funnel.
 - value_column нужен для agg sum/mean; для agg=count его можно опустить.
 - 1–4 вкладки, 1–4 тайла на вкладку.
 __MODE_BLOCK__
@@ -132,10 +133,12 @@ _CHART_ALIASES = {
 }
 
 _KIND_ALIASES = {
-    "funnel": "columns_pattern",
-    "stages": "columns_pattern",
-    "pipeline": "columns_pattern",
-    "воронка": "columns_pattern",
+    "funnel": "current_stage",
+    "stages": "current_stage",
+    "pipeline": "current_stage",
+    "воронка": "current_stage",
+    "currentstage": "current_stage",
+    "current_stage": "current_stage",
     "aggregate": "group",
     "groupby": "group",
     "category": "group",
@@ -154,7 +157,7 @@ _AGG_ALIASES = {
 
 _VALID_CHARTS = {"bar", "hbar", "pie", "line", "area"}
 _VALID_AGGS = {"sum", "mean", "count"}
-_VALID_KINDS = {"group", "columns_pattern", "period"}
+_VALID_KINDS = {"group", "columns_pattern", "period", "current_stage"}
 _VALID_PERIODS = {"month", "quarter", "year"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
 _VALID_SORTS = {"desc", "asc", "none"}
@@ -245,7 +248,9 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
     kind_raw = str(source.get("kind") or "group").lower().strip()
     kind = _KIND_ALIASES.get(kind_raw, kind_raw)
     if kind not in _VALID_KINDS:
-        if source.get("columns_pattern") or "funnel" in kind_raw or "ворон" in kind_raw:
+        if "current" in kind_raw or "funnel" in kind_raw or "ворон" in kind_raw:
+            kind = "current_stage"
+        elif source.get("columns_pattern"):
             kind = "columns_pattern"
         elif source.get("period"):
             kind = "period"
@@ -253,7 +258,7 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             kind = "group"
 
     src: dict = {"kind": kind}
-    if kind == "columns_pattern":
+    if kind in ("columns_pattern", "current_stage"):
         pattern = str(source.get("columns_pattern") or "(сумма)")
         if not _has_pattern(df, pattern):
             pattern = next(
@@ -263,6 +268,12 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         if not pattern:
             return None
         src["columns_pattern"] = pattern
+        if kind == "current_stage":
+            value_column = _best_column(df, source.get("value_column"))
+            if value_column:
+                src["value_column"] = value_column
+            if source.get("value_semantic"):
+                src["value_semantic"] = source["value_semantic"]
         if chart not in ("bar", "hbar"):
             chart = "hbar"
     elif kind == "period":
@@ -374,23 +385,24 @@ def build_spec_from_request(df: pd.DataFrame, request: str) -> DashboardSpec | N
     if _FUNNEL_HINT.search(q) and _has_pattern(df, "(сумма)"):
         tiles = [
             Tile(
-                title="Воронка — сумма по этапам",
+                title="Сделки на текущем этапе — сумма",
                 chart_type="hbar",
-                source=TileSource(kind="columns_pattern", columns_pattern="(сумма)"),
+                source=TileSource(
+                    kind="current_stage",
+                    columns_pattern="(сумма)",
+                    value_semantic="revenue",
+                ),
                 unit="auto",
                 sort="none",
-            )
+            ),
+            Tile(
+                title="Сделки на текущем этапе — количество",
+                chart_type="hbar",
+                source=TileSource(kind="current_stage", columns_pattern="(сумма)"),
+                agg="count",
+                sort="none",
+            ),
         ]
-        if _has_pattern(df, "(количество)"):
-            tiles.append(
-                Tile(
-                    title="Воронка — количество по этапам",
-                    chart_type="hbar",
-                    source=TileSource(kind="columns_pattern", columns_pattern="(количество)"),
-                    agg="sum",
-                    sort="none",
-                )
-            )
         tabs.append(Tab(title="Воронка", tiles=tiles))
 
     from services.generic_dashboard import pick_groupers, pick_metrics
