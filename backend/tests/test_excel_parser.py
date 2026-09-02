@@ -57,3 +57,38 @@ class TestDeterminism:
         assert list(sheets1) == list(sheets2)
         for name in sheets1:
             assert sheets1[name].shape == sheets2[name].shape
+
+
+class TestMultiSheetWorkbook:
+    def test_skips_empty_and_hidden(self, tmp_path):
+        from openpyxl import Workbook
+        from services.excel_service import read_excel, read_workbook
+
+        wb = Workbook()
+        ws1 = wb.active
+        ws1.title = "Сделки"
+        ws1.append(["клиент", "сумма"])
+        ws1.append(["Альфа", 100])
+        ws2 = wb.create_sheet("Оплаты")
+        ws2.append(["дата оплаты", "сумма оплаты"])
+        ws2.append(["2024-01-15", 50])
+        wb.create_sheet("Пустой")
+        hidden = wb.create_sheet("Секрет")
+        hidden.append(["скрытая колонка", "секрет"])
+        hidden.append(["x", 1])
+        hidden.sheet_state = "hidden"
+        path = tmp_path / "multi.xlsx"
+        wb.save(path)
+
+        sheets = parse_excel(str(path))
+        assert list(sheets) == ["Сделки", "Оплаты"]
+        assert "сумма оплаты" in sheets["Оплаты"].columns
+        assert "Пустой" not in sheets
+        assert "Секрет" not in sheets
+
+        df, workbook = read_workbook(str(path))
+        assert list(workbook) == ["Сделки", "Оплаты"]
+        assert list(df.columns) == list(workbook["Сделки"].columns)
+        only_first = read_excel(str(path))
+        assert "сумма оплаты" not in only_first.columns
+

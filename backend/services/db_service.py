@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS dashboard_specs (
     spec_json TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS file_contexts (
+    file_id TEXT PRIMARY KEY,
+    data_hash TEXT NOT NULL,
+    context_json TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -136,3 +142,25 @@ def get_dashboard_spec(file_id: str) -> str | None:
 def delete_dashboard_spec(file_id: str) -> None:
     with _connect() as conn:
         conn.execute("DELETE FROM dashboard_specs WHERE file_id = ?", (file_id,))
+
+
+# --- Карточка понимания файла ----------------------------------------------
+
+def save_file_context(file_id: str, data_hash: str, context_json: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO file_contexts"
+            " (file_id, data_hash, context_json, updated_at)"
+            " VALUES (?, ?, ?, ?)",
+            (file_id, data_hash, context_json, time.time()),
+        )
+
+
+def get_file_context(file_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT file_id, data_hash, context_json, updated_at"
+            " FROM file_contexts WHERE file_id = ?",
+            (file_id,),
+        ).fetchone()
+    return dict(row) if row else None

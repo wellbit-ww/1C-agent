@@ -23,6 +23,10 @@ class DashboardRequest(BaseModel):
     file_id: str
 
 
+class FileContextRequest(BaseModel):
+    file_id: str
+
+
 class TableRequest(BaseModel):
     file_id: str
 

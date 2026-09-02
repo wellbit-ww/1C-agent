@@ -76,6 +76,7 @@ class TestDashboardAndTable:
         payload = response.json()
         assert payload["report_type"]
         assert payload["metadata"]["rows"] > 0
+        assert payload.get("file_context", {}).get("summary")
 
     def test_table(self, client, deficit_file_id):
         response = client.post("/table", json={"file_id": deficit_file_id})

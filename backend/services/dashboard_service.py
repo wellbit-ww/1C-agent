@@ -110,6 +110,7 @@ _SPEC_PROMPT = """Ты конфигуратор BI-дашборда. По про
 - 1–4 вкладки, 1–4 тайла на вкладку.
 __MODE_BLOCK__
 Колонки таблицы: __COLUMNS__
+__FILE_CONTEXT__
 Запрос пользователя: __REQUEST__
 
 Ответ — ТОЛЬКО валидный JSON без markdown и пояснений."""
@@ -360,6 +361,7 @@ def _build_spec_prompt(
     df: pd.DataFrame,
     request: str,
     current_spec: DashboardSpec | None,
+    file_context=None,
 ) -> str:
     if current_spec is not None:
         mode_block = (
@@ -369,15 +371,25 @@ def _build_spec_prompt(
         )
     else:
         mode_block = "Собери спеку с нуля по запросу.\n"
+    ctx_block = ""
+    if file_context is not None:
+        block = getattr(file_context, "prompt_block", lambda: "")()
+        if block:
+            ctx_block = f"Понимание файла:\n{block}\n"
     return (
         _SPEC_PROMPT
         .replace("__MODE_BLOCK__", mode_block)
         .replace("__COLUMNS__", ", ".join(str(c) for c in df.columns[:60]))
+        .replace("__FILE_CONTEXT__", ctx_block)
         .replace("__REQUEST__", request or "")
     )
 
 
-def build_spec_from_request(df: pd.DataFrame, request: str) -> DashboardSpec | None:
+def build_spec_from_request(
+    df: pd.DataFrame,
+    request: str,
+    file_context=None,
+) -> DashboardSpec | None:
     """Детерминированная спека по ключевым словам запроса (без LLM)."""
     q = (request or "").lower()
     tabs: list[Tab] = []
@@ -409,6 +421,18 @@ def build_spec_from_request(df: pd.DataFrame, request: str) -> DashboardSpec | N
 
     metrics = pick_metrics(df)
     groupers = pick_groupers(df)
+    if file_context is not None:
+        known = {str(c) for c in df.columns}
+        ctx_metrics = [
+            c for c in (getattr(file_context, "metrics", None) or []) if c in known
+        ]
+        ctx_groupers = [
+            c for c in (getattr(file_context, "groupers", None) or []) if c in known
+        ]
+        if ctx_metrics:
+            metrics = ctx_metrics[:4]
+        if ctx_groupers:
+            groupers = ctx_groupers[:4]
     overview: list[Tile] = []
     used: set[str] = set()
     want_pie = any(w in q for w in ("кругов", "пирог", "donut"))
@@ -497,9 +521,10 @@ def generate_spec_nl(
     df: pd.DataFrame,
     request: str,
     current_spec: DashboardSpec | None = None,
+    file_context=None,
 ) -> DashboardSpec | None:
     """LLM -> JSON -> coerce -> pydantic. При любой ошибке разбора — None."""
-    prompt = _build_spec_prompt(df, request, current_spec)
+    prompt = _build_spec_prompt(df, request, current_spec, file_context=file_context)
     try:
         raw = _get_spec_llm().invoke(prompt).content
     except Exception as exc:
@@ -529,16 +554,17 @@ def assemble_spec(
     request: str,
     current_spec: DashboardSpec | None = None,
     fallback: DashboardSpec | None = None,
+    file_context=None,
 ) -> tuple[DashboardSpec | None, str | None]:
     """Собрать спеку: ключевые слова / LLM / профиль. warning — если это запасной вариант."""
     if current_spec is None and _FUNNEL_HINT.search(request or ""):
-        keyword_spec = build_spec_from_request(df, request)
+        keyword_spec = build_spec_from_request(df, request, file_context=file_context)
         if keyword_spec is not None:
             return keyword_spec, None
 
     spec = None
     try:
-        spec = generate_spec_nl(df, request, current_spec)
+        spec = generate_spec_nl(df, request, current_spec, file_context=file_context)
     except OllamaUnavailableError:
         logger.warning("Ollama недоступна при сборке дашборда — используем запасной вариант")
 
@@ -548,7 +574,7 @@ def assemble_spec(
     if current_spec is not None:
         return current_spec, "ИИ не смог применить правку — дашборд без изменений"
 
-    keyword_spec = build_spec_from_request(df, request)
+    keyword_spec = build_spec_from_request(df, request, file_context=file_context)
     if keyword_spec is not None:
         return keyword_spec, "ИИ не собрал спеку — дашборд собран по запросу автоматически"
 

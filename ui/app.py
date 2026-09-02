@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import datetime
 
@@ -13,8 +14,7 @@ from api_client import (
     dashboard_generate,
     dashboard_pin,
     dashboard_save_spec,
-    get_insights,
-    generate_chart,
+    enrich_file_context,
     get_dashboard,
     get_detailed_table,
     get_full_report,
@@ -43,8 +43,8 @@ def init_session_state() -> None:
     if "detailed_table" not in st.session_state:
         st.session_state.detailed_table = None
 
-    if "insights" not in st.session_state:
-        st.session_state.insights = []
+    if "dashboard" not in st.session_state:
+        st.session_state.dashboard = None
 
     if "view" not in st.session_state:
         st.session_state.view = "main"
@@ -54,6 +54,30 @@ def init_session_state() -> None:
 
     if "dashboard_comments" not in st.session_state:
         st.session_state.dashboard_comments = {}
+
+    if "file_context" not in st.session_state:
+        st.session_state.file_context = None
+
+
+def _queue_pin(spec: dict) -> None:
+    """on_click: запомнить тайл до отрисовки дашборда (иначе кнопка «не работает»)."""
+    st.session_state.pending_pin = spec
+
+
+def _flush_pending_pin() -> None:
+    spec = st.session_state.pop("pending_pin", None)
+    if not spec or not st.session_state.get("file_id"):
+        return
+    try:
+        with st.spinner("Закрепляю график на дашборде..."):
+            result = dashboard_pin(st.session_state.file_id, spec)
+            st.session_state.dashboard = get_dashboard(st.session_state.file_id)
+        st.session_state.pin_notice = (
+            "ok",
+            result.get("message", "График закреплён на дашборде"),
+        )
+    except ApiClientError as exc:
+        st.session_state.pin_notice = ("err", str(exc))
 
 
 def render_sidebar(backend_ok: bool, backend_status: str) -> None:
@@ -67,79 +91,90 @@ def render_sidebar(backend_ok: bool, backend_status: str) -> None:
 
         st.divider()
         st.caption("Текущий файл")
-        st.code(st.session_state.file_id or "Файл не загружен")
-
         if st.session_state.uploaded_filename:
-            st.caption(f"Имя файла: {st.session_state.uploaded_filename}")
+            st.write(st.session_state.uploaded_filename)
+            st.caption(st.session_state.file_id or "")
+        else:
+            st.write("Файл не загружен")
 
         st.metric("Сообщений в чате", len(st.session_state.messages))
 
+        ctx = st.session_state.get("file_context") or {}
+        if ctx.get("summary"):
+            st.divider()
+            st.caption("Как ИИ видит файл")
+            st.write(ctx["summary"])
+            if ctx.get("llm_ready"):
+                st.caption("Изучено моделью")
+            else:
+                st.caption("Краткая карточка по колонкам")
 
-def render_upload_block(uploaded_file) -> None:
-    st.subheader("1. Загрузка файла")
 
-    if st.button(
-        "Загрузить файл",
-        type="primary",
-        disabled=uploaded_file is None,
-    ):
-        if uploaded_file is None:
-            st.warning("Сначала выберите файл")
-            return
+def _process_upload(uploaded_file) -> bool:
+    """Загрузка файла, изучение ИИ, история чата и дашборд. True при успехе."""
+    try:
+        with st.spinner("Загружаю файл..."):
+            result = upload_file(uploaded_file)
+    except ApiClientError as exc:
+        st.error(f"Ошибка загрузки: {exc}")
+        return False
 
-        try:
-            with st.spinner("Загружаю файл..."):
-                result = upload_file(uploaded_file)
-        except ApiClientError as exc:
-            st.error(f"Ошибка загрузки: {exc}")
-            return
+    file_id = result.get("file_id")
+    if not file_id:
+        st.error("Backend не вернул file_id")
+        return False
 
-        file_id = result.get("file_id")
+    st.session_state.file_id = file_id
+    st.session_state.uploaded_filename = uploaded_file.name
+    st.session_state.file_context = None
+    try:
+        history = get_history(file_id)
+        st.session_state.messages = [
+            {
+                "role": m["role"],
+                "content": m["content"],
+                "charts": m.get("charts", []),
+            }
+            for m in history.get("messages", [])
+        ]
+    except ApiClientError:
+        st.session_state.messages = []
+    st.session_state.detailed_table = None
+    st.session_state.report = None
+    st.session_state.dashboard_comments = {}
+    st.session_state.view = "main"
 
-        if not file_id:
-            st.error("Backend не вернул file_id")
-            return
+    try:
+        with st.spinner("ИИ изучает выгрузку..."):
+            st.session_state.file_context = enrich_file_context(file_id)
+            st.session_state.file_context_just_loaded = True
+    except ApiClientError as exc:
+        st.warning(f"ИИ не смог разобрать файл, работаем по колонкам: {exc}")
 
-        st.session_state.file_id = file_id
-        st.session_state.uploaded_filename = uploaded_file.name
-        # если этот файл уже загружали раньше — подтягиваем прошлую переписку
-        try:
-            history = get_history(file_id)
-            st.session_state.messages = [
-                {
-                    "role": m["role"],
-                    "content": m["content"],
-                    "charts": m.get("charts", []),
-                }
-                for m in history.get("messages", [])
-            ]
-        except ApiClientError:
-            st.session_state.messages = []
-        st.session_state.detailed_table = None
-        st.session_state.insights = []
-        st.session_state.report = None
-        st.session_state.dashboard_comments = {}
-        st.session_state.view = "main"
-
-        st.success("✅ Файл успешно загружен")
-        st.code(f"File ID: {file_id}")
-        
-        # Load dashboard automatically
-        try:
-            with st.spinner("Создаю дашборд..."):
-                st.session_state.dashboard = get_dashboard(file_id)
-                st.session_state.detailed_table = get_detailed_table(file_id)
-        except ApiClientError as exc:
-            st.error(f"Ошибка создания дашборда: {exc}")
-
-    if st.session_state.file_id:
-        st.info(f"Текущий File ID: `{st.session_state.file_id}`")
+    try:
+        with st.spinner("Собираю дашборд..."):
+            st.session_state.dashboard = get_dashboard(file_id)
+            st.session_state.detailed_table = get_detailed_table(file_id)
+        dash_ctx = (st.session_state.dashboard or {}).get("file_context")
+        if dash_ctx and not st.session_state.get("file_context"):
+            st.session_state.file_context = dash_ctx
+    except ApiClientError as exc:
+        st.session_state.dashboard = None
+        st.error(f"Ошибка создания дашборда: {exc}")
+        return False
+    return True
 
 
 def _report_type_name(report_type: str) -> str:
     return {
         "sales_pipeline": "Этапы продаж",
-        "deficit_report": "Дефицит по КС",
+        "deficit_report": "Дефицит / задолженность",
+        "pdo_report": "Отчёт ПДО",
+        "warranty": "Гарантия",
+        "sales_forecast": "Прогноз продаж",
+        "supplier_orders": "Заказы поставщикам",
+        "planned_receipts": "Планируемые поступления",
+        "incoming_requests": "Входящие запросы",
     }.get(report_type, "Универсальный отчёт")
 
 
@@ -166,76 +201,42 @@ def _generate_report() -> None:
     st.rerun()
 
 
-def render_analysis_block(uploaded_file) -> None:
-    st.subheader("2. Подробный отчёт")
-    st.caption(
-        "Отдельная страница с полным разбором файла: KPI, графики, выводы, "
-        "качество данных. Текст отчёта можно редактировать и скачать."
+def render_top_bar() -> None:
+    """Выбор файла загружает его сразу; отчёт — отдельная кнопка после загрузки."""
+    uploaded_file = st.file_uploader(
+        "Выгрузка 1С (.xlsx, .xls, .csv)",
+        type=["xlsx", "xls", "csv"],
     )
 
-    st.button(
-        "📄 Сформировать отчёт",
-        type="primary",
-        disabled=not st.session_state.file_id,
-        on_click=_generate_report,
-    )
+    if uploaded_file is not None:
+        signature = (uploaded_file.name, uploaded_file.size)
+        already_ok = (
+            st.session_state.get("last_upload_sig") == signature
+            and st.session_state.file_id
+        )
+        if not already_ok:
+            if st.session_state.get("failed_upload_sig") == signature:
+                if st.button("Повторить загрузку"):
+                    st.session_state.failed_upload_sig = None
+                    st.rerun()
+            elif _process_upload(uploaded_file):
+                st.session_state.last_upload_sig = signature
+                st.session_state.failed_upload_sig = None
+                st.rerun()
+            else:
+                st.session_state.failed_upload_sig = signature
 
-
-def render_insights_block() -> None:
-    st.subheader("3. Инсайты")
-
-    if st.button(
-        "Получить инсайты",
-        disabled=not st.session_state.file_id,
-    ):
-        if not st.session_state.file_id:
-            st.warning("Сначала загрузите файл")
-            return
-
-        try:
-            with st.spinner("Собираю автоматические инсайты..."):
-                st.session_state.insights = get_insights(
-                    st.session_state.file_id
-                )
-        except ApiClientError as exc:
-            st.error(f"Ошибка получения инсайтов: {exc}")
-            return
-
-    if st.session_state.insights:
-        for insight in st.session_state.insights:
-            st.info(insight)
-
-
-def render_visualization_block() -> None:
-    st.subheader("4. 📈 Визуализация")
-
-    chart_options = [
-        "Авто-график (лучшие категории)",
-        "Продажи по регионам",
-        "Продажи по менеджерам",
-        "Топ клиентов",
-        "Продажи по месяцам"
-    ]
-    
-    selected_option = st.selectbox("Что построить?", chart_options)
-
-    if st.button("Построить график", disabled=not st.session_state.file_id):
-        if not st.session_state.file_id:
-            st.warning("Сначала загрузите файл")
-            return
-
-        try:
-            with st.spinner("Создаю график..."):
-                chart_data = generate_chart(st.session_state.file_id, selected_option)
-        except ApiClientError as exc:
-            st.error(f"Ошибка построения графика: {exc}")
-            return
-
-        if "plotly_json" in chart_data:
-            fig = pio.from_json(chart_data["plotly_json"])
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("График не был возвращен API.")
+    if st.session_state.file_id:
+        name_col, report_col = st.columns([3, 1])
+        with name_col:
+            st.caption(f"Открыт файл: **{st.session_state.uploaded_filename}**")
+        with report_col:
+            if st.button(
+                "Сформировать отчёт",
+                type="secondary",
+                use_container_width=True,
+            ):
+                _generate_report()
 
 
 def _render_charts_grid(charts: list) -> None:
@@ -257,6 +258,13 @@ _AGGS = ["sum", "mean", "count"]
 _UNITS = ["auto", "rub", "k", "mln", "mlrd"]
 
 
+def _choice_index(options: list[str], value, default: int = 0) -> int:
+    try:
+        return options.index(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def _apply_dashboard_result(result: dict) -> None:
     """Обновить session_state.dashboard новыми вкладками/спекой."""
     db = st.session_state.dashboard or {}
@@ -265,11 +273,19 @@ def _apply_dashboard_result(result: dict) -> None:
         db["spec"] = result["spec"]
     st.session_state.dashboard = db
     st.session_state.dashboard_comments = {}
+    if result.get("warning"):
+        st.session_state.dashboard_warning = result["warning"]
+    else:
+        st.session_state.pop("dashboard_warning", None)
 
 
 def _render_dashboard_toolbar(db: dict) -> None:
     """NL-генерация/правка дашборда + комментарии ИИ + простой редактор."""
     file_id = st.session_state.file_id
+
+    warning = st.session_state.pop("dashboard_warning", None)
+    if warning:
+        st.info(warning)
 
     col_input, col_gen, col_edit, col_comments = st.columns([5, 2, 2, 2])
     request_text = col_input.text_input(
@@ -321,21 +337,21 @@ def _render_spec_editor(db: dict) -> None:
                 )
                 tile["chart_type"] = cols[1].selectbox(
                     "Тип", _CHART_TYPES,
-                    index=_CHART_TYPES.index(tile.get("chart_type", "bar")),
+                    index=_choice_index(_CHART_TYPES, tile.get("chart_type", "bar")),
                     key=f"{key}_c", label_visibility="collapsed",
                 )
                 tile["agg"] = cols[2].selectbox(
                     "Агрегат", _AGGS,
-                    index=_AGGS.index(tile.get("agg", "sum")),
+                    index=_choice_index(_AGGS, tile.get("agg", "sum")),
                     key=f"{key}_a", label_visibility="collapsed",
                 )
                 tile["top_n"] = cols[3].number_input(
-                    "Топ-N", 1, 50, int(tile.get("top_n", 10)),
+                    "Топ-N", 1, 50, int(tile.get("top_n") or 10),
                     key=f"{key}_n", label_visibility="collapsed",
                 )
                 tile["unit"] = cols[4].selectbox(
                     "Единицы", _UNITS,
-                    index=_UNITS.index(tile.get("unit", "auto")),
+                    index=_choice_index(_UNITS, tile.get("unit", "auto")),
                     key=f"{key}_u", label_visibility="collapsed",
                 )
                 tile["_delete"] = cols[5].checkbox("🗑", key=f"{key}_d")
@@ -344,22 +360,30 @@ def _render_spec_editor(db: dict) -> None:
                 new_title = st.text_input("Название", key=f"add_{tab_i}_title")
                 new_type = st.selectbox("Тип", _CHART_TYPES, key=f"add_{tab_i}_type")
                 new_kind = st.selectbox(
-                    "Источник", ["group", "period", "columns_pattern"], key=f"add_{tab_i}_kind"
+                    "Источник",
+                    ["group", "period", "columns_pattern", "current_stage"],
+                    key=f"add_{tab_i}_kind",
                 )
                 new_group = new_value = new_period = new_pattern = None
                 if new_kind == "group":
-                    new_group = st.selectbox("Колонка группировки", column_names, key=f"add_{tab_i}_g")
-                if new_kind in ("group", "period"):
+                    new_group = st.selectbox(
+                        "Колонка группировки",
+                        column_names or ["—"],
+                        key=f"add_{tab_i}_g",
+                    )
+                if new_kind in ("group", "period", "current_stage"):
                     new_value = st.selectbox(
-                        "Метрика (пусто = count)", ["—"] + column_names, key=f"add_{tab_i}_v"
+                        "Метрика (пусто = count)",
+                        ["—"] + column_names,
+                        key=f"add_{tab_i}_v",
                     )
                 if new_kind == "period":
                     new_period = st.selectbox("Период", ["month", "quarter", "year"], key=f"add_{tab_i}_p")
-                if new_kind == "columns_pattern":
+                if new_kind in ("columns_pattern", "current_stage"):
                     new_pattern = st.text_input("Окончание колонок", "(сумма)", key=f"add_{tab_i}_pat")
                 if st.button("Добавить", key=f"add_{tab_i}_btn"):
                     source = {"kind": new_kind}
-                    if new_group:
+                    if new_group and new_group != "—":
                         source["group_column"] = new_group
                     if new_value and new_value != "—":
                         source["value_column"] = new_value
@@ -402,8 +426,11 @@ def _render_spec_editor(db: dict) -> None:
 
 def _render_tabs(tabs: list) -> None:
     """Вкладочный дашборд v2: st.tabs + сетка тайлов по 2 в ряд."""
+    if not tabs:
+        st.info("На дашборде нет вкладок — сгенерируйте дашборд или добавьте график.")
+        return
     comments = st.session_state.get("dashboard_comments", {})
-    tab_titles = [t["title"] for t in tabs]
+    tab_titles = [t["title"] or f"Вкладка {i+1}" for i, t in enumerate(tabs)]
     for tab_obj, tab_data in zip(st.tabs(tab_titles), tabs):
         with tab_obj:
             comment = comments.get(tab_data["title"])
@@ -426,6 +453,56 @@ def _render_tabs(tabs: list) -> None:
                             st.plotly_chart(fig, use_container_width=True)
 
 
+def _render_file_briefing() -> None:
+    ctx = st.session_state.get("file_context") or {}
+    if not ctx.get("summary") and not ctx.get("metrics"):
+        return
+    just_loaded = st.session_state.pop("file_context_just_loaded", False)
+    with st.expander("Как ИИ видит этот файл", expanded=just_loaded):
+        if ctx.get("title"):
+            st.markdown(f"**{ctx['title']}**")
+        if ctx.get("report_kind"):
+            st.caption(ctx["report_kind"])
+        if ctx.get("summary"):
+            st.write(ctx["summary"])
+        if ctx.get("grain"):
+            st.caption(ctx["grain"])
+        sheets = ctx.get("sheets") or []
+        if len(sheets) > 1:
+            st.markdown("**Листы книги**")
+            for sheet in sheets:
+                mark = " — рабочий" if sheet.get("active") else ""
+                st.write(
+                    f"• {sheet.get('name')}: {sheet.get('rows', 0)} строк, "
+                    f"{sheet.get('n_columns', 0)} колонок{mark}"
+                )
+        cols = st.columns(2)
+        with cols[0]:
+            metrics = ctx.get("metrics") or []
+            if metrics:
+                st.markdown("**Метрики**")
+                for name in metrics[:8]:
+                    st.write(f"• {name}")
+        with cols[1]:
+            groupers = ctx.get("groupers") or []
+            if groupers:
+                st.markdown("**Разрезы**")
+                for name in groupers[:8]:
+                    st.write(f"• {name}")
+        ideas = ctx.get("dashboard_ideas") or []
+        if ideas:
+            st.markdown("**Что можно собрать**")
+            for idea in ideas[:6]:
+                st.write(f"• {idea}")
+        caveats = ctx.get("caveats") or []
+        if caveats:
+            st.caption("Ограничения: " + "; ".join(caveats[:4]))
+        if ctx.get("llm_ready"):
+            st.caption("Карточка собрана моделью и сохранена для чата и дашборда.")
+        else:
+            st.caption("Краткая карточка по колонкам — модель недоступна или ещё не разбирала файл.")
+
+
 def render_dashboard_block() -> None:
     if st.session_state.get("dashboard"):
         db = st.session_state.dashboard
@@ -434,6 +511,14 @@ def render_dashboard_block() -> None:
         type_name = _report_type_name(report_type)
 
         st.header(f"Отчет: {type_name}")
+
+        notice = st.session_state.pop("pin_notice", None)
+        if notice:
+            kind, text = notice
+            if kind == "ok":
+                st.success(text)
+            else:
+                st.warning(text)
         
         metadata = db.get("metadata", {})
         if metadata:
@@ -447,7 +532,7 @@ def render_dashboard_block() -> None:
         if summary:
             st.write("### 📋 Executive Summary")
             st.info(summary)
-        
+
         # KPIs
         if db.get("kpis"):
             st.write("### 📊 Ключевые показатели (KPI)")
@@ -487,8 +572,8 @@ def render_dashboard_block() -> None:
 
         # Detailed Table
         if st.session_state.get("detailed_table"):
-            st.write("### 📑 Детализация данных (ТОП-100 строк)")
-            st.dataframe(st.session_state.detailed_table, use_container_width=True)
+            with st.expander("Детализация (ТОП-100 строк)"):
+                st.dataframe(st.session_state.detailed_table, use_container_width=True)
 
 
 def _build_report_markdown() -> str:
@@ -556,10 +641,8 @@ def render_report_page() -> None:
             st.session_state.view = "main"
             st.rerun()
     with top_right:
-        st.button(
-            "🔄 Пересоздать (сбросит правки)",
-            on_click=_generate_report,
-        )
+        if st.button("🔄 Пересоздать (сбросит правки)"):
+            _generate_report()
 
     st.title(f"📄 Отчёт: {_report_type_name(rep.get('report_type', 'unknown'))}")
     st.caption(
@@ -688,6 +771,42 @@ _CHAT_SUGGESTIONS = {
         "Круговая диаграмма дефицита по подразделениям",
         "Сколько уникальных клиентов?",
     ],
+    "pdo_report": [
+        "Сколько строк в таблице?",
+        "Готовность по подразделениям",
+        "Какие колонки есть?",
+        "Основные выводы",
+    ],
+    "warranty": [
+        "Сколько строк в таблице?",
+        "Разбивка по подразделениям",
+        "Топ контрагентов",
+        "Какие колонки есть?",
+    ],
+    "sales_forecast": [
+        "Топ-5 заказчиков",
+        "Сумма по заказчикам",
+        "Какие колонки есть?",
+        "Основные выводы",
+    ],
+    "supplier_orders": [
+        "Сумма по поставщикам",
+        "Топ-5 поставщиков",
+        "График по менеджерам",
+        "Какие колонки есть?",
+    ],
+    "planned_receipts": [
+        "Топ-5 заказчиков",
+        "Сумма долга по менеджерам",
+        "Какие колонки есть?",
+        "Основные выводы",
+    ],
+    "incoming_requests": [
+        "Сколько строк в таблице?",
+        "Разбивка по статусам",
+        "Сумма проекта по отправителям",
+        "Какие колонки есть?",
+    ],
 }
 _DEFAULT_CHAT_SUGGESTIONS = [
     "Сколько строк в таблице?",
@@ -700,37 +819,56 @@ def _render_message_charts(message: dict, msg_idx: int = 0) -> None:
     for chart_i, chart in enumerate(message.get("charts", [])):
         if "plotly_json" in chart:
             fig = pio.from_json(chart["plotly_json"])
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig,
+                use_container_width=True,
+                key=f"chat_fig_{msg_idx}_{chart_i}",
+            )
         pin_spec = chart.get("pin_spec")
-        # пин доступен, когда у текущего файла есть вкладочный дашборд
         if pin_spec and st.session_state.get("dashboard", {}).get("tabs"):
-            if st.button(
+            st.button(
                 "📌 На дашборд",
                 key=f"pin_{msg_idx}_{chart_i}",
                 help="Закрепить этот график на первой вкладке дашборда",
-            ):
-                try:
-                    result = dashboard_pin(st.session_state.file_id, pin_spec)
-                    st.toast(result.get("message", "Закреплено"), icon="📌")
-                    with st.spinner("Обновляю дашборд..."):
-                        st.session_state.dashboard = get_dashboard(st.session_state.file_id)
-                except ApiClientError as exc:
-                    st.warning(str(exc))
+                on_click=_queue_pin,
+                args=(copy.deepcopy(pin_spec),),
+            )
 
 
 def render_chat_block() -> None:
     st.subheader("Чат")
+    if not st.session_state.file_id:
+        st.caption("Загрузите файл — здесь можно спрашивать про цифры и просить диаграммы.")
+        return
+
     st.caption(
         "Спросите про данные или попросите диаграмму: "
         "«круговая диаграмма дефицита по подразделениям», «динамика выручки по месяцам»"
     )
 
-    # Чипы-подсказки под тип отчёта
+    # Чипы-подсказки: идеи из карточки файла, иначе шаблоны по типу отчёта
     dashboard = st.session_state.get("dashboard") or {}
-    suggestions = _CHAT_SUGGESTIONS.get(
+    ctx = st.session_state.get("file_context") or {}
+    ideas = [
+        str(item).strip()
+        for item in (ctx.get("dashboard_ideas") or [])
+        if str(item).strip()
+    ]
+    fallback = _CHAT_SUGGESTIONS.get(
         dashboard.get("report_type"),
         _DEFAULT_CHAT_SUGGESTIONS,
     )
+    suggestions = []
+    seen: set[str] = set()
+    for item in ideas + list(fallback):
+        if item in seen:
+            continue
+        seen.add(item)
+        suggestions.append(item)
+        if len(suggestions) >= 4:
+            break
+    if not suggestions:
+        suggestions = list(_DEFAULT_CHAT_SUGGESTIONS)
     disabled = not st.session_state.file_id
     chip_cols = st.columns(len(suggestions))
     for i, suggestion in enumerate(suggestions):
@@ -793,21 +931,23 @@ def render_chat_block() -> None:
     with st.chat_message("assistant"):
         st.markdown(answer)
         _render_message_charts(
-            {"charts": charts}, msg_idx=len(st.session_state.messages)
+            {"charts": charts},
+            msg_idx=len(st.session_state.messages) - 1,
         )
 
 
 def main() -> None:
     init_session_state()
+    _flush_pending_pin()
 
     backend_ok, backend_status = check_backend()
     render_sidebar(backend_ok, backend_status)
 
     st.title("Excel AI Agent")
-    st.caption("Локальный интерфейс для тестирования FastAPI + Pandas + Ollama агента")
+    st.caption("Аналитик выгрузок 1С: сначала изучает файл, затем дашборд и чат")
 
     if not backend_ok:
-        st.error("❌ Backend недоступен")
+        st.error("Backend недоступен")
         st.stop()
 
     # Отдельная страница подробного отчёта
@@ -819,30 +959,22 @@ def main() -> None:
             st.rerun()
         return
 
-    uploaded_file = st.file_uploader(
-        "Выберите Excel-файл",
-        type=["xlsx", "xls"],
-    )
+    render_top_bar()
 
-    left_col, right_col = st.columns(2)
+    _render_file_briefing()
 
-    with left_col:
-        render_upload_block(uploaded_file)
-
-    with right_col:
-        render_analysis_block(uploaded_file)
-
-    st.divider()
     if st.session_state.get("dashboard"):
+        st.divider()
         render_dashboard_block()
-    else:
-        render_insights_block()
-        
-    st.divider()
-    render_visualization_block()
-    
+    elif not st.session_state.file_id:
+        st.info("Выберите файл выгрузки — дашборд появится автоматически.")
+
     st.divider()
     render_chat_block()
+
+    # on_click мог сработать после отрисовки дашборда — перерисуем с новым тайлом
+    if st.session_state.get("pending_pin"):
+        st.rerun()
 
 
 if __name__ == "__main__":

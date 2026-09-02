@@ -212,6 +212,10 @@ def dashboard_comments(file_id: str, base_url: str = API_BASE_URL) -> dict:
     return _post_json("/dashboard/comments", {"file_id": file_id}, base_url)
 
 
+def enrich_file_context(file_id: str, base_url: str = API_BASE_URL) -> dict:
+    return _post_json("/file-context", {"file_id": file_id}, base_url)
+
+
 def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> dict:
     try:
         response = requests.post(

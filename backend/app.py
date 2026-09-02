@@ -18,7 +18,6 @@ from config import (
 )
 from agents.excel_agent import ExcelAgent
 from services.excel_service import (
-    read_excel,
     validate_excel_content,
     validate_excel_filename,
 )
@@ -36,6 +35,7 @@ from models.schemas import (
     DashboardPinRequest,
     DashboardRequest,
     DashboardSpecSaveRequest,
+    FileContextRequest,
     HistoryRequest,
     InsightsRequest,
     ChartRequest,
@@ -49,6 +49,7 @@ logger = logging.getLogger("excel_agent")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    db_service.init_db()
     _check_ollama_availability()
     yield
 
@@ -154,10 +155,25 @@ async def upload_excel(
     file_id, file_path = await _read_upload_securely(file)
 
     try:
-        df = read_excel(file_path)
+        from services.excel_service import read_workbook
+
+        df, workbook = read_workbook(file_path)
         set_dataframe(file_id, df)
     except (InvalidFileError, EmptyDataFrameError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        from services.file_context_service import ensure_context
+
+        ensure_context(
+            file_id,
+            df,
+            filename=get_original_name(file_id),
+            use_llm=False,
+            workbook=workbook,
+        )
+    except Exception as exc:
+        logger.warning("Карточка файла не собрана при загрузке: %s", exc)
 
     return {
         "file_id": file_id,
@@ -281,6 +297,22 @@ async def dashboard(
     return data
 
 
+@app.post("/file-context")
+def file_context(request: FileContextRequest):
+    """ИИ изучает выгрузку и сохраняет карточку для чата и дашборда."""
+    from services.file_context_service import ensure_context
+
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _load_df(request.file_id, file_path)
+    ctx = ensure_context(
+        request.file_id,
+        df,
+        filename=get_original_name(request.file_id),
+        use_llm=True,
+    )
+    return ctx.model_dump()
+
+
 # ---------------------------------------------------------------------------
 # Дашборды v2: NL-генерация/редактирование, пин из чата, комментарии
 # ---------------------------------------------------------------------------
@@ -304,12 +336,15 @@ def dashboard_generate(request: DashboardGenerateRequest):
     file_path = _get_file_path_or_404(request.file_id)
     df = _load_df(request.file_id, file_path)
     fallback = dashboard_service.get_current_spec(request.file_id, df)
+    from services.file_context_service import get_context
+
     spec, warning = _handle_service_errors(
         dashboard_service.assemble_spec,
         df,
         request.request,
         None,
         fallback,
+        file_context=get_context(request.file_id),
     )
     if spec is None:
         raise HTTPException(
@@ -333,12 +368,15 @@ def dashboard_edit(request: DashboardGenerateRequest):
     current = dashboard_service.get_current_spec(request.file_id, df)
     if current is None:
         raise HTTPException(status_code=404, detail="Нет дашборда для редактирования")
+    from services.file_context_service import get_context
+
     spec, warning = _handle_service_errors(
         dashboard_service.assemble_spec,
         df,
         request.request,
         current,
         current,
+        file_context=get_context(request.file_id),
     )
     if spec is None:
         raise HTTPException(

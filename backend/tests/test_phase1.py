@@ -82,8 +82,13 @@ class TestParquetCache:
         monkeypatch.setattr(cache_service, "CACHE_TTL_HOURS", -1)
         assert cache_service.get_dataframe("fid") is None
 
-    def test_missing_cache_returns_none(self, tmp_cache):
-        assert cache_service.get_dataframe("unknown") is None
+    def test_mixed_object_column_writes_parquet(self, tmp_cache):
+        df = pd.DataFrame({"комментарий": ["ок", 1.5, None, "текст"]})
+        cache_service.set_dataframe("mix", df)
+        cache_service._cache.clear()
+        restored = cache_service.get_dataframe("mix")
+        assert restored is not None
+        assert len(restored) == 4
 
 
 class TestCsvSupport:
@@ -109,12 +114,31 @@ class TestCsvSupport:
         assert response.status_code == 200, response.text
         assert response.json()["file_id"]
 
+    def test_csv_with_sum_is_not_deficit(self):
+        from services.report_detector import detect_report_type
+
+        df = pd.DataFrame({"клиент": ["А", "Б"], "сумма": [100.0, 200.0]})
+        assert detect_report_type(df) == "unknown"
+        assert detect_report_type(df, filename="выгрузка.csv") == "unknown"
+
+        with TestClient(app) as client:
+            content = "Клиент;Сумма\nА;100\nБ;200\n"
+            response = client.post(
+                "/upload",
+                files={"file": ("t.csv", io.BytesIO(content.encode("utf-8-sig")))},
+            )
+            assert response.status_code == 200, response.text
+            dash = client.post("/dashboard", json={"file_id": response.json()["file_id"]})
+            assert dash.status_code == 200, dash.text
+            assert dash.json()["report_type"] != "deficit_report"
+            assert dash.json().get("tabs") or dash.json().get("charts")
+
 
 class TestCompoundQuestions:
     def test_compound_goes_to_llm_first(self, sales_df, monkeypatch):
         calls = []
 
-        def fake_classify(question, df, history=None):
+        def fake_classify(question, df, history=None, **kwargs):
             calls.append(question)
             return [
                 {"action": "stat", "operation": "row_count"},

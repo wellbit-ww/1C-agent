@@ -55,7 +55,8 @@ def validate_excel_content(data: bytes, filename: str | None) -> None:
         )
 
 
-def read_excel(file_path: str):
+def read_workbook(file_path: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    """Все непустые видимые листы + рабочий DataFrame (первый лист)."""
     validate_excel_filename(file_path)
 
     try:
@@ -68,5 +69,9 @@ def read_excel(file_path: str):
     if not sheets:
         raise EmptyDataFrameError("Excel-файл не содержит валидных данных")
 
-    # Return the first non-empty sheet
-    return next(iter(sheets.values()))
+    return next(iter(sheets.values())), sheets
+
+
+def read_excel(file_path: str):
+    df, _ = read_workbook(file_path)
+    return df

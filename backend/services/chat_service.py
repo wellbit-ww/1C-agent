@@ -215,17 +215,18 @@ _LLM_PROMPT = """/no_think
 Ты — роутер запросов к Excel-таблице. Преобразуй вопрос пользователя в JSON-команду (или список команд для составного вопроса).
 
 Колонки таблицы: {columns}
-{history_block}
+{file_context_block}{history_block}
 Возможные команды:
 - {{"action": "stat", "operation": "row_count"|"column_count"|"columns"|"sum"|"mean"|"max"|"min"|"unique_count"|"null_count"|"duplicates_count"}}
 - {{"action": "stat", "operation": "top", "semantic": "<группа>", "n": 5}}
 - {{"action": "stat", "operation": "group", "agg": "sum"|"mean"|"count", "semantic": "<группа>"}}
-- {{"action": "chart", "chart_type": "bar"|"pie"|"line", "group_semantic": "<группа>", "value_semantic": "<метрика>", "period": "month"|"quarter"|"year", "agg": "sum"|"mean"|"count", "top_n": 10}}
+- {{"action": "chart", "chart_type": "bar"|"pie"|"line", "group_semantic": "<группа>", "value_semantic": "<метрика>", "period": "month"|"quarter"|"year", "agg": "sum"|"mean"|"count", "top_n": 10, "group_column": "<точное имя>", "value_column": "<точное имя>"}}
 - {{"action": "insights"}} — основные выводы по данным
 - {{"action": "general"}} — открытый вопрос о содержимом файла
 - {{"action": "help"}} — вопрос не связан с данными
 
 <группа>: client, manager, region, department. <метрика>: revenue, deficit, amount.
+group_column / value_column — точные имена из списка колонок (предпочтительнее semantic, если имя известно). Не выдумывай колонки.
 Если вопрос составной («и», «а также») — верни список команд: [{{...}}, {{...}}].
 Если вопрос-уточнение («а по менеджерам?», «а теперь круговая») — учитывай контекст диалога.
 Ответь строго одним JSON, без пояснений и без markdown.
@@ -275,15 +276,36 @@ def _build_history_block(history: list[dict] | None) -> str:
     return "Контекст диалога:\n" + "\n".join(lines) + "\n"
 
 
+def _file_context_block(file_context) -> str:
+    if file_context is None:
+        return ""
+    block = getattr(file_context, "prompt_block", lambda: "")()
+    if not block:
+        return ""
+    return block.replace("{", "{{").replace("}", "}}") + "\n"
+
+
+def _match_column(df: pd.DataFrame, name) -> str | None:
+    if not name:
+        return None
+    target = str(name).strip()
+    for col in df.columns:
+        if str(col) == target:
+            return col
+    return None
+
+
 def _llm_classify(
     question: str,
     df: pd.DataFrame,
     history: list[dict] | None = None,
+    file_context=None,
 ) -> list[dict] | None:
     # длинный список колонок раздувает prompt-eval на CPU — ограничиваем
     columns = ", ".join(str(c) for c in df.columns[:25])
     prompt = _LLM_PROMPT.format(
         columns=columns,
+        file_context_block=_file_context_block(file_context),
         history_block=_build_history_block(history),
         question=question,
     )
@@ -460,8 +482,8 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
         }
 
     group_semantic = action.get("group_semantic")
-    group_col = None
-    if group_semantic:
+    group_col = _match_column(df, action.get("group_column"))
+    if not group_col and group_semantic:
         group_col = resolve_semantic_column(df, q, group_semantic, dtype="categorical")
     if not group_col:
         group_col = data_tools._resolve_categorical_column(df, q)
@@ -479,8 +501,9 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
     value_col = None
 
     if agg != "count":
+        value_col = _match_column(df, action.get("value_column"))
         value_semantic = action.get("value_semantic")
-        if value_semantic:
+        if not value_col and value_semantic:
             value_col = resolve_semantic_column(df, q, value_semantic, dtype="numeric")
         if not value_col:
             value_col = data_tools._resolve_numeric_column(df, q)
@@ -546,18 +569,21 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
     }
 
 
-def _exec_general(df: pd.DataFrame, action: dict) -> dict:
+def _exec_general(df: pd.DataFrame, action: dict, file_context=None) -> dict:
     from services.analysis_service import get_basic_info
 
-    info = get_basic_info(df)
+    briefing = ""
+    if file_context is not None:
+        briefing = getattr(file_context, "prompt_block", lambda: "")()
+    info = briefing or get_basic_info(df)
     prompt = f"""Ты аналитик данных. Ответь на вопрос пользователя по Excel-таблице.
 
 Вопрос: {action.get("question", "")}
 
-Информация о таблице:
+Понимание файла:
 {info}
 
-Ответь кратко и по делу на русском языке. Если данных для ответа недостаточно — честно скажи об этом."""
+Ответь кратко и по делу на русском языке. Если данных для ответа недостаточно — честно скажи об этом. Не выдумывай колонки и цифры."""
 
     try:
         answer = ask_llm(prompt)
@@ -567,8 +593,17 @@ def _exec_general(df: pd.DataFrame, action: dict) -> dict:
     return {"answer": answer}
 
 
-def _help_answer(df: pd.DataFrame) -> dict:
+def _help_answer(df: pd.DataFrame, file_context=None) -> dict:
     columns = ", ".join(f"«{c}»" for c in list(df.columns)[:12])
+    ideas = ""
+    if file_context is not None:
+        items = list(getattr(file_context, "dashboard_ideas", None) or [])[:4]
+        if items:
+            listing = "\n".join(f"• «{idea}»" for idea in items)
+            ideas = f"\nПо этому файлу можно спросить:\n{listing}\n"
+        summary = getattr(file_context, "summary", "") or ""
+        if summary:
+            ideas = f"\n{summary}\n" + ideas
     return {
         "answer": (
             "Я пока не понял этот запрос. Вот что я умею:\n"
@@ -576,7 +611,8 @@ def _help_answer(df: pd.DataFrame) -> dict:
             "• **Лидеры:** «Топ-5 клиентов», «Лучший менеджер»\n"
             "• **Диаграммы:** «Круговая диаграмма дефицита по подразделениям», "
             "«График выручки по месяцам», «Диаграмма по менеджерам»\n"
-            "• **Выводы:** «Основные инсайты»\n\n"
+            "• **Выводы:** «Основные инсайты»\n"
+            f"{ideas}"
             f"Колонки в файле: {columns}…"
         )
     }
@@ -620,7 +656,12 @@ def _is_compound(q: str) -> bool:
     return meaningful >= 2
 
 
-def _execute_actions(df: pd.DataFrame, question: str, actions: list[dict]) -> dict:
+def _execute_actions(
+    df: pd.DataFrame,
+    question: str,
+    actions: list[dict],
+    file_context=None,
+) -> dict:
     answers: list[str] = []
     charts: list[dict] = []
 
@@ -630,9 +671,9 @@ def _execute_actions(df: pd.DataFrame, question: str, actions: list[dict]) -> di
         if kind == "chart":
             result = _exec_chart(df, action)
         elif kind == "general":
-            result = _exec_general(df, action)
+            result = _exec_general(df, action, file_context=file_context)
         elif kind == "help":
-            result = _help_answer(df)
+            result = _help_answer(df, file_context=file_context)
         else:
             if kind == "insights":
                 action["operation"] = "insights"
@@ -649,6 +690,7 @@ def handle_question(
     df: pd.DataFrame,
     question: str,
     history: list[dict] | None = None,
+    file_context=None,
 ) -> dict:
     """Возвращает {"answer": str, "charts": [chart_dict, ...]}."""
     q = question.lower().strip()
@@ -656,9 +698,11 @@ def handle_question(
     # 0. Составной вопрос — приоритет LLM-разбора (вернёт список команд).
     # Если LLM недоступна — проваливаемся в быстрый путь (частичный ответ).
     if _is_compound(q):
-        actions = _llm_classify(question, df, history)
+        actions = _llm_classify(
+            question, df, history, file_context=file_context
+        )
         if actions:
-            return _execute_actions(df, question, actions)
+            return _execute_actions(df, question, actions, file_context=file_context)
 
     # 1. Быстрый путь: явный запрос графика по ключевым словам
     chart_action = _keyword_chart_action(q)
@@ -678,8 +722,13 @@ def handle_question(
         return {"answer": result["answer"], "charts": [result["chart"]] if result.get("chart") else []}
 
     # 3. LLM-классификация в JSON (поддерживает составные вопросы и контекст)
-    actions = _llm_classify(question, df, history)
+    actions = _llm_classify(
+        question, df, history, file_context=file_context
+    )
     if not actions:
-        return {"answer": _help_answer(df)["answer"], "charts": []}
+        return {
+            "answer": _help_answer(df, file_context=file_context)["answer"],
+            "charts": [],
+        }
 
-    return _execute_actions(df, question, actions)
+    return _execute_actions(df, question, actions, file_context=file_context)

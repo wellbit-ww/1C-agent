@@ -123,8 +123,12 @@ class ExcelAgent:
 
     def get_dashboard(self, file_id: str, file_path: str) -> dict:
         df = self._load_dataframe(file_id, file_path)
+        from pathlib import Path
         from services.report_service import get_profile_for_df
-        report_type, profile = get_profile_for_df(df)
+        from services.storage_service import get_original_name
+
+        filename = get_original_name(file_id) or Path(file_path).name
+        report_type, profile = get_profile_for_df(df, filename=filename)
 
         summary = ""
         if hasattr(profile, "get_summary"):
@@ -159,6 +163,16 @@ class ExcelAgent:
         else:
             result["charts"] = profile.get_charts(df)
 
+        from services.file_context_service import ensure_context, get_context
+
+        try:
+            ctx = get_context(file_id) or ensure_context(
+                file_id, df, filename=filename, use_llm=False
+            )
+            result["file_context"] = ctx.model_dump()
+        except Exception:
+            pass
+
         return result
 
     def handle_chat_message(
@@ -171,7 +185,11 @@ class ExcelAgent:
         """Новый обработчик чата: возвращает {"answer": str, "charts": [...]}."""
         df = self._load_dataframe(file_id, file_path)
         from services.chat_service import handle_question
-        return handle_question(df, question, history=history)
+        from services.file_context_service import get_context
+
+        return handle_question(
+            df, question, history=history, file_context=get_context(file_id)
+        )
 
     def answer_question(
         self,
