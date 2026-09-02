@@ -57,12 +57,52 @@ class TestFastPathCharts:
 
 
 class TestFallback:
-    def test_unknown_question_gives_hints(self, sales_df, monkeypatch):
-        # LLM недоступна/не распознала -> подсказки вместо пустого ответа
+    def test_unknown_question_uses_file_facts(self, sales_df, monkeypatch):
+        captured = {}
+
+        def fake_ask(prompt):
+            captured["prompt"] = prompt
+            return "В файле продажи: 2394 строки, главная метрика — выручка."
+
         monkeypatch.setattr(chat_service, "_llm_classify", lambda *a, **kw: None)
-        result = chat_service.handle_question(sales_df, "qwerty asdfgh")
+        monkeypatch.setattr(chat_service, "ask_llm", fake_ask)
+        from models.file_context import FileContext
+
+        ctx = FileContext(
+            summary="Карточка продаж АБВ",
+            facts=["Строк: 2394"],
+        )
+        result = chat_service.handle_question(
+            sales_df, "qwerty asdfgh", file_context=ctx
+        )
         assert result["charts"] == []
-        assert len(result["answer"]) > 30
+        assert "я пока не понял" not in result["answer"].lower()
+        assert "Карточка продаж АБВ" in captured["prompt"]
+        assert "Строк: 2394" in captured["prompt"]
+        assert "продажи" in result["answer"].lower()
+
+    def test_explicit_help_lists_skills(self, sales_df):
+        result = chat_service.handle_question(sales_df, "Что ты умеешь?")
+        assert result["charts"] == []
+        assert "Вот что я умею" in result["answer"]
+        assert "я пока не понял" not in result["answer"].lower()
+
+    def test_unknown_without_ollama_returns_pandas_facts(self, sales_df, monkeypatch):
+        from models.file_context import FileContext
+        from services.exceptions import OllamaUnavailableError
+
+        monkeypatch.setattr(chat_service, "_llm_classify", lambda *a, **kw: None)
+
+        def boom(_prompt):
+            raise OllamaUnavailableError("нет ollama")
+
+        monkeypatch.setattr(chat_service, "ask_llm", boom)
+        ctx = FileContext(summary="Фактфайл XYZ", facts=["Строк: 2394"])
+        result = chat_service.handle_question(
+            sales_df, "расскажи про содержимое файла", file_context=ctx
+        )
+        assert "я пока не понял" not in result["answer"].lower()
+        assert "Строк: 2394" in result["answer"] or "Фактфайл XYZ" in result["answer"]
 
 
 @requires_ollama

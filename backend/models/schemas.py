@@ -36,6 +36,14 @@ class ReportRequest(BaseModel):
     filename: str | None = None
 
 
+class ReportPdfRequest(BaseModel):
+    file_id: str
+    filename: str | None = None
+    narrative: str | None = None
+    insights: str | None = None
+    comment: str | None = None
+
+
 class HistoryRequest(BaseModel):
     file_id: str
 

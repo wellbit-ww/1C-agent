@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import app
-from models.file_context import FileContext
+from models.file_context import FileContext, SheetBrief
 from services import chat_service, dashboard_service, db_service, file_context_service
 from services.file_context_service import (
     data_hash,
@@ -31,6 +31,17 @@ class _FakeLLM:
     def invoke(self, prompt: str):
         self.prompts.append(prompt)
         return _FakeMessage(self._content)
+
+
+class _FlakyLLM:
+    def __init__(self, first: str, second: str):
+        self._replies = [first, second]
+        self.prompts: list[str] = []
+
+    def invoke(self, prompt: str):
+        self.prompts.append(prompt)
+        text = self._replies.pop(0) if self._replies else ""
+        return _FakeMessage(text)
 
 
 @pytest.fixture
@@ -89,6 +100,16 @@ class TestDeterministicContext:
         assert set(ctx.groupers) <= known
         assert "сумма" in ctx.metrics
         assert ctx.llm_ready is False
+        assert ctx.facts
+        assert any("Строк:" in f for f in ctx.facts)
+
+    def test_facts_and_notes_use_real_columns(self, sales_df):
+        ctx = deterministic_context(sales_df, filename="sales.xlsx")
+        known = {str(c) for c in sales_df.columns}
+        assert ctx.facts
+        assert any("Строк:" in f for f in ctx.facts)
+        for note in ctx.column_notes:
+            assert note.name in known
 
     def test_hash_changes_with_columns(self, sales_df):
         other = sales_df.copy()
@@ -150,6 +171,18 @@ class TestLlmBriefing:
         assert ctx.llm_ready is False
         assert ctx.summary == fallback.summary
 
+    def test_retries_when_first_reply_is_garbage(self, sales_df, monkeypatch):
+        payload = json.dumps(_llm_payload(sales_df), ensure_ascii=False)
+        monkeypatch.setattr(
+            file_context_service,
+            "_get_brief_llm",
+            lambda: _FlakyLLM("я не понял файл", payload),
+        )
+        fallback = deterministic_context(sales_df, filename="sales.xlsx")
+        ctx = enrich_with_llm(sales_df, fallback, filename="sales.xlsx")
+        assert ctx.llm_ready is True
+        assert fallback.facts == ctx.facts
+
     def test_ensure_saves_fallback_when_ollama_down(self, sales_df, tmp_db, monkeypatch):
         from services.exceptions import OllamaUnavailableError
 
@@ -171,17 +204,38 @@ class TestPromptWiring:
             return '{"action": "help"}'
 
         monkeypatch.setattr(chat_service, "classify", fake_classify)
+        monkeypatch.setattr(chat_service, "ask_llm", lambda p: "это выгрузка продаж")
         ctx = FileContext(
             summary="Секретный брифинг файла XYZ",
             metrics=[str(sales_df.columns[0])],
             dashboard_ideas=["Собери дашборд"],
+            sheets=[
+                SheetBrief(
+                    name="Сделки",
+                    rows=10,
+                    n_columns=2,
+                    columns=["клиент", "сумма"],
+                    active=True,
+                ),
+                SheetBrief(
+                    name="Оплаты",
+                    rows=5,
+                    n_columns=2,
+                    columns=["сумма оплаты", "документ"],
+                    active=False,
+                ),
+            ],
+            active_sheet="Сделки",
         )
-        chat_service.handle_question(
+        result = chat_service.handle_question(
             sales_df,
             "что это за выгрузка на самом деле",
             file_context=ctx,
         )
         assert "Секретный брифинг файла XYZ" in captured["prompt"]
+        assert "Оплаты" in captured["prompt"]
+        assert "я пока не понял" not in result["answer"].lower()
+        assert "выгрузка продаж" in result["answer"]
 
     def test_dashboard_prompt_includes_summary(self, sales_df, monkeypatch):
         captured = {}
@@ -429,3 +483,56 @@ class TestLlmSeesAllSheets:
         assert names == ["Сделки", "Оплаты"]
         assert ctx.get("active_sheet") == "Сделки"
         assert "Оплаты" in (ctx.get("summary") or "")
+
+
+class TestSheetDescribe:
+    def test_named_other_sheet_is_described(self, sales_df, monkeypatch):
+        monkeypatch.setattr(
+            chat_service,
+            "_llm_classify",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("не ходить в LLM")),
+        )
+        ctx = FileContext(
+            summary="Книга сделок и оплат",
+            active_sheet="Сделки",
+            sheets=[
+                SheetBrief(
+                    name="Сделки",
+                    rows=100,
+                    n_columns=2,
+                    columns=["клиент", "сумма"],
+                    active=True,
+                ),
+                SheetBrief(
+                    name="Оплаты",
+                    rows=5,
+                    n_columns=2,
+                    columns=["дата оплаты", "сумма оплаты"],
+                    active=False,
+                    sample=[{"дата оплаты": "2024-01-15", "сумма оплаты": 50}],
+                ),
+            ],
+        )
+        result = chat_service.handle_question(
+            sales_df, "что на листе Оплаты?", file_context=ctx
+        )
+        assert result["charts"] == []
+        assert "Оплаты" in result["answer"]
+        assert "сумма оплаты" in result["answer"]
+        assert "2024-01-15" in result["answer"]
+        assert "Сделки" in result["answer"]
+
+    def test_list_sheets_question(self, sales_df):
+        ctx = FileContext(
+            active_sheet="Сделки",
+            sheets=[
+                SheetBrief(name="Сделки", rows=10, n_columns=1, columns=["клиент"], active=True),
+                SheetBrief(name="Оплаты", rows=5, n_columns=1, columns=["сумма оплаты"], active=False),
+            ],
+        )
+        result = chat_service.handle_question(
+            sales_df, "какие листы в файле?", file_context=ctx
+        )
+        assert "Сделки" in result["answer"]
+        assert "Оплаты" in result["answer"]
+        assert "дашборда" in result["answer"].lower() or "считаются" in result["answer"]

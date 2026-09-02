@@ -146,6 +146,7 @@ class TestCompoundQuestions:
             ]
 
         monkeypatch.setattr(chat_service, "_llm_classify", fake_classify)
+        monkeypatch.setattr(chat_service, "ask_llm", lambda p: "")
         result = chat_service.handle_question(
             sales_df, "Сколько строк и какая общая выручка?"
         )
@@ -179,6 +180,7 @@ class TestChatMemory:
             return '{"action": "chart", "chart_type": "bar", "group_semantic": "manager"}'
 
         monkeypatch.setattr(chat_service, "classify", fake_classify)
+        monkeypatch.setattr(chat_service, "ask_llm", lambda p: "")
         history = [
             {"role": "user", "content": "покажи выручку по клиентам"},
             {"role": "assistant", "content": "Построил диаграмму по клиентам."},

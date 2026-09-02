@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import (
@@ -42,6 +43,7 @@ from models.schemas import (
     ProfileRequest,
     TableRequest,
     ReportRequest,
+    ReportPdfRequest,
 )
 
 logger = logging.getLogger("excel_agent")
@@ -462,6 +464,42 @@ async def full_report(
     )
 
     return report
+
+
+@app.post("/report/pdf")
+async def full_report_pdf(request: ReportPdfRequest):
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _handle_service_errors(
+        agent._load_dataframe,
+        request.file_id,
+        file_path,
+    )
+    from services.report_service import get_full_report
+    from services.pdf_export import PdfExportError, load_dashboard_tabs, render_report_pdf
+
+    report = _handle_service_errors(
+        get_full_report,
+        df,
+        request.filename or get_original_name(request.file_id) or Path(file_path).name,
+    )
+    try:
+        pdf_bytes = render_report_pdf(
+            report,
+            narrative=request.narrative,
+            insights=request.insights,
+            comment=request.comment,
+            dashboard_tabs=load_dashboard_tabs(request.file_id, df),
+        )
+    except PdfExportError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    filename = (request.filename or get_original_name(request.file_id) or "report").rsplit(".", 1)[0]
+    safe_name = f"report_{filename}.pdf".replace('"', "")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
 
 
 @app.post("/table")

@@ -6,12 +6,19 @@
 from pydantic import BaseModel, Field
 
 
+class ColumnNote(BaseModel):
+    name: str
+    role: str = "text"
+    meaning: str = ""
+
+
 class SheetBrief(BaseModel):
     name: str
     rows: int = 0
     n_columns: int = 0
     columns: list[str] = Field(default_factory=list)
     active: bool = False
+    sample: list[dict] = Field(default_factory=list)
 
 
 class FileContext(BaseModel):
@@ -26,6 +33,8 @@ class FileContext(BaseModel):
     dashboard_ideas: list[str] = Field(default_factory=list)
     sheets: list[SheetBrief] = Field(default_factory=list)
     active_sheet: str = ""
+    facts: list[str] = Field(default_factory=list)
+    column_notes: list[ColumnNote] = Field(default_factory=list)
     llm_ready: bool = False
 
     def prompt_block(self) -> str:
@@ -58,4 +67,6 @@ class FileContext(BaseModel):
             lines.append("Даты: " + ", ".join(f"«{c}»" for c in self.date_columns[:4]))
         if self.caveats:
             lines.append("Ограничения: " + "; ".join(self.caveats[:4]))
+        if self.facts:
+            lines.append("Посчитанные факты: " + "; ".join(self.facts[:8]))
         return "\n".join(lines)

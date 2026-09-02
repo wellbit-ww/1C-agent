@@ -576,6 +576,102 @@ def render_dashboard_block() -> None:
                 st.dataframe(st.session_state.detailed_table, use_container_width=True)
 
 
+def _load_pdf_export():
+    """Streamlit следит за ui/, не за backend/ — иначе остаётся старый pdf_export."""
+    import importlib
+    import sys
+    from pathlib import Path
+
+    backend = str(Path(__file__).resolve().parents[1] / "backend")
+    if backend not in sys.path:
+        sys.path.insert(0, backend)
+    import services.pdf_export as pdf_export
+
+    if not hasattr(pdf_export, "chart_to_png") or not st.session_state.get(
+        "_pdf_export_fresh"
+    ):
+        pdf_export = importlib.reload(pdf_export)
+        st.session_state._pdf_export_fresh = True
+    return pdf_export
+
+
+def _dashboard_fingerprint(db: dict | None) -> tuple:
+    tabs = (db or {}).get("tabs") or []
+    return tuple(
+        (
+            tab.get("title"),
+            tuple(
+                (tile.get("title"), tile.get("chart_type"), len(tile.get("plotly_json") or ""))
+                for tile in tab.get("tiles") or []
+            ),
+        )
+        for tab in tabs
+    )
+
+
+def _dashboard_tabs_for_pdf() -> list:
+    """Растрирует графики дашборда один раз, пока спека не менялась."""
+    pdf_export = _load_pdf_export()
+
+    db = st.session_state.get("dashboard") or {}
+    fingerprint = _dashboard_fingerprint(db)
+    if (
+        st.session_state.get("_dash_png_fp") == fingerprint
+        and st.session_state.get("_dash_png_tabs") is not None
+    ):
+        return st.session_state._dash_png_tabs
+
+    tabs_out = []
+    for tab in db.get("tabs") or []:
+        tiles_out = []
+        for tile in tab.get("tiles") or []:
+            item = {
+                "title": tile.get("title"),
+                "error": tile.get("error"),
+                "stats": tile.get("stats"),
+                "plotly_json": tile.get("plotly_json"),
+            }
+            png = pdf_export.chart_to_png(item)
+            if png:
+                item["png"] = png
+                item.pop("plotly_json", None)
+            tiles_out.append(item)
+        tabs_out.append({"title": tab.get("title"), "tiles": tiles_out})
+
+    if not tabs_out:
+        charts = [
+            c
+            for c in (st.session_state.get("report") or {}).get("charts") or []
+            if c.get("plotly_json")
+        ]
+        if charts:
+            tiles_out = []
+            for chart in charts:
+                item = {"title": chart.get("title"), "plotly_json": chart.get("plotly_json")}
+                png = pdf_export.chart_to_png(item)
+                if png:
+                    item["png"] = png
+                    item.pop("plotly_json", None)
+                tiles_out.append(item)
+            tabs_out = [{"title": "Графики", "tiles": tiles_out}]
+
+    st.session_state._dash_png_fp = fingerprint
+    st.session_state._dash_png_tabs = tabs_out
+    return tabs_out
+
+
+def _build_report_pdf() -> bytes:
+    pdf_export = _load_pdf_export()
+    return pdf_export.render_report_pdf(
+        st.session_state.report,
+        narrative=st.session_state.get("edit_narrative"),
+        insights=st.session_state.get("edit_insights"),
+        comment=st.session_state.get("edit_comment") or "",
+        dashboard_tabs=_dashboard_tabs_for_pdf(),
+        dashboard_comments=st.session_state.get("dashboard_comments") or {},
+    )
+
+
 def _build_report_markdown() -> str:
     rep = st.session_state.report
     metadata = rep.get("metadata", {})
@@ -606,6 +702,19 @@ def _build_report_markdown() -> str:
     if comment:
         md.append("\n## Комментарий аналитика\n")
         md.append(comment)
+
+    db = st.session_state.get("dashboard") or {}
+    tabs = db.get("tabs") or []
+    if tabs:
+        md.append("\n## Дашборд\n")
+        comments = st.session_state.get("dashboard_comments") or {}
+        for tab in tabs:
+            md.append(f"### {tab.get('title') or 'Вкладка'}\n")
+            note = comments.get(tab.get("title"))
+            if note:
+                md.append(f"{note}\n")
+            for tile in tab.get("tiles") or []:
+                md.append(f"- {tile.get('title') or 'график'}")
 
     md.append("\n## Качество данных\n")
     md.append(
@@ -749,13 +858,36 @@ def render_report_page() -> None:
 
     # --- Скачивание ---
     st.divider()
-    st.download_button(
-        "⬇️ Скачать отчёт (Markdown, с вашими правками)",
-        data=_build_report_markdown(),
-        file_name=f"report_{datetime.now():%Y%m%d_%H%M%S}.md",
-        mime="text/markdown",
-        type="primary",
-    )
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pdf_col, md_col = st.columns(2)
+    with pdf_col:
+        try:
+            if st.session_state.get("_dash_png_tabs") is None:
+                with st.spinner("Готовлю графики дашборда для PDF..."):
+                    pdf_bytes = _build_report_pdf()
+            else:
+                pdf_bytes = _build_report_pdf()
+        except Exception as exc:
+            pdf_bytes = b""
+            st.error(f"Не удалось собрать PDF: {exc}")
+        if pdf_bytes:
+            st.download_button(
+                "⬇️ Скачать PDF",
+                data=pdf_bytes,
+                file_name=f"report_{stamp}.pdf",
+                mime="application/pdf",
+                type="primary",
+                key="download_report_pdf",
+            )
+            st.caption("В PDF попадут правки текста и текущий дашборд.")
+    with md_col:
+        st.download_button(
+            "⬇️ Markdown",
+            data=_build_report_markdown(),
+            file_name=f"report_{stamp}.md",
+            mime="text/markdown",
+            key="download_report_md",
+        )
 
 
 _CHAT_SUGGESTIONS = {

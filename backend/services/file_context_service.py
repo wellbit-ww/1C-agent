@@ -16,14 +16,14 @@ from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
 from config import MAIN_MODEL, OLLAMA_BASE_URL
-from models.file_context import FileContext, SheetBrief
+from models.file_context import ColumnNote, FileContext, SheetBrief
 from services import db_service
 from services.exceptions import OllamaUnavailableError
 
 logger = logging.getLogger(__name__)
 
-_CELL = 60
-_MAX_COLS = 36
+_CELL = 48
+_MAX_COLS = 24
 
 _PROMPT = """Ты аналитик выгрузок 1С. По снимку таблицы собери JSON-карточку понимания файла.
 
@@ -55,7 +55,7 @@ def _get_brief_llm() -> ChatOllama:
             base_url=OLLAMA_BASE_URL,
             temperature=0,
             reasoning=False,
-            num_predict=900,
+            num_predict=1800,
         )
     return _brief_llm
 
@@ -134,6 +134,64 @@ def _sheet_cards(
     }]
 
 
+def compute_facts(
+    df: pd.DataFrame,
+    metrics: list[str],
+    groupers: list[str],
+) -> list[str]:
+    """Короткие цифры pandas для карточки и чата. LLM их не считает."""
+    from services.insights_service import _format_number
+
+    facts = [f"Строк: {len(df)}", f"Колонок: {len(df.columns)}"]
+    if len(df):
+        empty = round(float(df.isna().mean().mean()) * 100, 1)
+        facts.append(f"Пустых ячеек: {empty}%")
+    known = {str(c) for c in df.columns}
+    for name in metrics[:2]:
+        if name not in known:
+            continue
+        total = pd.to_numeric(df[name], errors="coerce").sum()
+        facts.append(f"Сумма «{name}»: {_format_number(float(total))}")
+    for name in groupers[:2]:
+        if name not in known:
+            continue
+        top = df[name].dropna().astype(str).value_counts().head(3)
+        if top.empty:
+            continue
+        listing = ", ".join(f"{k} ({int(v)})" for k, v in top.items())
+        facts.append(f"Топ «{name}»: {listing}")
+    return facts[:8]
+
+
+def build_column_notes(
+    df: pd.DataFrame,
+    metrics: list[str],
+    groupers: list[str],
+    dates: list[str],
+) -> list[ColumnNote]:
+    notes: list[ColumnNote] = []
+    metric_set = set(metrics)
+    grouper_set = set(groupers)
+    date_set = set(dates)
+    for col in list(df.columns)[:20]:
+        name = str(col)
+        lower = name.lower()
+        if name in metric_set or str(col).endswith("(сумма)"):
+            role, meaning = "metric", "числовая метрика"
+        elif name in date_set or "дата" in lower:
+            role, meaning = "date", "дата"
+        elif name in grouper_set:
+            role, meaning = "grouper", "разрез"
+        elif "номер" in lower or lower in {"№", "n", "код"}:
+            role, meaning = "id", "идентификатор"
+        elif str(col).endswith("(сумма)"):
+            role, meaning = "stage", "этап воронки"
+        else:
+            continue
+        notes.append(ColumnNote(name=name, role=role, meaning=meaning))
+    return notes[:12]
+
+
 def build_snapshot(
     df: pd.DataFrame,
     filename: str | None = None,
@@ -146,22 +204,22 @@ def build_snapshot(
     from services.report_detector import detect_report_type
 
     report_type = report_type or detect_report_type(df, filename=filename)
+    metrics_guess = [str(c) for c in pick_metrics(df)]
+    groupers_guess = [str(c) for c in pick_groupers(df)]
+    dates_guess = [str(c) for c in (data_tools.detect_date_columns(df).get("columns") or [])]
+
     columns = []
     for col in list(df.columns)[:_MAX_COLS]:
         series = df[col]
         entry: dict = {
             "name": str(col),
-            "dtype": str(series.dtype),
             "null_pct": round(float(series.isna().mean()) * 100, 1),
-            "nunique": int(series.nunique(dropna=True)),
         }
         if pd.api.types.is_numeric_dtype(series):
             nums = pd.to_numeric(series, errors="coerce")
             entry["sum"] = _num(nums.sum())
-            entry["min"] = _num(nums.min())
-            entry["max"] = _num(nums.max())
         else:
-            top = series.dropna().astype(str).value_counts().head(4)
+            top = series.dropna().astype(str).value_counts().head(2)
             entry["examples"] = [_cell(v) for v in top.index]
         columns.append(entry)
 
@@ -169,24 +227,25 @@ def build_snapshot(
         {str(k): _cell(v) for k, v in row.items()}
         for row in df.head(3).to_dict(orient="records")
     ]
-    # не раздуваем промпт: в образце только первые колонки
     slim_sample = []
-    keep = {c["name"] for c in columns[:18]}
+    keep = {c["name"] for c in columns[:12]}
     for row in sample:
         slim_sample.append({k: v for k, v in row.items() if k in keep})
 
     sheet_cards = _sheet_cards(df, filename, workbook, saved_sheets)
     active = next((s for s in sheet_cards if s.get("active")), sheet_cards[0])
+    facts = compute_facts(df, metrics_guess, groupers_guess)
     return {
         "filename": filename or "",
         "sheets": sheet_cards,
         "active_sheet": active.get("name", ""),
+        "facts": facts,
         "rows": int(len(df)),
         "n_columns": int(len(df.columns)),
         "report_type": report_type,
-        "metrics_guess": [str(c) for c in pick_metrics(df)],
-        "groupers_guess": [str(c) for c in pick_groupers(df)],
-        "dates_guess": [str(c) for c in (data_tools.detect_date_columns(df).get("columns") or [])],
+        "metrics_guess": metrics_guess,
+        "groupers_guess": groupers_guess,
+        "dates_guess": dates_guess,
         "has_stage_funnel": any(str(c).endswith("(сумма)") for c in df.columns),
         "columns": columns,
         "sample": slim_sample,
@@ -273,6 +332,13 @@ def deterministic_context(
             "Остальные листы есть в брифинге, но цифры дашборда считаются "
             f"по листу «{snap['active_sheet']}»: " + ", ".join(f"«{n}»" for n in extra)
         )
+    facts = list(snap.get("facts") or [])
+    notes = build_column_notes(
+        df,
+        metrics,
+        groupers,
+        snap["dates_guess"][:4],
+    )
     return FileContext(
         title=fname,
         summary=summary,
@@ -285,6 +351,8 @@ def deterministic_context(
         dashboard_ideas=ideas[:5],
         sheets=sheet_models,
         active_sheet=str(snap.get("active_sheet") or ""),
+        facts=facts,
+        column_notes=notes,
         llm_ready=False,
     )
 
@@ -327,6 +395,8 @@ def _from_llm_dict(data: dict, df: pd.DataFrame, fallback: FileContext) -> FileC
     ctx.dashboard_ideas = [str(x)[:120] for x in (ctx.dashboard_ideas or [])[:6]] or fallback.dashboard_ideas
     ctx.sheets = fallback.sheets
     ctx.active_sheet = fallback.active_sheet
+    ctx.facts = fallback.facts or ctx.facts
+    ctx.column_notes = fallback.column_notes or ctx.column_notes
     if fallback.caveats and not any(
         "лист" in str(c).lower() for c in ctx.caveats
     ):
@@ -350,10 +420,19 @@ def enrich_with_llm(
     payload = json.dumps(snap, ensure_ascii=False, default=str)
     prompt = _PROMPT.replace("__SNAPSHOT__", payload[:12000])
     try:
-        raw = _get_brief_llm().invoke(prompt).content
+        llm = _get_brief_llm()
+        raw = llm.invoke(prompt).content
     except Exception as exc:
         raise OllamaUnavailableError(f"Ollama недоступна: {exc}") from exc
     parsed = _extract_json_obj(raw)
+    if not parsed:
+        logger.warning("Брифинг LLM не JSON, повтор: %.200s", raw)
+        retry = prompt + "\nПовтори ответ: только один JSON-объект, без markdown и без текста вокруг."
+        try:
+            raw = llm.invoke(retry).content
+        except Exception as exc:
+            raise OllamaUnavailableError(f"Ollama недоступна: {exc}") from exc
+        parsed = _extract_json_obj(raw)
     if not parsed:
         logger.warning("Брифинг LLM не JSON: %.200s", raw)
         return fallback

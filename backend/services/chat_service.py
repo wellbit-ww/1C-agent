@@ -6,7 +6,7 @@
 3. Честный fallback со списком возможностей и примерами.
 
 Команды исполняются детерминированно через pandas — LLM только распознаёт
-намерение, но никогда не считает числа и не строит графики кодом.
+намерение и формулирует текст. Цифры считает pandas, не модель.
 """
 
 import json
@@ -52,6 +52,7 @@ _GROUP_KEYWORDS = {
     "manager": ("менеджер", "ответственн", "продав"),
     "region": ("регион", "город", "област"),
     "department": ("подразделен", "отдел", "департамент", "служб"),
+    "supplier": ("поставщик",),
 }
 
 _DEFICIT_MARKERS = ("дефицит", "задолжен", "неоплач", "остаток", "долг", "дебиторк")
@@ -225,8 +226,9 @@ _LLM_PROMPT = """/no_think
 - {{"action": "general"}} — открытый вопрос о содержимом файла
 - {{"action": "help"}} — вопрос не связан с данными
 
-<группа>: client, manager, region, department. <метрика>: revenue, deficit, amount.
+<группа>: client, manager, region, department, supplier, status. <метрика>: revenue, deficit, amount.
 group_column / value_column — точные имена из списка колонок (предпочтительнее semantic, если имя известно). Не выдумывай колонки.
+Предпочитай action=general (ответ по фактам файла), а не help. help — только если спросили «что ты умеешь».
 Если вопрос составной («и», «а также») — верни список команд: [{{...}}, {{...}}].
 Если вопрос-уточнение («а по менеджерам?», «а теперь круговая») — учитывай контекст диалога.
 Ответь строго одним JSON, без пояснений и без markdown.
@@ -569,28 +571,163 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
     }
 
 
-def _exec_general(df: pd.DataFrame, action: dict, file_context=None) -> dict:
-    from services.analysis_service import get_basic_info
+_HELP_MARKERS = (
+    "что ты умеешь",
+    "что умеешь",
+    "что ты можешь",
+    "что можешь",
+    "помощь",
+    "справка",
+    "как пользоваться",
+    "какие команды",
+)
 
-    briefing = ""
+
+def _wants_help(q: str) -> bool:
+    return any(marker in q for marker in _HELP_MARKERS)
+
+
+def _facts_pack(df: pd.DataFrame, file_context=None) -> str:
+    lines: list[str] = []
+    packed = ""
     if file_context is not None:
-        briefing = getattr(file_context, "prompt_block", lambda: "")()
-    info = briefing or get_basic_info(df)
-    prompt = f"""Ты аналитик данных. Ответь на вопрос пользователя по Excel-таблице.
+        block = getattr(file_context, "prompt_block", lambda: "")()
+        if block:
+            lines.append(block)
+            packed = block
+        for fact in list(getattr(file_context, "facts", None) or [])[:8]:
+            if fact and fact not in packed:
+                lines.append(fact)
+                packed += "\n" + fact
+    for item in get_basic_insights(df)[:6]:
+        if item and item not in packed:
+            lines.append(item)
+            packed += "\n" + item
+    return "\n".join(lines)
+
+
+def _format_sheet_sample(sample: list | None) -> str:
+    if not sample:
+        return ""
+    rows: list[str] = []
+    for row in sample[:2]:
+        if not isinstance(row, dict):
+            continue
+        bits = [
+            f"{k}={v}"
+            for k, v in list(row.items())[:6]
+            if v not in (None, "", "nan", "None")
+        ]
+        if bits:
+            rows.append(" · ".join(bits))
+    if not rows:
+        return ""
+    return " Образец: " + "; ".join(rows) + "."
+
+
+def _sheet_catalog_answer(file_context, sheets) -> str:
+    active = getattr(file_context, "active_sheet", "") or next(
+        (s.name for s in sheets if getattr(s, "active", False)), ""
+    )
+    lines = ["В книге такие листы:"]
+    for sheet in sheets:
+        mark = " (рабочий)" if getattr(sheet, "active", False) else ""
+        cols = ", ".join(f"«{c}»" for c in list(sheet.columns)[:8])
+        lines.append(
+            f"• «{sheet.name}»{mark}: {sheet.rows} строк"
+            + (f", колонки {cols}" if cols else "")
+            + "."
+        )
+    if active:
+        lines.append(
+            f"Цифры дашборда и расчёты чата сейчас берутся с листа «{active}»."
+        )
+    return "\n".join(lines)
+
+
+def _describe_other_sheets(question: str, file_context) -> str | None:
+    if file_context is None:
+        return None
+    sheets = list(getattr(file_context, "sheets", None) or [])
+    if len(sheets) < 2:
+        return None
+    q = question.lower()
+    catalog_markers = (
+        "какие лист",
+        "сколько лист",
+        "все лист",
+        "листы книги",
+        "какие есть лист",
+        "другие лист",
+        "остальные лист",
+    )
+    if any(marker in q for marker in catalog_markers):
+        return _sheet_catalog_answer(file_context, sheets)
+
+    active = (getattr(file_context, "active_sheet", "") or "").lower()
+    matches = []
+    for sheet in sheets:
+        name = (getattr(sheet, "name", "") or "").strip()
+        if name and name.lower() in q and name.lower() != active:
+            matches.append(sheet)
+    if not matches:
+        return None
+    active_name = getattr(file_context, "active_sheet", "") or ""
+    parts = []
+    for sheet in matches:
+        cols = ", ".join(f"«{c}»" for c in list(sheet.columns)[:12])
+        sample = _format_sheet_sample(getattr(sheet, "sample", None) or [])
+        extra = ""
+        if not getattr(sheet, "active", False) and active_name:
+            extra = (
+                f" Цифры дашборда считаются по листу «{active_name}», не по этому."
+            )
+        parts.append(
+            f"Лист «{sheet.name}»: {sheet.rows} строк, "
+            f"{sheet.n_columns} колонок. Колонки: {cols}.{sample}{extra}"
+        )
+    return "\n".join(parts)
+
+
+def _exec_general(df: pd.DataFrame, action: dict, file_context=None) -> dict:
+    facts = _facts_pack(df, file_context)
+    prompt = f"""Ты аналитик выгрузок 1С. Ответь на вопрос 2–5 предложениями на русском.
 
 Вопрос: {action.get("question", "")}
 
-Понимание файла:
-{info}
+Посчитанные факты (опирайся ТОЛЬКО на них, не выдумывай цифры и колонки):
+{facts}
 
-Ответь кратко и по делу на русском языке. Если данных для ответа недостаточно — честно скажи об этом. Не выдумывай колонки и цифры."""
+Если фактов не хватает — скажи, чего не хватает. Не предлагай меню умений."""
 
     try:
         answer = ask_llm(prompt)
-    except OllamaUnavailableError as exc:
-        return {"answer": f"LLM недоступна: {exc}"}
+    except OllamaUnavailableError:
+        if facts:
+            return {"answer": facts}
+        return {"answer": "LLM недоступна, а посчитанных фактов по файлу нет."}
 
     return {"answer": answer}
+
+
+def _maybe_interpret(question: str, answer: str, file_context=None) -> str:
+    if not answer:
+        return ""
+    facts = ""
+    if file_context is not None:
+        facts = "; ".join(list(getattr(file_context, "facts", None) or [])[:6])
+    prompt = f"""Добавь 1–3 предложения интерпретации к ответу аналитика. Не меняй цифры.
+
+Вопрос: {question}
+Ответ: {answer[:800]}
+Факты: {facts[:600]}
+
+Только интерпретация на русском, без повторения всего ответа."""
+    try:
+        note = ask_llm(prompt)
+    except Exception:
+        return ""
+    return (note or "").strip()
 
 
 def _help_answer(df: pd.DataFrame, file_context=None) -> dict:
@@ -606,7 +743,7 @@ def _help_answer(df: pd.DataFrame, file_context=None) -> dict:
             ideas = f"\n{summary}\n" + ideas
     return {
         "answer": (
-            "Я пока не понял этот запрос. Вот что я умею:\n"
+            "Вот что я умею:\n"
             "• **Показатели:** «Общая выручка», «Средний чек», «Сколько строк?»\n"
             "• **Лидеры:** «Топ-5 клиентов», «Лучший менеджер»\n"
             "• **Диаграммы:** «Круговая диаграмма дефицита по подразделениям», "
@@ -616,6 +753,20 @@ def _help_answer(df: pd.DataFrame, file_context=None) -> dict:
             f"Колонки в файле: {columns}…"
         )
     }
+
+
+def _normalize_actions(actions: list[dict] | None, question: str) -> list[dict]:
+    if not actions:
+        return [{"action": "general"}]
+    q = question.lower()
+    out = []
+    for action in actions:
+        kind = action.get("action")
+        if kind == "help" and not _wants_help(q):
+            out.append({**action, "action": "general"})
+        else:
+            out.append(action)
+    return out or [{"action": "general"}]
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +815,7 @@ def _execute_actions(
 ) -> dict:
     answers: list[str] = []
     charts: list[dict] = []
+    actions = _normalize_actions(actions, question)
 
     for action in actions[:3]:
         action["question"] = question
@@ -683,7 +835,13 @@ def _execute_actions(
         if result.get("chart"):
             charts.append(result["chart"])
 
-    return {"answer": "\n\n".join(answers), "charts": charts}
+    text = "\n\n".join(answers)
+    kinds = {a.get("action") for a in actions[:3]}
+    if kinds & {"stat", "chart"} and "general" not in kinds:
+        note = _maybe_interpret(question, text, file_context=file_context)
+        if note:
+            text = f"{text}\n\n{note}"
+    return {"answer": text, "charts": charts}
 
 
 def handle_question(
@@ -694,6 +852,13 @@ def handle_question(
 ) -> dict:
     """Возвращает {"answer": str, "charts": [chart_dict, ...]}."""
     q = question.lower().strip()
+
+    if _wants_help(q):
+        return {**_help_answer(df, file_context=file_context), "charts": []}
+
+    sheet_text = _describe_other_sheets(question, file_context)
+    if sheet_text:
+        return {"answer": sheet_text, "charts": []}
 
     # 0. Составной вопрос — приоритет LLM-разбора (вернёт список команд).
     # Если LLM недоступна — проваливаемся в быстрый путь (частичный ответ).
@@ -725,10 +890,6 @@ def handle_question(
     actions = _llm_classify(
         question, df, history, file_context=file_context
     )
-    if not actions:
-        return {
-            "answer": _help_answer(df, file_context=file_context)["answer"],
-            "charts": [],
-        }
-
-    return _execute_actions(df, question, actions, file_context=file_context)
+    return _execute_actions(
+        df, question, _normalize_actions(actions, question), file_context=file_context
+    )
