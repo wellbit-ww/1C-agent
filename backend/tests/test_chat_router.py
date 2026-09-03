@@ -105,6 +105,53 @@ class TestFallback:
         assert "Строк: 2394" in result["answer"] or "Фактфайл XYZ" in result["answer"]
 
 
+class TestNarrativeReport:
+    def test_detailed_report_is_text_not_chart(self, sales_df, monkeypatch):
+        monkeypatch.setattr(
+            chat_service,
+            "ask_llm",
+            lambda *a, **k: "Понимание этого файла. Колонки: клиент. Пустых ячеек: 59.1%",
+        )
+        result = chat_service.handle_question(
+            sales_df,
+            "Напиши подробный отчет по продажам за семь кварталов",
+        )
+        assert result["charts"] == []
+        assert "Понимание этого файла" not in result["answer"]
+        assert "Пустых ячеек" not in result["answer"]
+        assert "Отчёт по продажам" in result["answer"]
+        assert "2394" in result["answer"]
+        assert "Динамика" in result["answer"]
+        assert "Запрошено 7 срезов" in result["answer"]
+
+    def test_quarter_report_without_ollama(self, sales_df, monkeypatch):
+        def boom(*a, **k):
+            raise chat_service.OllamaUnavailableError("down")
+
+        monkeypatch.setattr(chat_service, "ask_llm", boom)
+        result = chat_service.handle_question(
+            sales_df,
+            "Напиши подробный отчет по продажам за квартал",
+        )
+        assert result["charts"] == []
+        assert "Понимание этого файла" not in result["answer"]
+        assert "Отчёт по продажам" in result["answer"]
+        assert "Лидеры" in result["answer"]
+        assert "Выводы" in result["answer"]
+
+    def test_good_polish_is_kept(self, sales_df, monkeypatch):
+        polished = (
+            "По итогам выгрузки продажи идут неровно: 2025Q1 слабее 2025Q2, "
+            "затем 2025Q3 и 2025Q4, а 2026Q1 замыкает ряд. "
+        ) * 8
+        monkeypatch.setattr(chat_service, "ask_llm", lambda *a, **k: polished)
+        result = chat_service.handle_question(
+            sales_df,
+            "Напиши подробный отчет по продажам за квартал",
+        )
+        assert result["answer"] == polished.strip()
+
+
 @requires_ollama
 class TestLlmPath:
     def test_compound_question(self, deficit_df):

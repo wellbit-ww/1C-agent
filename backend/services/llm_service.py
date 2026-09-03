@@ -30,9 +30,10 @@ def _get_router_llm() -> ChatOllama:
     return _router_llm
 
 
-def ask_llm(prompt: str):
+def ask_llm(prompt: str, *, num_predict: int | None = None):
     try:
-        response = llm.invoke(prompt)
+        model = llm.bind(num_predict=num_predict) if num_predict else llm
+        response = model.invoke(prompt)
     except Exception as exc:
         raise OllamaUnavailableError(
             f"Ollama недоступна или не отвечает: {exc}"
