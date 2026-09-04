@@ -15,6 +15,12 @@ class TestSalesFile:
         col = resolve_semantic_column(sales_df, "продажи по менеджерам", "manager", dtype="categorical")
         assert col == "ответственный"
 
+    def test_manager_russian_semantic(self, sales_df):
+        col = resolve_semantic_column(
+            sales_df, "топ ответственных", "ответственный", dtype="categorical"
+        )
+        assert col == "ответственный"
+
     def test_department(self, sales_df):
         col = resolve_semantic_column(sales_df, "разбивка по службам", "department", dtype="categorical")
         assert col == "подразделение"

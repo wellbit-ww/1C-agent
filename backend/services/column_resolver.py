@@ -50,6 +50,8 @@ SEMANTIC_ALIASES: dict[str, list[str]] = {
         "seller",
         "продавец",
         "ответственный",
+        "ответственн",
+        "ответственных",
     ],
     "department": [
         "подразделение",
@@ -183,15 +185,31 @@ def _get_columns_by_dtype(df: pd.DataFrame, dtype: str) -> list[str]:
     ).columns.tolist()
 
 
+def _canonical_semantic(semantic: str) -> str:
+    """LLM часто присылает русское имя ('ответственный') вместо ключа manager."""
+    key = _normalize(semantic)
+    if not key:
+        return semantic
+    if key in SEMANTIC_ALIASES:
+        return key
+    for name, aliases in SEMANTIC_ALIASES.items():
+        if key == name or any(alias in key or key in alias for alias in aliases if len(alias) >= 4):
+            return name
+    return semantic
+
+
 def _aliases_for_semantic(semantic: str) -> list[str]:
-    aliases = list(SEMANTIC_ALIASES.get(semantic, []))
+    key = _canonical_semantic(semantic)
+    aliases = list(SEMANTIC_ALIASES.get(key, []))
+    aliases.append(semantic)
+    aliases.append(key)
 
-    if semantic in {"sales", "revenue", "amount", "income"}:
-        for key in ("sales", "revenue", "amount", "income"):
-            if key != semantic:
-                aliases.extend(SEMANTIC_ALIASES.get(key, []))
+    if key in {"sales", "revenue", "amount", "income"}:
+        for extra in ("sales", "revenue", "amount", "income"):
+            if extra != key:
+                aliases.extend(SEMANTIC_ALIASES.get(extra, []))
 
-    return list(dict.fromkeys(aliases))
+    return list(dict.fromkeys(a for a in aliases if a))
 
 
 def _match_columns_by_aliases(

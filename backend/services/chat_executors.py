@@ -10,7 +10,7 @@ from services.chart_service import (
     create_pie_chart,
 )
 from services.chat_keywords import _PERIOD_FUNCS, _PERIOD_LABELS
-from services.column_resolver import resolve_semantic_column
+from services.column_resolver import resolve_semantic_column, _canonical_semantic
 from services.insights_service import _format_number, get_basic_insights
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
         }
 
     if op == "top":
-        semantic = action.get("semantic") or "client"
+        semantic = _canonical_semantic(action.get("semantic") or "client")
         n = int(action.get("n") or 5)
         result = data_tools.get_top_n(df, q, semantic=semantic, n=n)
         if "error" in result:

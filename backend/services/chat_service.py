@@ -31,6 +31,7 @@ from services.chat_narrative import (
 )
 from services.exceptions import OllamaUnavailableError
 from services.llm_service import ask_llm, classify
+from services.question_service import detect_intent
 
 logger = logging.getLogger(__name__)
 
@@ -63,21 +64,6 @@ _ALLOWED_ACTIONS = {"stat", "chart", "insights", "general", "help"}
 _INTERPRET_HINT = re.compile(
     r"поясн|интерпрет|почему\s+так|что это знач|прокоммент",
     re.I,
-)
-
-_INTENT_MARKERS = _CHART_MARKERS + (
-    "топ",
-    "лучш",
-    "сколько",
-    "сумм",
-    "общ",
-    "средн",
-    "максим",
-    "миним",
-    "динамик",
-    "инсайт",
-    "выручк",
-    "дефицит",
 )
 
 _COMPOUND_SEPARATORS = re.compile(r"\s+(?:и|а также|также|плюс)\s+")
@@ -206,13 +192,19 @@ def _normalize_actions(actions: list[dict] | None, question: str) -> list[dict]:
 
 
 def _is_compound(q: str) -> bool:
-    """Составной вопрос: минимум две части с самостоятельными просьбами."""
+    """Составной вопрос: минимум две части с самостоятельными просьбами.
+
+    «Топ X по количеству и сумме» — один запрос с двумя метриками, не составной.
+    """
     parts = [part.strip() for part in _COMPOUND_SEPARATORS.split(q) if part.strip()]
     if len(parts) < 2:
         return False
-    meaningful = sum(
-        1 for part in parts if any(marker in part for marker in _INTENT_MARKERS)
-    )
+    meaningful = 0
+    for part in parts:
+        if any(marker in part for marker in _CHART_MARKERS):
+            meaningful += 1
+        elif detect_intent(part) != "unknown":
+            meaningful += 1
     return meaningful >= 2
 
 
@@ -240,7 +232,8 @@ def _execute_actions(
                 action["operation"] = "insights"
             result = _exec_stat(df, action)
 
-        answers.append(result["answer"])
+        if not answers or result["answer"] != answers[-1]:
+            answers.append(result["answer"])
         if result.get("chart"):
             charts.append(result["chart"])
 

@@ -27,6 +27,18 @@ class TestFastPathStats:
         assert "АЛАБУГА" in result["answer"]
         assert "1." in result["answer"]
 
+    def test_top_responsible_by_count_and_sum(self, sales_df, monkeypatch):
+        def fail_classify(*_a, **_kw):
+            raise AssertionError("вопрос не составной — LLM-классификатор не нужен")
+
+        monkeypatch.setattr(chat_service, "_llm_classify", fail_classify)
+        result = chat_service.handle_question(
+            sales_df, "Топ ответственных по количеству и сумме сделок"
+        )
+        assert "Не удалось найти лидеров" not in result["answer"]
+        assert "ответственн" in result["answer"].lower()
+        assert "1." in result["answer"]
+
     def test_deficit_sum(self, deficit_df):
         result = chat_service.handle_question(deficit_df, "Какой общий дефицит?")
         assert _digits(result["answer"]), "ответ должен содержать сумму"

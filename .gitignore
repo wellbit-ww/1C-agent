@@ -7,3 +7,5 @@ backend/uploads/
 backend/data/
 backend/test_*.py
 backend/test_*.xlsx
+web/node_modules/
+web/dist/

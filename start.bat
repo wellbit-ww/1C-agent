@@ -6,7 +6,7 @@ if not exist "venv\Scripts\python.exe" (
   echo [ERROR] venv not found.
   echo Run once:
   echo   python -m venv venv
-  echo   venv\Scripts\python.exe -m pip install -r requirements.txt -r ui\requirements.txt
+  echo   venv\Scripts\python.exe -m pip install -r requirements.txt
   pause
   exit /b 1
 )
@@ -49,14 +49,43 @@ goto wait_backend
 echo Backend ready: http://127.0.0.1:8000
 
 :start_ui
+where npm >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] npm not found. Install Node.js 20+, then:
+  echo   cd web
+  echo   npm install
+  pause
+  exit /b 1
+)
+if not exist "web\node_modules" (
+  echo Installing UI dependencies...
+  pushd web
+  call npm install
+  popd
+)
 powershell -NoProfile -Command "try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8501); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
   echo Starting UI :8501 ...
-  start "Excel Agent UI" /D "%~dp0" cmd /k "venv\Scripts\python.exe -m streamlit run ui\app.py --server.port 8501 --server.address 127.0.0.1"
+  start "Excel Agent UI" /D "%~dp0web" cmd /k "npm run dev"
 ) else (
   echo UI already running: http://127.0.0.1:8501
-  start http://127.0.0.1:8501
 )
+echo Waiting for UI...
+set /a _u=0
+:wait_ui
+powershell -NoProfile -Command "try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8501); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+if not errorlevel 1 goto ui_ready
+set /a _u+=1
+if %_u% geq 30 (
+  echo [WARN] UI did not become ready in 30s. Open http://127.0.0.1:8501
+  goto ui_done
+)
+timeout /t 1 /nobreak >nul
+goto wait_ui
+:ui_ready
+echo UI ready: http://127.0.0.1:8501
+start http://127.0.0.1:8501
+:ui_done
 
 echo.
 echo UI:  http://127.0.0.1:8501

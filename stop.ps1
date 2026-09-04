@@ -5,6 +5,7 @@ function Test-ExcelAgentProcess([string]$CommandLine) {
     if (-not $CommandLine) { return $false }
     $cmd = $CommandLine.ToLowerInvariant()
     if ($cmd -match 'uvicorn\s+app:app') { return $true }
+    if ($cmd -match 'vite') { return $true }
     if ($cmd -match 'streamlit\s+run' -and $cmd -match 'ui\\app\.py|ui/app\.py') { return $true }
     return $false
 }

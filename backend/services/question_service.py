@@ -83,7 +83,9 @@ def detect_intent(question: str):
     if any(
         marker in q
         for marker in ("лучш", "топ", "лидер", "больше всего")
-    ) and "менеджер" in q:
+    ) and any(
+        marker in q for marker in ("менеджер", "ответственн")
+    ):
         return "top_manager"
 
     if any(
@@ -109,10 +111,13 @@ def detect_intent(question: str):
         for marker in (
             "по регион",
             "по менеджер",
+            "по ответственн",
             "по клиент",
             "по заказчик",
             "по подразделен",
             "по отдел",
+            "по поставщик",
+            "по статус",
             "группир",
         )
     ):

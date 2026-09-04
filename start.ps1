@@ -7,7 +7,7 @@ $Python = Join-Path $Root "venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {
     Write-Host "[ERROR] venv not found. Run once:"
     Write-Host "  python -m venv venv"
-    Write-Host "  venv\Scripts\python.exe -m pip install -r requirements.txt -r ui\requirements.txt"
+    Write-Host "  venv\Scripts\python.exe -m pip install -r requirements.txt"
     exit 1
 }
 
@@ -69,16 +69,42 @@ if ($ready) {
     Write-Host "[WARN] Backend did not become ready in 30s. Starting UI anyway."
 }
 
+$Npm = Get-Command npm -ErrorAction SilentlyContinue
+if (-not $Npm) {
+    Write-Host "[ERROR] npm not found. Install Node.js 20+, then:"
+    Write-Host "  cd web"
+    Write-Host "  npm install"
+    exit 1
+}
+$Web = Join-Path $Root "web"
+if (-not (Test-Path (Join-Path $Web "node_modules"))) {
+    Write-Host "Installing UI dependencies..."
+    Push-Location $Web
+    npm install
+    Pop-Location
+}
+
 if (Test-LocalPort 8501) {
     Write-Host "UI already running: http://127.0.0.1:8501"
-    Start-Process "http://127.0.0.1:8501"
 } else {
     Write-Host "Starting UI :8501 ..."
-    Start-Process -FilePath $Python -ArgumentList @(
-        "-m", "streamlit", "run", "ui\app.py",
-        "--server.port", "8501",
-        "--server.address", "127.0.0.1"
-    ) -WorkingDirectory $Root
+    Start-Process -FilePath "cmd.exe" -ArgumentList @("/k", "npm run dev") -WorkingDirectory $Web
+}
+
+Write-Host "Waiting for UI..."
+$uiReady = $false
+for ($i = 0; $i -lt 30; $i++) {
+    if (Test-LocalPort 8501) {
+        $uiReady = $true
+        break
+    }
+    Start-Sleep -Seconds 1
+}
+if ($uiReady) {
+    Write-Host "UI ready: http://127.0.0.1:8501"
+    Start-Process "http://127.0.0.1:8501"
+} else {
+    Write-Host "[WARN] UI did not become ready in 30s. Open http://127.0.0.1:8501"
 }
 
 Write-Host ""
