@@ -1,16 +1,50 @@
 from langchain_ollama import ChatOllama
 
-from config import MAIN_MODEL, OLLAMA_BASE_URL, ROUTER_MODEL
+from config import (
+    LLM_NUM_PREDICT_DEFAULT,
+    MAIN_MODEL,
+    OLLAMA_BASE_URL,
+    OLLAMA_CONNECT_TIMEOUT,
+    OLLAMA_REQUEST_TIMEOUT,
+    ROUTER_MODEL,
+)
 from services.exceptions import OllamaUnavailableError
 
-llm = ChatOllama(
-    model=MAIN_MODEL,
-    base_url=OLLAMA_BASE_URL,
-    temperature=0,
-    # qwen3 без «размышлений» отвечает в разы быстрее,
-    # а для наших задач (переформулировка результата) thinking не нужен
-    reasoning=False,
-)
+
+def ollama_client_kwargs() -> dict:
+    """httpx-таймауты для клиента Ollama: ChatOllama не принимает timeout=."""
+    import httpx
+
+    return {
+        "timeout": httpx.Timeout(
+            connect=OLLAMA_CONNECT_TIMEOUT,
+            read=OLLAMA_REQUEST_TIMEOUT,
+            write=min(30.0, OLLAMA_REQUEST_TIMEOUT),
+            pool=OLLAMA_CONNECT_TIMEOUT,
+        )
+    }
+
+
+def make_chat_ollama(
+    *,
+    model: str,
+    num_predict: int | None = None,
+    temperature: float = 0,
+) -> ChatOllama:
+    """Единая фабрика: reasoning выключен, HTTP-таймаут всегда задан."""
+    kwargs: dict = {
+        "model": model,
+        "base_url": OLLAMA_BASE_URL,
+        "temperature": temperature,
+        "reasoning": False,
+        "client_kwargs": ollama_client_kwargs(),
+    }
+    if num_predict is not None:
+        kwargs["num_predict"] = num_predict
+    return ChatOllama(**kwargs)
+
+
+llm = make_chat_ollama(model=MAIN_MODEL, num_predict=LLM_NUM_PREDICT_DEFAULT)
 
 _router_llm: ChatOllama | None = None
 
@@ -18,26 +52,42 @@ _router_llm: ChatOllama | None = None
 def _get_router_llm() -> ChatOllama:
     global _router_llm
     if _router_llm is None:
-        _router_llm = ChatOllama(
+        _router_llm = make_chat_ollama(
             model=ROUTER_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            temperature=0,
-            reasoning=False,
-            # классификация должна вернуть короткий JSON — обрезаем,
-            # чтобы зависшая генерация не блокировала чат
             num_predict=300,
         )
     return _router_llm
 
 
-def ask_llm(prompt: str, *, num_predict: int | None = None):
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
     try:
-        model = llm.bind(num_predict=num_predict) if num_predict else llm
-        response = model.invoke(prompt)
+        import httpx
+
+        if isinstance(exc, httpx.TimeoutException):
+            return True
+    except Exception:
+        pass
+    return "timeout" in type(exc).__name__.lower()
+
+
+def _ollama_error(exc: BaseException) -> OllamaUnavailableError:
+    if _is_timeout(exc):
+        return OllamaUnavailableError(
+            f"Ollama не ответила за {OLLAMA_REQUEST_TIMEOUT:.0f} с ({exc})"
+        )
+    return OllamaUnavailableError(f"Ollama недоступна или не отвечает: {exc}")
+
+
+def ask_llm(prompt: str, *, num_predict: int | None = None):
+    tokens = LLM_NUM_PREDICT_DEFAULT if num_predict is None else num_predict
+    try:
+        # bind(options=...): «голый» bind(num_predict=...) в langchain-ollama
+        # проваливается в Client.chat(**kwargs) и падает с TypeError
+        response = llm.bind(options={"num_predict": tokens}).invoke(prompt)
     except Exception as exc:
-        raise OllamaUnavailableError(
-            f"Ollama недоступна или не отвечает: {exc}"
-        ) from exc
+        raise _ollama_error(exc) from exc
 
     return response.content
 
@@ -50,8 +100,6 @@ def classify(prompt: str) -> str:
     try:
         response = _get_router_llm().invoke(prompt)
     except Exception as exc:
-        raise OllamaUnavailableError(
-            f"Ollama недоступна или не отвечает: {exc}"
-        ) from exc
+        raise _ollama_error(exc) from exc
 
     return response.content

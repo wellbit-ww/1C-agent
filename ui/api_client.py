@@ -1,10 +1,25 @@
 import os
+from pathlib import Path
 
 import requests
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:  # dotenv не обязателен: переменные могут быть в окружении
+    pass
 
 
 API_BASE_URL = os.getenv("EXCEL_AGENT_API_URL", "http://127.0.0.1:8000")
 REQUEST_TIMEOUT = int(os.getenv("EXCEL_AGENT_REQUEST_TIMEOUT", "300"))
+
+
+def _auth_headers() -> dict:
+    token = os.getenv("EXCEL_AGENT_API_TOKEN", "").strip()
+    if token:
+        return {"X-API-Token": token}
+    return {}
 
 
 class ApiClientError(Exception):
@@ -37,6 +52,7 @@ def check_backend(base_url: str = API_BASE_URL) -> tuple[bool, str]:
     try:
         response = requests.get(
             _build_url("/", base_url),
+            headers=_auth_headers(),
             timeout=5,
         )
     except requests.RequestException:
@@ -59,25 +75,7 @@ def upload_file(uploaded_file, base_url: str = API_BASE_URL) -> dict:
                     uploaded_file.type,
                 )
             },
-            timeout=REQUEST_TIMEOUT,
-        )
-        _raise_for_response(response)
-        return response.json()
-    except requests.RequestException as exc:
-        raise ApiClientError("Backend недоступен") from exc
-
-
-def analyze_file(uploaded_file, base_url: str = API_BASE_URL) -> dict:
-    try:
-        response = requests.post(
-            _build_url("/analyze", base_url),
-            files={
-                "file": (
-                    uploaded_file.name,
-                    uploaded_file.getvalue(),
-                    uploaded_file.type,
-                )
-            },
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
@@ -94,6 +92,7 @@ def get_full_report(file_id: str, filename: str | None = None, base_url: str = A
                 "file_id": file_id,
                 "filename": filename,
             },
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
@@ -107,6 +106,7 @@ def get_history(file_id: str, base_url: str = API_BASE_URL) -> dict:
         response = requests.post(
             _build_url("/history", base_url),
             json={"file_id": file_id},
+            headers=_auth_headers(),
             timeout=30,
         )
         _raise_for_response(response)
@@ -122,6 +122,7 @@ def get_dashboard(file_id: str, base_url: str = API_BASE_URL) -> dict:
             json={
                 "file_id": file_id,
             },
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
@@ -130,35 +131,30 @@ def get_dashboard(file_id: str, base_url: str = API_BASE_URL) -> dict:
         raise ApiClientError("Backend недоступен") from exc
 
 
-def get_insights(file_id: str, base_url: str = API_BASE_URL) -> list[str]:
+def download_report_pdf(
+    file_id: str,
+    filename: str | None = None,
+    narrative: str | None = None,
+    insights: str | None = None,
+    comment: str | None = None,
+    base_url: str = API_BASE_URL,
+) -> bytes:
+    payload = {"file_id": file_id, "filename": filename}
+    if narrative is not None:
+        payload["narrative"] = narrative
+    if insights is not None:
+        payload["insights"] = insights
+    if comment is not None:
+        payload["comment"] = comment
     try:
         response = requests.post(
-            _build_url("/insights", base_url),
-            json={
-                "file_id": file_id,
-            },
+            _build_url("/report/pdf", base_url),
+            json=payload,
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise ApiClientError("Backend недоступен") from exc
-
-    return list(payload.get("insights", []))
-
-
-def generate_chart(file_id: str, question: str, base_url: str = API_BASE_URL) -> dict:
-    try:
-        response = requests.post(
-            _build_url("/chart", base_url),
-            json={
-                "file_id": file_id,
-                "question": question,
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-        _raise_for_response(response)
-        return response.json()
+        return response.content
     except requests.RequestException as exc:
         raise ApiClientError("Backend недоступен") from exc
 
@@ -170,6 +166,7 @@ def get_detailed_table(file_id: str, base_url: str = API_BASE_URL) -> list[dict]
             json={
                 "file_id": file_id,
             },
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
@@ -184,6 +181,7 @@ def _post_json(path: str, payload: dict, base_url: str = API_BASE_URL) -> dict:
         response = requests.post(
             _build_url(path, base_url),
             json=payload,
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
@@ -224,6 +222,7 @@ def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> dict:
                 "file_id": file_id,
                 "question": question,
             },
+            headers=_auth_headers(),
             timeout=REQUEST_TIMEOUT,
         )
         _raise_for_response(response)
@@ -238,3 +237,16 @@ def chat(file_id: str, question: str, base_url: str = API_BASE_URL) -> dict:
         "answer": str(payload.get("answer", "Ответ не получен")),
         "charts": list(payload.get("charts", [])),
     }
+
+
+def delete_file(file_id: str, base_url: str = API_BASE_URL) -> dict:
+    try:
+        response = requests.delete(
+            _build_url(f"/file/{file_id}", base_url),
+            headers=_auth_headers(),
+            timeout=30,
+        )
+        _raise_for_response(response)
+        return response.json()
+    except requests.RequestException as exc:
+        raise ApiClientError("Backend недоступен") from exc

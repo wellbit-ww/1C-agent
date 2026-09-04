@@ -13,11 +13,18 @@ SEMANTIC_ALIASES: dict[str, list[str]] = {
         "выручк",
         "revenue",
         "доход",
+        "оборот",
+        "сумма продажи",
+        "сумма заказа",
+        "стоимость",
     ],
     "amount": [
         "amount",
         "сумма",
         "сумм",
+        "долг",
+        "не оплачено",
+        "оплачено",
     ],
     "income": [
         "income",
@@ -33,6 +40,7 @@ SEMANTIC_ALIASES: dict[str, list[str]] = {
         "customer",
         "buyer",
         "покупател",
+        "отправитель",
     ],
     "manager": [
         "менеджер",
@@ -49,11 +57,20 @@ SEMANTIC_ALIASES: dict[str, list[str]] = {
         "департамент",
         "служба",
     ],
+    "supplier": [
+        "поставщик",
+        "supplier",
+    ],
     "deficit": [
         "дефицит",
         "неоплаченн",
         "остаток",
         "задолженность",
+        "не оплачено",
+        "сумма долга",
+        "долг",
+        "недостаток",
+        "нехватка",
     ],
     "region": [
         "регион",
@@ -94,6 +111,7 @@ SEMANTIC_TO_DTYPES: dict[str, str] = {
     "client": "categorical",
     "manager": "categorical",
     "department": "categorical",
+    "supplier": "categorical",
     "region": "categorical",
     "date": "datetime",
     "month": "datetime",
@@ -188,7 +206,7 @@ def _match_columns_by_aliases(
         col_norm = _normalize(col)
         col_parts = col_norm.replace("_", " ").replace("-", " ").split()
 
-        if any(alias in col_norm or col_norm in alias for alias in aliases):
+        if any(alias == col_norm or alias in col_norm for alias in aliases):
             matched.append(col)
             continue
 

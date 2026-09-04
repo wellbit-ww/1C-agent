@@ -1,5 +1,8 @@
 """Тесты Фазы 1: персистентность, parquet-кэш, CSV, память чата, составные вопросы."""
 import io
+import os
+import time
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -10,6 +13,7 @@ from services import cache_service, chat_service, db_service, storage_service
 from services.excel_service import read_excel
 
 from conftest import DEFICIT_FILE
+import config
 
 
 @pytest.fixture
@@ -53,6 +57,84 @@ class TestDbService:
         assert len(db_service.get_chat_history("f1")) == 1
         assert len(db_service.get_chat_history("f2")) == 1
 
+    def test_chat_history_trimmed_on_insert(self, tmp_db, monkeypatch):
+        monkeypatch.setattr(config, "CHAT_HISTORY_LIMIT", 5)
+        for i in range(12):
+            db_service.add_chat_message("f1", "user", f"вопрос {i}")
+        history = db_service.get_chat_history("f1", limit=50)
+        assert len(history) == 5
+        assert history[0]["content"] == "вопрос 7"
+        assert history[-1]["content"] == "вопрос 11"
+
+    def test_wal_journal_mode(self, tmp_db):
+        with db_service._connect() as conn:
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert str(mode).lower() == "wal"
+
+
+class TestFileCleanup:
+    def test_delete_file_removes_disk_cache_and_db(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_service, "DB_PATH", tmp_path / "t.db")
+        db_service.init_db()
+        monkeypatch.setattr(storage_service, "UPLOAD_DIR", tmp_path)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(storage_service, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(cache_service, "CACHE_DIR", cache_dir)
+        cache_service.clear_cache()
+
+        file_id = storage_service.save_upload(b"payload", "a.xlsx")
+        cache_service.set_dataframe(file_id, pd.DataFrame({"a": [1]}))
+        db_service.add_chat_message(file_id, "user", "привет")
+        db_service.save_dashboard_spec(file_id, "{}")
+
+        assert storage_service.delete_file(file_id) is True
+        assert db_service.get_file_record(file_id) is None
+        assert db_service.get_chat_history(file_id) == []
+        assert db_service.get_dashboard_spec(file_id) is None
+        assert cache_service.get_dataframe(file_id) is None
+        assert not (tmp_path / f"{file_id}.xlsx").exists()
+
+    def test_purge_expired_deletes_old_records(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_service, "DB_PATH", tmp_path / "t.db")
+        db_service.init_db()
+        monkeypatch.setattr(storage_service, "UPLOAD_DIR", tmp_path)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(storage_service, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "FILE_TTL_HOURS", 1)
+
+        file_id = storage_service.save_upload(b"old", "old.xlsx")
+        with db_service._connect() as conn:
+            conn.execute(
+                "UPDATE files SET created_at = 1 WHERE file_id = ?",
+                (file_id,),
+            )
+        removed = storage_service.purge_expired()
+        assert removed >= 1
+        assert db_service.get_file_record(file_id) is None
+
+    def test_purge_orphan_dtypes_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db_service, "DB_PATH", tmp_path / "t.db")
+        db_service.init_db()
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        monkeypatch.setattr(storage_service, "UPLOAD_DIR", uploads)
+        monkeypatch.setattr(storage_service, "CACHE_DIR", cache_dir)
+        monkeypatch.setattr(config, "FILE_TTL_HOURS", 1)
+        monkeypatch.setattr(config, "CACHE_TTL_HOURS", 1)
+
+        orphan_id = "a" * 32
+        dtypes = cache_dir / f"{orphan_id}.dtypes.json"
+        dtypes.write_text("{}", encoding="utf-8")
+        old = time.time() - 3 * 3600
+        os.utime(dtypes, (old, old))
+        removed = storage_service.purge_expired()
+        assert removed >= 1
+        assert not dtypes.exists()
+
 
 class TestParquetCache:
     @pytest.fixture
@@ -89,6 +171,20 @@ class TestParquetCache:
         restored = cache_service.get_dataframe("mix")
         assert restored is not None
         assert len(restored) == 4
+
+    def test_numeric_dtype_survives_mixed_object_fallback(self, tmp_cache):
+        df = pd.DataFrame(
+            {
+                "сумма": [1.5, 2.0, 3.0],
+                "комментарий": ["ок", 1.5, None],
+            }
+        )
+        cache_service.set_dataframe("mix2", df)
+        cache_service._cache.clear()
+        restored = cache_service.get_dataframe("mix2")
+        assert restored is not None
+        assert pd.api.types.is_numeric_dtype(restored["сумма"])
+        assert list(restored["сумма"]) == pytest.approx([1.5, 2.0, 3.0])
 
 
 class TestCsvSupport:
@@ -229,3 +325,41 @@ class TestRestartResilience:
             messages = history.json()["messages"]
             assert [m["role"] for m in messages] == ["user", "assistant"]
             assert "Сколько строк?" in messages[0]["content"]
+
+
+class TestIsolatedStorage:
+    def test_session_does_not_use_production_paths(self):
+        backend = Path(__file__).resolve().parent.parent
+        assert Path(db_service.DB_PATH).resolve() != (backend / "data" / "agent.db").resolve()
+        assert Path(storage_service.UPLOAD_DIR).resolve() != (backend / "uploads").resolve()
+        assert Path(cache_service.CACHE_DIR).resolve() != (backend / "data" / "cache").resolve()
+
+
+class TestDeficitProfileInsights:
+    def test_all_nan_group_does_not_raise(self):
+        from services.report_profiles.deficit_profile import DeficitProfile
+
+        df = pd.DataFrame(
+            {
+                "подразделение": [None, None],
+                "дефицит": [10.0, 20.0],
+                "менеджер": [None, None],
+                "заказчик": [None, None],
+            }
+        )
+        insights = DeficitProfile().get_insights(df)
+        assert insights == []
+
+    def test_top_group_is_named(self):
+        from services.report_profiles.deficit_profile import DeficitProfile
+
+        df = pd.DataFrame(
+            {
+                "подразделение": ["А", "Б", "А"],
+                "дефицит": [10.0, 50.0, 5.0],
+                "менеджер": ["Иванов", "Петров", "Иванов"],
+                "заказчик": ["X", "Y", "Z"],
+            }
+        )
+        insights = DeficitProfile().get_insights(df)
+        assert any("Б" in text for text in insights)

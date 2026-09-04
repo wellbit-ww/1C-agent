@@ -174,3 +174,65 @@ class TestSalesE2E:
             },
         )
         assert [c["chart_type"] for c in response.json()["charts"]] == ["pie"]
+
+
+class TestRequestLimits:
+    def test_oversized_question_rejected(self, client, deficit_file_id):
+        response = client.post(
+            "/chat",
+            json={
+                "file_id": deficit_file_id,
+                "question": "x" * 5000,
+            },
+        )
+        assert response.status_code == 422
+
+    def test_oversized_narrative_rejected(self, client, deficit_file_id):
+        from config import MAX_NARRATIVE_CHARS
+
+        response = client.post(
+            "/report/pdf",
+            json={
+                "file_id": deficit_file_id,
+                "narrative": "я" * (MAX_NARRATIVE_CHARS + 1),
+            },
+        )
+        assert response.status_code == 422
+
+
+class TestDeleteFile:
+    def test_delete_then_404(self, client):
+        with open(DEFICIT_FILE, "rb") as f:
+            uploaded = client.post(
+                "/upload",
+                files={"file": ("deficit-del.xlsx", f)},
+            )
+        assert uploaded.status_code == 200
+        file_id = uploaded.json()["file_id"]
+        gone = client.delete(f"/file/{file_id}")
+        assert gone.status_code == 200
+        assert client.post("/dashboard", json={"file_id": file_id}).status_code == 404
+        assert client.delete(f"/file/{file_id}").status_code == 404
+
+
+class TestApiToken:
+    def test_health_open_other_routes_require_token(self, monkeypatch):
+        import config
+
+        monkeypatch.setattr(config, "API_TOKEN", "secret-token")
+        with TestClient(app) as token_client:
+            assert token_client.get("/").status_code == 200
+            denied = token_client.post("/dashboard", json={"file_id": "nope"})
+            assert denied.status_code == 401
+            authed = token_client.post(
+                "/dashboard",
+                json={"file_id": "nope"},
+                headers={"X-API-Token": "secret-token"},
+            )
+            assert authed.status_code == 404
+            bearer = token_client.post(
+                "/dashboard",
+                json={"file_id": "nope"},
+                headers={"Authorization": "Bearer secret-token"},
+            )
+            assert bearer.status_code == 404

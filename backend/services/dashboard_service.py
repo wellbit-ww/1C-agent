@@ -1,27 +1,35 @@
 """ИИ-слой дашбордов: NL-генерация/редактирование спек, пины из чата,
 авто-комментарии. LLM только производит JSON-спеку — считает всё движок.
 """
-import hashlib
 import json
 import logging
 import re
+import threading
 
 import pandas as pd
 from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
-from config import OLLAMA_BASE_URL, ROUTER_MODEL, MAIN_MODEL
+from config import MAIN_MODEL, ROUTER_MODEL
 from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
 from services import db_service
 from services.exceptions import OllamaUnavailableError
+from services.llm_service import make_chat_ollama
 
 logger = logging.getLogger(__name__)
+
+_spec_lock = threading.RLock()
 
 # ---------------------------------------------------------------------------
 # Текущая спека: пользовательская из SQLite или дефолтная из профиля
 # ---------------------------------------------------------------------------
 
 def get_current_spec(file_id: str, df: pd.DataFrame) -> DashboardSpec | None:
+    with _spec_lock:
+        return _get_current_spec_unlocked(file_id, df)
+
+
+def _get_current_spec_unlocked(file_id: str, df: pd.DataFrame) -> DashboardSpec | None:
     saved = db_service.get_dashboard_spec(file_id)
     if saved:
         try:
@@ -44,7 +52,26 @@ def get_current_spec(file_id: str, df: pd.DataFrame) -> DashboardSpec | None:
 
 
 def save_spec(file_id: str, spec: DashboardSpec) -> None:
-    db_service.save_dashboard_spec(file_id, spec.model_dump_json())
+    with _spec_lock:
+        db_service.save_dashboard_spec(file_id, spec.model_dump_json())
+
+
+def save_spec_if_unchanged(
+    file_id: str,
+    spec: DashboardSpec,
+    expected_json: str | None,
+) -> bool:
+    """Сохраняет спеку только если в БД всё ещё expected_json (оптимистичный CAS).
+
+    LLM generate/edit не держат лок: после ответа сверяем, не успел ли пин
+    или другой запрос переписать дашборд.
+    """
+    with _spec_lock:
+        current = db_service.get_dashboard_spec(file_id)
+        if current != expected_json:
+            return False
+        db_service.save_dashboard_spec(file_id, spec.model_dump_json())
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -57,19 +84,20 @@ def pin_tile(file_id: str, df: pd.DataFrame, tile_payload: dict) -> tuple[bool, 
     except ValidationError as exc:
         return False, f"Некорректный тайл: {exc.errors()[0]['msg']}"
 
-    spec = get_current_spec(file_id, df)
-    if spec is None:
-        return False, "Для этого типа файла нет дашборда, куда закрепить график"
+    with _spec_lock:
+        spec = _get_current_spec_unlocked(file_id, df)
+        if spec is None:
+            return False, "Для этого типа файла нет дашборда, куда закрепить график"
 
-    target_tab = spec.tabs[0]
-    if any(t.title == tile.title for t in target_tab.tiles):
-        return False, "Такой график уже есть на дашборде"
-    if len(target_tab.tiles) >= 8:
-        return False, "На первой вкладке уже максимум графиков (8)"
+        target_tab = spec.tabs[0]
+        if any(t.title == tile.title for t in target_tab.tiles):
+            return False, "Такой график уже есть на дашборде"
+        if len(target_tab.tiles) >= 8:
+            return False, "На первой вкладке уже максимум графиков (8)"
 
-    target_tab.tiles.append(tile)
-    save_spec(file_id, spec)
-    return True, f"График «{tile.title}» закреплён на вкладке «{target_tab.title}»"
+        target_tab.tiles.append(tile)
+        db_service.save_dashboard_spec(file_id, spec.model_dump_json())
+        return True, f"График «{tile.title}» закреплён на вкладке «{target_tab.title}»"
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +110,8 @@ _spec_llm: ChatOllama | None = None
 def _get_spec_llm() -> ChatOllama:
     global _spec_llm
     if _spec_llm is None:
-        _spec_llm = ChatOllama(
+        _spec_llm = make_chat_ollama(
             model=ROUTER_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            temperature=0,
-            reasoning=False,
             num_predict=2500,
         )
     return _spec_llm
@@ -597,8 +622,9 @@ _comments_cache: dict[str, dict] = {}
 
 
 def _data_hash(df: pd.DataFrame) -> str:
-    basis = f"{df.shape}|{','.join(map(str, df.columns))}"
-    return hashlib.md5(basis.encode()).hexdigest()
+    from services.file_context_service import data_hash
+
+    return data_hash(df)
 
 
 def generate_comments(file_id: str, df: pd.DataFrame, rendered_tabs: list[dict]) -> dict:
@@ -658,11 +684,9 @@ _comments_llm: ChatOllama | None = None
 def _get_comments_llm() -> ChatOllama:
     global _comments_llm
     if _comments_llm is None:
-        _comments_llm = ChatOllama(
+        _comments_llm = make_chat_ollama(
             model=MAIN_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            temperature=0.3,
-            reasoning=False,
             num_predict=800,
+            temperature=0.3,
         )
     return _comments_llm

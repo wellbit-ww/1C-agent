@@ -9,6 +9,7 @@ from app import app
 from models.file_context import FileContext, SheetBrief
 from services import chat_service, dashboard_service, db_service, file_context_service
 from services.file_context_service import (
+    build_column_notes,
     data_hash,
     deterministic_context,
     ensure_context,
@@ -115,6 +116,30 @@ class TestDeterministicContext:
         other = sales_df.copy()
         other["новая"] = 1
         assert data_hash(sales_df) != data_hash(other)
+
+    def test_hash_changes_with_values(self):
+        a = pd.DataFrame({"x": [1, 2, 3], "y": ["a", "b", "c"]})
+        b = a.copy()
+        b.loc[0, "x"] = 99
+        assert data_hash(a) != data_hash(b)
+
+    def test_funnel_stage_columns_get_stage_role(self):
+        df = pd.DataFrame(
+            {
+                "клиент": ["А"],
+                "сумма по сделке": [100.0],
+                "этап 1 (сумма)": [50.0],
+            }
+        )
+        notes = build_column_notes(
+            df,
+            metrics=["сумма по сделке"],
+            groupers=["клиент"],
+            dates=[],
+        )
+        roles = {note.name: note.role for note in notes}
+        assert roles["сумма по сделке"] == "metric"
+        assert roles["этап 1 (сумма)"] == "stage"
 
     def test_persist_roundtrip(self, sales_df, tmp_db):
         ctx = ensure_context("f1", sales_df, filename="sales.xlsx", use_llm=False)

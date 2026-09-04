@@ -15,10 +15,11 @@ import pandas as pd
 from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
-from config import MAIN_MODEL, OLLAMA_BASE_URL
+from config import MAIN_MODEL
 from models.file_context import ColumnNote, FileContext, SheetBrief
 from services import db_service
 from services.exceptions import OllamaUnavailableError
+from services.llm_service import make_chat_ollama
 
 logger = logging.getLogger(__name__)
 
@@ -50,19 +51,21 @@ _brief_llm: ChatOllama | None = None
 def _get_brief_llm() -> ChatOllama:
     global _brief_llm
     if _brief_llm is None:
-        _brief_llm = ChatOllama(
-            model=MAIN_MODEL,
-            base_url=OLLAMA_BASE_URL,
-            temperature=0,
-            reasoning=False,
-            num_predict=1800,
-        )
+        _brief_llm = make_chat_ollama(model=MAIN_MODEL, num_predict=1800)
     return _brief_llm
 
 
 def data_hash(df: pd.DataFrame) -> str:
-    basis = f"{df.shape}|{','.join(map(str, df.columns))}"
-    return hashlib.md5(basis.encode()).hexdigest()
+    """Хэш схемы и содержимого: смена значений в ячейках инвалидирует карточку."""
+    hasher = hashlib.md5()
+    hasher.update(str(tuple(df.shape)).encode())
+    hasher.update("\0".join(map(str, df.columns)).encode("utf-8", "replace"))
+    hasher.update("\0".join(str(t) for t in df.dtypes).encode())
+    if len(df):
+        positions = list(dict.fromkeys([0, len(df) // 2, len(df) - 1]))
+        sample = df.iloc[positions]
+        hasher.update(sample.to_csv(index=False).encode("utf-8", "replace"))
+    return hasher.hexdigest()
 
 
 def _cell(value) -> str:
@@ -176,16 +179,16 @@ def build_column_notes(
     for col in list(df.columns)[:20]:
         name = str(col)
         lower = name.lower()
-        if name in metric_set or str(col).endswith("(сумма)"):
+        if name in metric_set:
             role, meaning = "metric", "числовая метрика"
+        elif str(col).endswith("(сумма)"):
+            role, meaning = "stage", "этап воронки"
         elif name in date_set or "дата" in lower:
             role, meaning = "date", "дата"
         elif name in grouper_set:
             role, meaning = "grouper", "разрез"
         elif "номер" in lower or lower in {"№", "n", "код"}:
             role, meaning = "id", "идентификатор"
-        elif str(col).endswith("(сумма)"):
-            role, meaning = "stage", "этап воронки"
         else:
             continue
         notes.append(ColumnNote(name=name, role=role, meaning=meaning))

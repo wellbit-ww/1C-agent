@@ -13,6 +13,31 @@ SALES_FILE = DATA_DIR / "sales.xlsx"
 DEFICIT_FILE = DATA_DIR / "deficit.xlsx"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_storage(tmp_path_factory):
+    """Весь тестовый сеанс работает в песочнице: боевые agent.db,
+    uploads/ и parquet-кэш не трогаем — иначе lifespan-purge при
+    старте TestClient удалит реальные файлы пользователя."""
+    import config
+    from services import cache_service, db_service, storage_service
+
+    root = tmp_path_factory.mktemp("isolated_storage")
+    (root / "uploads").mkdir()
+    (root / "cache").mkdir()
+
+    mp = pytest.MonkeyPatch()
+    # TTL-очистку по возрасту глушим: в тестах файлы «свежие», но
+    # гарантия, что ни один lifespan/upload не удалит ничего лишнего
+    mp.setattr(config, "FILE_TTL_HOURS", 0.0)
+    mp.setattr(db_service, "DB_PATH", root / "agent.db")
+    mp.setattr(storage_service, "UPLOAD_DIR", root / "uploads")
+    mp.setattr(storage_service, "CACHE_DIR", root / "cache")
+    mp.setattr(cache_service, "CACHE_DIR", root / "cache")
+    db_service.init_db()
+    yield
+    mp.undo()
+
+
 @pytest.fixture(scope="session")
 def sales_df():
     from services.excel_service import read_excel

@@ -107,6 +107,37 @@ class TestPin:
         ok, _ = dashboard_service.pin_tile(fid, sales_df, {"title": "x", "chart_type": "3d"})
         assert not ok
 
+    def test_concurrent_pins_keep_both_tiles(self, sales_df):
+        import threading
+
+        fid = f"test-{uuid.uuid4()}"
+        dashboard_service.save_spec(
+            fid, DashboardSpec(tabs=[Tab(title="Вкладка", tiles=[])])
+        )
+        errors: list[str] = []
+
+        def pin(index: int) -> None:
+            tile = {
+                "title": f"Пин {index}",
+                "chart_type": "bar",
+                "source": {"kind": "group", "group_column": str(sales_df.columns[0])},
+                "agg": "count",
+            }
+            ok, message = dashboard_service.pin_tile(fid, sales_df, tile)
+            if not ok:
+                errors.append(message)
+
+        threads = [threading.Thread(target=pin, args=(i,)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        spec = dashboard_service.get_current_spec(fid, sales_df)
+        titles = [tile.title for tile in spec.tabs[0].tiles]
+        db_service.delete_dashboard_spec(fid)
+        assert not errors, errors
+        assert "Пин 0" in titles and "Пин 1" in titles
+
 
 class TestNlGeneration:
     def test_valid_llm_json_becomes_spec(self, sales_df, monkeypatch):
@@ -294,3 +325,32 @@ class TestEndpoints:
         ]
         assert "current_stage" in kinds
         db_service.delete_dashboard_spec(sales_file_id)
+
+    def test_generate_conflict_returns_409(self, client, sales_file_id, monkeypatch):
+        dashboard_service.save_spec(sales_file_id, _spec(title="было"))
+
+        def collide(*_args, **_kwargs):
+            dashboard_service.save_spec(sales_file_id, _spec(title="пин"))
+            return _spec(title="сгенерировано"), None
+
+        monkeypatch.setattr(dashboard_service, "assemble_spec", collide)
+        response = client.post(
+            "/dashboard/generate",
+            json={"file_id": sales_file_id, "request": "собери дашборд"},
+        )
+        assert response.status_code == 409, response.text
+        saved = DashboardSpec.model_validate_json(
+            db_service.get_dashboard_spec(sales_file_id)
+        )
+        assert saved.tabs[0].tiles[0].title == "пин"
+        db_service.delete_dashboard_spec(sales_file_id)
+
+    def test_save_spec_if_unchanged_rejects_stale(self, sales_df):
+        fid = f"test-{uuid.uuid4()}"
+        dashboard_service.save_spec(fid, _spec(title="A"))
+        expected = db_service.get_dashboard_spec(fid)
+        dashboard_service.save_spec(fid, _spec(title="B"))
+        assert dashboard_service.save_spec_if_unchanged(fid, _spec(title="C"), expected) is False
+        loaded = DashboardSpec.model_validate_json(db_service.get_dashboard_spec(fid))
+        assert loaded.tabs[0].tiles[0].title == "B"
+        db_service.delete_dashboard_spec(fid)

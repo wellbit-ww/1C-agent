@@ -40,7 +40,13 @@ venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 
 ## Запуск
 
-Три процесса:
+Одной кнопкой — двойной клик по `start.bat` в корне проекта
+(или в Cursor: **Terminal → Run Task → Запустить проект**, либо
+**Ctrl+Shift+B**). Поднимутся backend `:8000` и UI `:8501`; Ollama
+стартует, только если ещё не слушает `11434`. Уже занятые порты
+скрипт не дублирует. Остановка: `stop.bat`.
+
+Вручную, три процесса:
 
 ```powershell
 # 1. Ollama (если не запущена как служба)
@@ -63,6 +69,14 @@ UI откроется на http://localhost:8501. Без Ollama приложен
 Ollama (`OLLAMA_BASE_URL`, `EXCEL_AGENT_MODEL`, `EXCEL_AGENT_ROUTER_MODEL`),
 лимит загрузки (`EXCEL_AGENT_MAX_UPLOAD_MB`), CORS, адрес backend для UI
 (`EXCEL_AGENT_API_URL`).
+
+`start.bat` поднимает API и UI только на `127.0.0.1`. Если открываете порт
+в сеть — задайте `EXCEL_AGENT_API_TOKEN` в `.env` (тот же ключ для backend
+и UI, заголовок `X-API-Token`). Без токена любой, кто достучался до API,
+читает чужие выгрузки по `file_id`. Старые файлы старше
+`EXCEL_AGENT_FILE_TTL_HOURS` (по умолчанию 7 суток) удаляются при старте
+и после новой загрузки. SQLite работает в режиме WAL
+(`EXCEL_AGENT_SQLITE_TIMEOUT`, по умолчанию 30 с).
 
 ## Тесты
 

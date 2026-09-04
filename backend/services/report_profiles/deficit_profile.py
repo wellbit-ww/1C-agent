@@ -60,6 +60,13 @@ class DeficitProfile(ReportProfile):
             
         return charts
         
+    def _top_group(self, df: pd.DataFrame, group_col: str, value_col: str):
+        grouped = df.groupby(group_col)[value_col].sum()
+        clean = grouped.dropna()
+        if clean.empty:
+            return None
+        return clean.idxmax()
+
     def get_insights(self, df: pd.DataFrame) -> list[str]:
         insights = []
         
@@ -69,17 +76,24 @@ class DeficitProfile(ReportProfile):
             
         dept_col = next((c for c in df.columns if "подразделение" in str(c).lower()), None)
         if dept_col:
-            top_dept = df.groupby(dept_col)[def_col].sum().idxmax()
-            insights.append(f"Подразделение с максимальным дефицитом: {top_dept}")
+            top_dept = self._top_group(df, dept_col, def_col)
+            if top_dept is not None:
+                insights.append(f"Подразделение с максимальным дефицитом: {top_dept}")
             
         mgr_col = resolve_semantic_column(df, "", semantic="manager", dtype="categorical")
         if mgr_col:
-            top_mgr = df.groupby(mgr_col)[def_col].sum().idxmax()
-            insights.append(f"Менеджер с максимальным дефицитом: {top_mgr}")
+            top_mgr = self._top_group(df, mgr_col, def_col)
+            if top_mgr is not None:
+                insights.append(f"Менеджер с максимальным дефицитом: {top_mgr}")
             
         client_col = resolve_semantic_column(df, "", semantic="client", dtype="categorical")
         if client_col:
-            top_client = df.groupby(client_col)[def_col].sum().idxmax()
-            insights.append(f"ТОП заказчик по дефициту: {top_client}")
+            top_client = self._top_group(df, client_col, def_col)
+            if top_client is not None:
+                insights.append(f"ТОП заказчик по дефициту: {top_client}")
             
         return insights
+
+    def get_dashboard_spec(self, df: pd.DataFrame):
+        from services.generic_dashboard import build_generic_spec
+        return build_generic_spec(df)

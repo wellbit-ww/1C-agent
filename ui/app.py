@@ -14,6 +14,7 @@ from api_client import (
     dashboard_generate,
     dashboard_pin,
     dashboard_save_spec,
+    download_report_pdf,
     enrich_file_context,
     get_dashboard,
     get_detailed_table,
@@ -112,6 +113,17 @@ def render_sidebar(backend_ok: bool, backend_status: str) -> None:
 
 def _process_upload(uploaded_file) -> bool:
     """Загрузка файла, изучение ИИ, история чата и дашборд. True при успехе."""
+    previous = {
+        "file_id": st.session_state.file_id,
+        "uploaded_filename": st.session_state.uploaded_filename,
+        "messages": st.session_state.messages,
+        "file_context": st.session_state.get("file_context"),
+        "detailed_table": st.session_state.detailed_table,
+        "report": st.session_state.report,
+        "dashboard": st.session_state.dashboard,
+        "dashboard_comments": st.session_state.dashboard_comments,
+        "view": st.session_state.view,
+    }
     try:
         with st.spinner("Загружаю файл..."):
             result = upload_file(uploaded_file)
@@ -137,7 +149,8 @@ def _process_upload(uploaded_file) -> bool:
             }
             for m in history.get("messages", [])
         ]
-    except ApiClientError:
+    except ApiClientError as exc:
+        st.warning(f"Не удалось загрузить историю чата: {exc}")
         st.session_state.messages = []
     st.session_state.detailed_table = None
     st.session_state.report = None
@@ -159,8 +172,9 @@ def _process_upload(uploaded_file) -> bool:
         if dash_ctx and not st.session_state.get("file_context"):
             st.session_state.file_context = dash_ctx
     except ApiClientError as exc:
-        st.session_state.dashboard = None
-        st.error(f"Ошибка создания дашборда: {exc}")
+        for key, value in previous.items():
+            st.session_state[key] = value
+        st.error(f"Ошибка создания дашборда, файл не открыт: {exc}")
         return False
     return True
 
@@ -300,14 +314,20 @@ def _render_dashboard_toolbar(db: dict) -> None:
                 _apply_dashboard_result(dashboard_generate(file_id, request_text))
             st.rerun()
         except ApiClientError as exc:
-            st.error(f"Генерация не удалась: {exc}")
+            if "изменился" in str(exc):
+                st.warning(str(exc))
+            else:
+                st.error(f"Генерация не удалась: {exc}")
     if col_edit.button("🛠 Применить правку", use_container_width=True, disabled=not request_text):
         try:
             with st.spinner("ИИ редактирует дашборд..."):
                 _apply_dashboard_result(dashboard_edit(file_id, request_text))
             st.rerun()
         except ApiClientError as exc:
-            st.error(f"Правка не удалась: {exc}")
+            if "изменился" in str(exc):
+                st.warning(str(exc))
+            else:
+                st.error(f"Правка не удалась: {exc}")
     if col_comments.button("💬 Комментарии ИИ", use_container_width=True):
         try:
             with st.spinner("ИИ анализирует вкладки..."):
@@ -576,25 +596,6 @@ def render_dashboard_block() -> None:
                 st.dataframe(st.session_state.detailed_table, use_container_width=True)
 
 
-def _load_pdf_export():
-    """Streamlit следит за ui/, не за backend/ — иначе остаётся старый pdf_export."""
-    import importlib
-    import sys
-    from pathlib import Path
-
-    backend = str(Path(__file__).resolve().parents[1] / "backend")
-    if backend not in sys.path:
-        sys.path.insert(0, backend)
-    import services.pdf_export as pdf_export
-
-    if not hasattr(pdf_export, "chart_to_png") or not st.session_state.get(
-        "_pdf_export_fresh"
-    ):
-        pdf_export = importlib.reload(pdf_export)
-        st.session_state._pdf_export_fresh = True
-    return pdf_export
-
-
 def _dashboard_fingerprint(db: dict | None) -> tuple:
     tabs = (db or {}).get("tabs") or []
     return tuple(
@@ -609,67 +610,27 @@ def _dashboard_fingerprint(db: dict | None) -> tuple:
     )
 
 
-def _dashboard_tabs_for_pdf() -> list:
-    """Растрирует графики дашборда один раз, пока спека не менялась."""
-    pdf_export = _load_pdf_export()
-
-    db = st.session_state.get("dashboard") or {}
-    fingerprint = _dashboard_fingerprint(db)
-    if (
-        st.session_state.get("_dash_png_fp") == fingerprint
-        and st.session_state.get("_dash_png_tabs") is not None
-    ):
-        return st.session_state._dash_png_tabs
-
-    tabs_out = []
-    for tab in db.get("tabs") or []:
-        tiles_out = []
-        for tile in tab.get("tiles") or []:
-            item = {
-                "title": tile.get("title"),
-                "error": tile.get("error"),
-                "stats": tile.get("stats"),
-                "plotly_json": tile.get("plotly_json"),
-            }
-            png = pdf_export.chart_to_png(item)
-            if png:
-                item["png"] = png
-                item.pop("plotly_json", None)
-            tiles_out.append(item)
-        tabs_out.append({"title": tab.get("title"), "tiles": tiles_out})
-
-    if not tabs_out:
-        charts = [
-            c
-            for c in (st.session_state.get("report") or {}).get("charts") or []
-            if c.get("plotly_json")
-        ]
-        if charts:
-            tiles_out = []
-            for chart in charts:
-                item = {"title": chart.get("title"), "plotly_json": chart.get("plotly_json")}
-                png = pdf_export.chart_to_png(item)
-                if png:
-                    item["png"] = png
-                    item.pop("plotly_json", None)
-                tiles_out.append(item)
-            tabs_out = [{"title": "Графики", "tiles": tiles_out}]
-
-    st.session_state._dash_png_fp = fingerprint
-    st.session_state._dash_png_tabs = tabs_out
-    return tabs_out
-
-
-def _build_report_pdf() -> bytes:
-    pdf_export = _load_pdf_export()
-    return pdf_export.render_report_pdf(
-        st.session_state.report,
+def _fetch_report_pdf() -> bytes:
+    """PDF собирает backend (POST /report/pdf); кэш — пока текст и дашборд те же."""
+    key = (
+        st.session_state.file_id,
+        st.session_state.get("edit_narrative"),
+        st.session_state.get("edit_insights"),
+        st.session_state.get("edit_comment") or "",
+        _dashboard_fingerprint(st.session_state.get("dashboard")),
+    )
+    if st.session_state.get("_pdf_cache_key") == key:
+        return st.session_state.get("_pdf_cache_bytes") or b""
+    pdf_bytes = download_report_pdf(
+        st.session_state.file_id,
+        filename=st.session_state.uploaded_filename,
         narrative=st.session_state.get("edit_narrative"),
         insights=st.session_state.get("edit_insights"),
         comment=st.session_state.get("edit_comment") or "",
-        dashboard_tabs=_dashboard_tabs_for_pdf(),
-        dashboard_comments=st.session_state.get("dashboard_comments") or {},
     )
+    st.session_state._pdf_cache_key = key
+    st.session_state._pdf_cache_bytes = pdf_bytes
+    return pdf_bytes
 
 
 def _build_report_markdown() -> str:
@@ -862,12 +823,9 @@ def render_report_page() -> None:
     pdf_col, md_col = st.columns(2)
     with pdf_col:
         try:
-            if st.session_state.get("_dash_png_tabs") is None:
-                with st.spinner("Готовлю графики дашборда для PDF..."):
-                    pdf_bytes = _build_report_pdf()
-            else:
-                pdf_bytes = _build_report_pdf()
-        except Exception as exc:
+            with st.spinner("Собираю PDF..."):
+                pdf_bytes = _fetch_report_pdf()
+        except ApiClientError as exc:
             pdf_bytes = b""
             st.error(f"Не удалось собрать PDF: {exc}")
         if pdf_bytes:

@@ -1,10 +1,12 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import config
 import httpx
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import (
@@ -37,6 +39,7 @@ from models.schemas import (
     DashboardRequest,
     DashboardSpecSaveRequest,
     FileContextRequest,
+    FileId,
     HistoryRequest,
     InsightsRequest,
     ChartRequest,
@@ -53,6 +56,14 @@ logger = logging.getLogger("excel_agent")
 async def lifespan(app: FastAPI):
     db_service.init_db()
     _check_ollama_availability()
+    try:
+        from services.storage_service import purge_expired
+
+        n = purge_expired()
+        if n:
+            logger.info("Очистка хранилища: удалено %s объектов", n)
+    except Exception as exc:
+        logger.warning("Очистка хранилища не удалась: %s", exc)
     yield
 
 
@@ -70,6 +81,27 @@ app.add_middleware(
 )
 
 agent = ExcelAgent()
+
+
+@app.middleware("http")
+async def api_token_middleware(request: Request, call_next):
+    """Если EXCEL_AGENT_API_TOKEN задан — все пути кроме GET / требуют заголовок."""
+    if not config.API_TOKEN:
+        return await call_next(request)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    if request.method == "GET" and request.url.path == "/":
+        return await call_next(request)
+    provided = request.headers.get("x-api-token") or ""
+    auth = request.headers.get("authorization") or ""
+    if not provided and auth.lower().startswith("bearer "):
+        provided = auth[7:].strip()
+    if provided != config.API_TOKEN:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Нужен заголовок X-API-Token"},
+        )
+    return await call_next(request)
 
 
 def _check_ollama_availability() -> None:
@@ -150,15 +182,11 @@ async def _read_upload_securely(file: UploadFile) -> tuple[str, str]:
     return file_id, get_file(file_id)
 
 
-@app.post("/upload")
-async def upload_excel(
-    file: UploadFile = File(...),
-):
-    file_id, file_path = await _read_upload_securely(file)
+def _finish_upload(file_id: str, file_path: str) -> dict:
+    from services.excel_service import read_workbook
+    from services.storage_service import purge_expired
 
     try:
-        from services.excel_service import read_workbook
-
         df, workbook = read_workbook(file_path)
         set_dataframe(file_id, df)
     except (InvalidFileError, EmptyDataFrameError) as exc:
@@ -177,26 +205,50 @@ async def upload_excel(
     except Exception as exc:
         logger.warning("Карточка файла не собрана при загрузке: %s", exc)
 
-    return {
-        "file_id": file_id,
-    }
+    try:
+        purge_expired()
+    except Exception as exc:
+        logger.warning("Очистка хранилища после загрузки не удалась: %s", exc)
+
+    return {"file_id": file_id}
+
+
+@app.post("/upload")
+async def upload_excel(
+    file: UploadFile = File(...),
+):
+    file_id, file_path = await _read_upload_securely(file)
+    return await asyncio.to_thread(_finish_upload, file_id, file_path)
 
 
 @app.post("/analyze")
 async def analyze_excel(
     file: UploadFile = File(...),
 ):
-    _, file_path = await _read_upload_securely(file)
+    file_id, file_path = await _read_upload_securely(file)
+    try:
+        description = await asyncio.to_thread(
+            _handle_service_errors,
+            agent.analyze_file,
+            file_path,
+        )
+    finally:
+        from services.storage_service import delete_file
 
-    description = _handle_service_errors(
-        agent.analyze_file,
-        file_path,
-    )
-
+        await asyncio.to_thread(delete_file, file_id)
     return {
         "filename": file.filename,
         "description": description,
     }
+
+
+@app.delete("/file/{file_id}")
+def delete_uploaded_file(file_id: FileId):
+    from services.storage_service import delete_file
+
+    if not delete_file(file_id):
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    return {"ok": True}
 
 
 @app.post("/chat")
@@ -230,7 +282,7 @@ def chat(
 
 
 @app.post("/history")
-async def chat_history(
+def chat_history(
     request: HistoryRequest,
 ):
     _get_file_path_or_404(request.file_id)
@@ -242,7 +294,7 @@ async def chat_history(
 
 
 @app.post("/insights")
-async def insights(
+def insights(
     request: InsightsRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)
@@ -259,7 +311,7 @@ async def insights(
 
 
 @app.post("/profile")
-async def profile_report(
+def profile_report(
     request: ProfileRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)
@@ -285,7 +337,7 @@ async def profile_report(
     }
 
 @app.post("/dashboard")
-async def dashboard(
+def dashboard(
     request: DashboardRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)
@@ -337,6 +389,7 @@ def dashboard_generate(request: DashboardGenerateRequest):
 
     file_path = _get_file_path_or_404(request.file_id)
     df = _load_df(request.file_id, file_path)
+    expected = db_service.get_dashboard_spec(request.file_id)
     fallback = dashboard_service.get_current_spec(request.file_id, df)
     from services.file_context_service import get_context
 
@@ -353,7 +406,11 @@ def dashboard_generate(request: DashboardGenerateRequest):
             status_code=422,
             detail="Не удалось собрать дашборд по запросу — попробуйте переформулировать",
         )
-    dashboard_service.save_spec(request.file_id, spec)
+    if not dashboard_service.save_spec_if_unchanged(request.file_id, spec, expected):
+        raise HTTPException(
+            status_code=409,
+            detail="Дашборд изменился, пока собирался новый. Повторите запрос.",
+        )
     payload = _render_and_respond(df, spec)
     if warning:
         payload["warning"] = warning
@@ -367,6 +424,7 @@ def dashboard_edit(request: DashboardGenerateRequest):
 
     file_path = _get_file_path_or_404(request.file_id)
     df = _load_df(request.file_id, file_path)
+    expected = db_service.get_dashboard_spec(request.file_id)
     current = dashboard_service.get_current_spec(request.file_id, df)
     if current is None:
         raise HTTPException(status_code=404, detail="Нет дашборда для редактирования")
@@ -385,7 +443,11 @@ def dashboard_edit(request: DashboardGenerateRequest):
             status_code=422,
             detail="Не удалось применить правку — попробуйте переформулировать",
         )
-    dashboard_service.save_spec(request.file_id, spec)
+    if not dashboard_service.save_spec_if_unchanged(request.file_id, spec, expected):
+        raise HTTPException(
+            status_code=409,
+            detail="Дашборд изменился, пока применялась правка. Повторите запрос.",
+        )
     payload = _render_and_respond(df, spec)
     if warning:
         payload["warning"] = warning
@@ -393,7 +455,7 @@ def dashboard_edit(request: DashboardGenerateRequest):
 
 
 @app.post("/dashboard/pin")
-async def dashboard_pin(request: DashboardPinRequest):
+def dashboard_pin(request: DashboardPinRequest):
     """Закрепить график из чата на первой вкладке дашборда."""
     from services import dashboard_service
 
@@ -408,7 +470,7 @@ async def dashboard_pin(request: DashboardPinRequest):
 
 
 @app.post("/dashboard/spec")
-async def dashboard_spec_save(request: DashboardSpecSaveRequest):
+def dashboard_spec_save(request: DashboardSpecSaveRequest):
     """Сохранить спеку из простого редактора UI."""
     from models.dashboard_spec import DashboardSpec
     from pydantic import ValidationError
@@ -444,7 +506,7 @@ def dashboard_comments(request: DashboardRequest):
 
 
 @app.post("/report")
-async def full_report(
+def full_report(
     request: ReportRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)
@@ -467,7 +529,7 @@ async def full_report(
 
 
 @app.post("/report/pdf")
-async def full_report_pdf(request: ReportPdfRequest):
+def full_report_pdf(request: ReportPdfRequest):
     file_path = _get_file_path_or_404(request.file_id)
     df = _handle_service_errors(
         agent._load_dataframe,
@@ -503,7 +565,7 @@ async def full_report_pdf(request: ReportPdfRequest):
 
 
 @app.post("/table")
-async def detailed_table(
+def detailed_table(
     request: TableRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)
@@ -524,7 +586,7 @@ async def detailed_table(
     return {"data": data}
 
 @app.post("/chart")
-async def generate_chart(
+def generate_chart(
     request: ChartRequest,
 ):
     file_path = _get_file_path_or_404(request.file_id)

@@ -9,6 +9,7 @@ import sqlite3
 import time
 
 from config import DB_PATH
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +44,12 @@ CREATE TABLE IF NOT EXISTS file_contexts (
 
 
 def _connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+    timeout = float(config.SQLITE_TIMEOUT)
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -55,9 +60,6 @@ def init_db() -> None:
     except sqlite3.Error as exc:
         logger.error("Не удалось инициализировать БД %s: %s", DB_PATH, exc)
         raise
-
-
-init_db()
 
 
 # --- Файлы -----------------------------------------------------------------
@@ -81,6 +83,29 @@ def get_file_record(file_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def list_file_ids() -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT file_id FROM files").fetchall()
+    return [row["file_id"] for row in rows]
+
+
+def list_file_ids_older_than(cutoff_ts: float) -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT file_id FROM files WHERE created_at < ?",
+            (cutoff_ts,),
+        ).fetchall()
+    return [row["file_id"] for row in rows]
+
+
+def delete_file_cascade(file_id: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE file_id = ?", (file_id,))
+        conn.execute("DELETE FROM dashboard_specs WHERE file_id = ?", (file_id,))
+        conn.execute("DELETE FROM file_contexts WHERE file_id = ?", (file_id,))
+        conn.execute("DELETE FROM files WHERE file_id = ?", (file_id,))
+
+
 # --- История чата -----------------------------------------------------------
 
 def add_chat_message(
@@ -96,6 +121,23 @@ def add_chat_message(
             " VALUES (?, ?, ?, ?, ?)",
             (file_id, role, content, charts_json, time.time()),
         )
+        _trim_chat_messages(conn, file_id)
+
+
+def _trim_chat_messages(conn: sqlite3.Connection, file_id: str) -> None:
+    keep = max(1, int(config.CHAT_HISTORY_LIMIT))
+    extra = conn.execute(
+        "SELECT id FROM chat_messages WHERE file_id = ?"
+        " ORDER BY id DESC LIMIT -1 OFFSET ?",
+        (file_id, keep),
+    ).fetchall()
+    if not extra:
+        return
+    ids = [row["id"] for row in extra]
+    conn.execute(
+        f"DELETE FROM chat_messages WHERE id IN ({','.join('?' * len(ids))})",
+        ids,
+    )
 
 
 def get_chat_history(file_id: str, limit: int = 50) -> list[dict]:
