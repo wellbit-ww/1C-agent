@@ -3,8 +3,6 @@ from typing import Any
 import logging
 
 from services.report_detector import detect_report_type
-from services.report_profiles.sales_profile import SalesProfile
-from services.report_profiles.deficit_profile import DeficitProfile
 from services.report_profiles.base_profile import ReportProfile
 
 from services.profile_registry import get_profile
@@ -14,10 +12,6 @@ from services.business_dictionary import detect_entities
 # Setting up basic logging
 logger = logging.getLogger(__name__)
 
-_old_profiles = {
-    "sales_pipeline": SalesProfile(),
-    "deficit_report": DeficitProfile(),
-}
 
 class DefaultProfile(ReportProfile):
     def get_kpis(self, df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -60,52 +54,23 @@ class DefaultProfile(ReportProfile):
 
 _default_profile = DefaultProfile()
 
-class ConfigAdapterProfile(ReportProfile):
-    """Adapter to map new Config-Driven ReportEngine to the old ReportProfile interface."""
-    def __init__(self, engine: ReportEngine, legacy: "ReportProfile | None" = None):
-        self.engine = engine
-        self.legacy = legacy
-
-    def get_kpis(self, df: pd.DataFrame) -> list[dict[str, Any]]:
-        return self.engine.get_kpis(df)
-
-    def get_charts(self, df: pd.DataFrame) -> list[dict[str, Any]]:
-        return self.engine.get_charts(df)
-
-    def get_insights(self, df: pd.DataFrame) -> list[str]:
-        return self.engine.get_insights(df)
-
-    def get_summary(self, df: pd.DataFrame) -> str:
-        return self.engine.get_summary(df)
-
-    def get_dashboard_spec(self, df: pd.DataFrame):
-        if self.legacy is not None and hasattr(self.legacy, "get_dashboard_spec"):
-            spec = self.legacy.get_dashboard_spec(df)
-            if spec is not None:
-                return spec
-        from services.generic_dashboard import build_generic_spec
-        return build_generic_spec(df)
 
 def get_profile_for_df(
     df: pd.DataFrame, filename: str | None = None
 ) -> tuple[str, ReportProfile]:
     report_type = detect_report_type(df, filename=filename)
     logger.info(f"Обнаружен тип отчета: {report_type}")
-    
+
     entities = detect_entities(df.columns.tolist())
     logger.info(f"Найденные бизнес-сущности: {entities}")
 
-    # 1. Try to load from Metadata Registry
     config = get_profile(report_type)
     if config:
-        logger.info(f"Используется Metadata Profile: {config.name}")
-        engine = ReportEngine(config)
-        return report_type, ConfigAdapterProfile(engine, legacy=_old_profiles.get(report_type))
+        logger.info(f"Используется профиль: {config.name}")
+        return report_type, ReportEngine(config)
 
-    # 2. Fallback to Old Hardcoded Profiles
-    logger.info("Metadata Profile не найден, fallback на старые профили.")
-    profile = _old_profiles.get(report_type, _default_profile)
-    return report_type, profile
+    logger.info("YAML-профиль не найден, универсальный DefaultProfile.")
+    return report_type, _default_profile
 
 
 # ---------------------------------------------------------------------------
@@ -124,11 +89,28 @@ def _format_stat_number(value: float) -> str:
 
 
 def _safe_sample_cell(value) -> Any:
-    if value is None or (not isinstance(value, str) and pd.isna(value)):
+    if value is None:
         return ""
+    try:
+        if not isinstance(value, str) and pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "isoformat") and not isinstance(value, str):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if hasattr(value, "item") and not isinstance(value, (str, bytes, bool)):
+        try:
+            value = value.item()
+        except (ValueError, AttributeError):
+            return str(value)
     if isinstance(value, str) and len(value) > _SAMPLE_CELL_LIMIT:
         return value[:_SAMPLE_CELL_LIMIT] + "…"
-    return value
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def _data_quality(df: pd.DataFrame) -> dict[str, Any]:

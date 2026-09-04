@@ -9,6 +9,7 @@ kpis:
   - average_check
   - unique_customers
   - unique_managers
+  - row_count
 
 charts:
   - revenue_by_customer

@@ -16,5 +16,6 @@ charts:
 insights:
   - top_customer
   - top_department
+  - top_manager
 
 summary: deficit_summary
