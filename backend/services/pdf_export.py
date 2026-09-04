@@ -488,3 +488,59 @@ def render_report_pdf(
 
     out = pdf.output()
     return bytes(out)
+
+
+import hashlib
+import threading
+
+_pdf_lock = threading.Lock()
+_pdf_cache: dict[str, bytes] = {}
+_PDF_CACHE_LIMIT = 8
+
+
+def cached_report_pdf(
+    file_id: str,
+    df,
+    *,
+    filename: str | None,
+    narrative: str | None,
+    insights: str | None,
+    comment: str | None,
+) -> bytes:
+    """PDF с кэшем по file_id + data_hash + спека + правки текста."""
+    from services import db_service
+    from services.file_context_service import data_hash
+    from services.report_service import get_full_report
+
+    spec = db_service.get_dashboard_spec(file_id) or ""
+    key_src = "\0".join(
+        [
+            file_id,
+            data_hash(df),
+            spec,
+            filename or "",
+            narrative or "",
+            insights or "",
+            comment or "",
+        ]
+    )
+    key = hashlib.sha256(key_src.encode("utf-8", "replace")).hexdigest()
+    with _pdf_lock:
+        hit = _pdf_cache.get(key)
+    if hit is not None:
+        return hit
+
+    report = get_full_report(df, filename)
+    pdf_bytes = render_report_pdf(
+        report,
+        narrative=narrative,
+        insights=insights,
+        comment=comment,
+        dashboard_tabs=load_dashboard_tabs(file_id, df),
+    )
+    with _pdf_lock:
+        if key not in _pdf_cache:
+            while len(_pdf_cache) >= _PDF_CACHE_LIMIT:
+                _pdf_cache.pop(next(iter(_pdf_cache)))
+            _pdf_cache[key] = pdf_bytes
+    return pdf_bytes

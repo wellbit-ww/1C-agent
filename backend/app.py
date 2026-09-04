@@ -536,27 +536,23 @@ def full_report_pdf(request: ReportPdfRequest):
         request.file_id,
         file_path,
     )
-    from services.report_service import get_full_report
-    from services.pdf_export import PdfExportError, load_dashboard_tabs, render_report_pdf
+    from services.pdf_export import PdfExportError, cached_report_pdf
 
-    report = _handle_service_errors(
-        get_full_report,
-        df,
-        request.filename or get_original_name(request.file_id) or Path(file_path).name,
-    )
+    filename = request.filename or get_original_name(request.file_id) or Path(file_path).name
     try:
-        pdf_bytes = render_report_pdf(
-            report,
+        pdf_bytes = _handle_service_errors(
+            cached_report_pdf,
+            request.file_id,
+            df,
+            filename=filename,
             narrative=request.narrative,
             insights=request.insights,
             comment=request.comment,
-            dashboard_tabs=load_dashboard_tabs(request.file_id, df),
         )
     except PdfExportError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    filename = (request.filename or get_original_name(request.file_id) or "report").rsplit(".", 1)[0]
-    safe_name = f"report_{filename}.pdf".replace('"', "")
+    safe_name = f"report_{filename.rsplit('.', 1)[0]}.pdf".replace('"', "")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",

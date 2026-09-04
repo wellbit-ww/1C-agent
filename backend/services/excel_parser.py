@@ -1,4 +1,6 @@
 import re
+import zipfile
+from xml.etree import ElementTree as ET
 
 import openpyxl
 import pandas as pd
@@ -9,7 +11,12 @@ _DASH_VALUES = {"-", "–", "—"}
 
 
 def _is_blank(value) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
+    if value is None:
+        return True
+    # NaN из pandas/xlrd
+    if isinstance(value, float) and value != value:
+        return True
+    return isinstance(value, str) and not value.strip()
 
 
 def _is_dash(value) -> bool:
@@ -78,7 +85,37 @@ def _finalize(records: list[dict], columns: list[str]) -> pd.DataFrame:
     df = df.dropna(axis=1, how="all")
     non_empty = df.notna().sum(axis=1)
     df = df[non_empty > 1]
-    return df.reset_index(drop=True)
+    return _force_numeric_amounts(df.reset_index(drop=True))
+
+
+_AMOUNT_NAME_MARKERS = (
+    "сумма",
+    "долг",
+    "оплат",
+    "стоим",
+    "цена",
+    "выручк",
+    "дефицит",
+    "поступлен",
+    "задолжен",
+)
+
+
+def _force_numeric_amounts(df: pd.DataFrame) -> pd.DataFrame:
+    """Денежные колонки и почти-числовые object → float."""
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            continue
+        name = str(col).lower()
+        coerced = df[col].map(_coerce_scalar)
+        numeric = pd.to_numeric(coerced, errors="coerce")
+        ratio = float(numeric.notna().mean()) if len(df) else 0.0
+        amount_like = any(marker in name for marker in _AMOUNT_NAME_MARKERS)
+        if amount_like and numeric.notna().sum() >= 1:
+            df[col] = numeric
+        elif ratio >= 0.6:
+            df[col] = numeric
+    return df
 
 
 def _parse_grouped_rows(rows: list[tuple[tuple, int]]) -> pd.DataFrame | None:
@@ -250,7 +287,7 @@ def _parse_flat_rows(rows: list[tuple[tuple, int]]) -> pd.DataFrame | None:
     df = df.dropna(axis=1, how="all")
     non_empty = df.notna().sum(axis=1)
     df = df[non_empty > 1]
-    return df.reset_index(drop=True)
+    return _force_numeric_amounts(df.reset_index(drop=True))
 
 
 def _parse_csv(file_path: str) -> dict[str, pd.DataFrame]:
@@ -283,8 +320,84 @@ def _parse_csv(file_path: str) -> dict[str, pd.DataFrame]:
 
     df.columns = _dedupe([_clean_name(c) for c in df.columns])
     df = df.dropna(axis=1, how="all")
+    df = _force_numeric_amounts(df)
     name = Path(file_path).stem
     return {name: df} if not df.empty else {}
+
+
+_NS_R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+def _xlsx_sheet_outlines(file_path: str) -> dict[str, dict[int, int]]:
+    """outlineLevel строк из XML — в read_only openpyxl row_dimensions нет."""
+    outlines: dict[str, dict[int, int]] = {}
+    try:
+        with zipfile.ZipFile(file_path) as zf:
+            rels: dict[str, str] = {}
+            try:
+                root = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+            except KeyError:
+                return outlines
+            for rel in root:
+                rid = rel.attrib.get("Id")
+                target = (rel.attrib.get("Target") or "").replace("\\", "/")
+                if not rid or not target:
+                    continue
+                if target.startswith("/"):
+                    path = target.lstrip("/")
+                elif target.startswith("xl/"):
+                    path = target
+                else:
+                    path = "xl/" + target.lstrip("./")
+                rels[rid] = path
+
+            wb_root = ET.fromstring(zf.read("xl/workbook.xml"))
+            for sheet in wb_root.iter():
+                if not sheet.tag.endswith("}sheet") and sheet.tag != "sheet":
+                    continue
+                name = sheet.attrib.get("name")
+                rid = sheet.attrib.get(_NS_R_ID) or sheet.attrib.get("id")
+                xml_path = rels.get(rid or "")
+                if not name or not xml_path or xml_path not in zf.namelist():
+                    continue
+                levels: dict[int, int] = {}
+                with zf.open(xml_path) as handle:
+                    for _event, elem in ET.iterparse(handle, events=("end",)):
+                        tag = elem.tag
+                        if tag.endswith("}row") or tag == "row":
+                            row_num = elem.attrib.get("r")
+                            level = elem.attrib.get("outlineLevel")
+                            if row_num and level:
+                                try:
+                                    levels[int(row_num)] = int(level)
+                                except ValueError:
+                                    pass
+                            elem.clear()
+                if levels:
+                    outlines[name] = levels
+    except (OSError, zipfile.BadZipFile, ET.ParseError):
+        return {}
+    return outlines
+
+
+def _parse_xls(file_path: str) -> dict[str, pd.DataFrame]:
+    """Старый .xls: openpyxl не читает, xlrd отдаёт плоскую сетку без outline."""
+    xl = pd.ExcelFile(file_path, engine="xlrd")
+    sheets: dict[str, pd.DataFrame] = {}
+    for sheet_name in xl.sheet_names:
+        raw = pd.read_excel(xl, sheet_name=sheet_name, header=None, dtype=object)
+        rows: list[tuple[tuple, int]] = []
+        for tup in raw.itertuples(index=False, name=None):
+            values = tuple(None if (isinstance(v, float) and v != v) else v for v in tup)
+            if all(_is_blank(v) for v in values):
+                continue
+            rows.append((values, 0))
+        if not rows:
+            continue
+        df = _parse_flat_rows(rows)
+        if df is not None and not df.empty:
+            sheets[str(sheet_name)] = df
+    return sheets
 
 
 def parse_excel(file_path: str) -> dict[str, pd.DataFrame]:
@@ -296,34 +409,41 @@ def parse_excel(file_path: str) -> dict[str, pd.DataFrame]:
     """
     if str(file_path).lower().endswith(".csv"):
         return _parse_csv(file_path)
+    if str(file_path).lower().endswith(".xls"):
+        return _parse_xls(file_path)
 
-    wb = openpyxl.load_workbook(file_path, data_only=True)
+    wb = openpyxl.load_workbook(
+        file_path,
+        data_only=True,
+        read_only=True,
+        keep_links=False,
+    )
+    outlines = _xlsx_sheet_outlines(file_path)
     sheets: dict[str, pd.DataFrame] = {}
 
-    for ws in wb.worksheets:
-        if ws.sheet_state != "visible":
-            continue
-
-        rows: list[tuple[tuple, int]] = []
-        for i, values in enumerate(
-            ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column, values_only=True),
-            start=1,
-        ):
-            if all(_is_blank(v) for v in values):
+    try:
+        for ws in wb.worksheets:
+            if getattr(ws, "sheet_state", "visible") != "visible":
                 continue
-            dim = ws.row_dimensions.get(i)
-            level = dim.outline_level if dim else 0
-            rows.append((values, level))
 
-        if not rows:
-            continue
+            row_levels = outlines.get(ws.title) or {}
+            rows: list[tuple[tuple, int]] = []
+            for index, values in enumerate(ws.iter_rows(values_only=True), start=1):
+                if all(_is_blank(v) for v in values):
+                    continue
+                rows.append((values, row_levels.get(index, 0)))
 
-        has_outline = any(level > 0 for _, level in rows)
-        df = _parse_grouped_rows(rows) if has_outline else None
-        if df is None or df.empty:
-            df = _parse_flat_rows(rows)
+            if not rows:
+                continue
 
-        if df is not None and not df.empty:
-            sheets[ws.title] = df
+            has_outline = any(level > 0 for _, level in rows)
+            df = _parse_grouped_rows(rows) if has_outline else None
+            if df is None or df.empty:
+                df = _parse_flat_rows(rows)
+
+            if df is not None and not df.empty:
+                sheets[ws.title] = df
+    finally:
+        wb.close()
 
     return sheets

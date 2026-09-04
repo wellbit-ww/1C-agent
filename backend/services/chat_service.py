@@ -971,6 +971,16 @@ def _exec_narrative(df: pd.DataFrame, question: str, file_context=None) -> dict:
     return {"answer": polished}
 
 
+_INTERPRET_HINT = re.compile(
+    r"поясн|интерпрет|почему\s+так|что это знач|прокоммент",
+    re.I,
+)
+
+
+def _wants_interpret(question: str) -> bool:
+    return bool(_INTERPRET_HINT.search(question or ""))
+
+
 def _maybe_interpret(question: str, answer: str, file_context=None) -> str:
     if not answer:
         return ""
@@ -1100,7 +1110,11 @@ def _execute_actions(
 
     text = "\n\n".join(answers)
     kinds = {a.get("action") for a in actions[:3]}
-    if kinds & {"stat", "chart"} and "general" not in kinds:
+    if (
+        kinds & {"stat", "chart"}
+        and "general" not in kinds
+        and _wants_interpret(question)
+    ):
         note = _maybe_interpret(question, text, file_context=file_context)
         if note:
             text = f"{text}\n\n{note}"

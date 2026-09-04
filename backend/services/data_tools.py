@@ -8,6 +8,9 @@ from services.column_resolver import (
     resolve_semantic_column,
 )
 
+_DATE_COLUMNS_CACHE: dict[str, list[str]] = {}
+_DATE_COLUMNS_CACHE_MAX = 128
+
 
 def _error(message: str) -> dict:
     return {"error": message}
@@ -261,6 +264,13 @@ def get_top_n(
 
 
 def detect_date_columns(df):
+    from services.file_context_service import data_hash
+
+    cache_key = data_hash(df)
+    cached = _DATE_COLUMNS_CACHE.get(cache_key)
+    if cached is not None:
+        return {"columns": list(cached)}
+
     date_columns: list[str] = []
 
     for col in df.columns:
@@ -287,6 +297,9 @@ def detect_date_columns(df):
             if valid_ratio >= 0.5:
                 date_columns.append(col)
 
+    if len(_DATE_COLUMNS_CACHE) >= _DATE_COLUMNS_CACHE_MAX:
+        _DATE_COLUMNS_CACHE.clear()
+    _DATE_COLUMNS_CACHE[cache_key] = list(date_columns)
     return {"columns": date_columns}
 
 
