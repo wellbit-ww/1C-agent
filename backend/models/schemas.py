@@ -52,12 +52,24 @@ class ReportRequest(BaseModel):
     filename: str | None = Field(default=None, max_length=MAX_FILENAME_CHARS)
 
 
+class ReportChartIn(BaseModel):
+    title: str = Field(default="", max_length=200)
+    plotly_json: str = Field(min_length=2, max_length=150_000)
+
+
 class ReportPdfRequest(BaseModel):
     file_id: FileId
     filename: str | None = Field(default=None, max_length=MAX_FILENAME_CHARS)
     narrative: str | None = Field(default=None, max_length=MAX_NARRATIVE_CHARS)
     insights: str | None = Field(default=None, max_length=MAX_NARRATIVE_CHARS)
     comment: str | None = Field(default=None, max_length=MAX_NARRATIVE_CHARS)
+    report_charts: list[ReportChartIn] | None = Field(default=None, max_length=8)
+
+    @model_validator(mode="after")
+    def _cap_json(self):
+        if len(self.model_dump_json()) > MAX_JSON_PAYLOAD_CHARS * 4:
+            raise ValueError("Слишком большой набор графиков для PDF")
+        return self
 
 
 class HistoryRequest(BaseModel):

@@ -24,6 +24,30 @@ export type DashTab = {
 
 export type Kpi = { label: string; value: string | number };
 
+export type TileSpec = {
+  title: string;
+  chart_type: string;
+  agg: string;
+  top_n: number;
+  unit: string;
+  sort?: string;
+  target_line?: number | null;
+  source: {
+    kind?: string;
+    group_semantic?: string;
+    group_column?: string;
+    value_semantic?: string;
+    value_column?: string;
+    columns_pattern?: string;
+    column_names?: string[];
+    period?: string;
+  };
+};
+
+export type DashSpec = {
+  tabs: { title: string; tiles: TileSpec[] }[];
+};
+
 export type Dashboard = {
   report_type?: string;
   summary?: string;
@@ -31,7 +55,7 @@ export type Dashboard = {
   insights?: string[];
   tabs?: DashTab[];
   charts?: ChartPayload[];
-  spec?: { tabs: unknown[] };
+  spec?: DashSpec;
   metadata?: {
     rows?: number;
     columns?: number;
@@ -75,4 +99,10 @@ export type Report = {
     duplicates?: number;
     worst_columns?: { column: string; pct: number }[];
   };
+};
+
+export type ReportChart = {
+  id: string;
+  title: string;
+  plotly_json: string;
 };

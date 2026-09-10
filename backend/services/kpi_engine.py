@@ -25,7 +25,11 @@ def calculate_total_deficit(df: pd.DataFrame) -> dict[str, Any] | None:
     # Need to find deficit col specifically or fallback to amount
     col = None
     for c in df.columns:
-        if "дефицит" in str(c).lower() or "остаток" in str(c).lower() or "задолженность" in str(c).lower():
+        lower = str(c).lower()
+        if any(
+            marker in lower
+            for marker in ("дефицит", "остаток", "задолженность", "не оплачен", "неоплачен")
+        ):
             if pd.api.types.is_numeric_dtype(df[c]):
                 col = c
                 break

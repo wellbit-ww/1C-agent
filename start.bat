@@ -89,6 +89,7 @@ start http://127.0.0.1:8501
 
 echo.
 echo UI:  http://127.0.0.1:8501
-echo API: http://127.0.0.1:8000
+powershell -NoProfile -Command "$ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -ExpandProperty IPAddress -Unique; foreach ($ip in $ips) { Write-Host ('LAN: http://' + $ip + ':8501') }"
+echo API: http://127.0.0.1:8000 (local only)
 echo Leave the Backend and UI windows open.
 timeout /t 2 >nul

@@ -63,6 +63,22 @@ class TestReportEngine:
         insights = engine.get_insights(_deficit_df())
         assert any("Б" in text for text in insights)
 
+    def test_deficit_top_customer_separates_unpaid_and_order_sum(self):
+        config = get_profile("deficit_report")
+        engine = ReportEngine(config)
+        df = pd.DataFrame(
+            {
+                "заказчик": ["АЛАБУГА МАШИНЕРИ ООО", "РОБЕЛ ООО"],
+                "подразделение": ["А", "Б"],
+                "менеджер": ["Иванов", "Петров"],
+                "сумма по заказу в рублях": [256.0, 156.0],
+                "неоплаченный остаток": [38.0, 156.0],
+            }
+        )
+        text = "\n".join(engine.get_insights(df))
+        assert "Топ клиент по неоплаченному остатку: РОБЕЛ ООО" in text
+        assert "Топ клиент по сумме заказов: АЛАБУГА МАШИНЕРИ ООО" in text
+
     def test_deficit_all_nan_group_is_empty(self):
         config = get_profile("deficit_report")
         engine = ReportEngine(config)

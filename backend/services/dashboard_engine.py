@@ -111,15 +111,21 @@ def _group_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
-def _columns_pattern_data(df: pd.DataFrame, tile: Tile) -> dict:
-    """Агрегат по каждой колонке, оканчивающейся на pattern (проход через этап)."""
-    pattern = tile.source.columns_pattern or ""
-    matched = [c for c in df.columns if str(c).endswith(pattern)]
-    if not matched:
-        return {"error": f"Нет колонок с шаблоном «{pattern}»"}
+def _column_chart_label(col: str, pattern: str = "") -> str:
+    text = str(col)
+    if pattern and text.endswith(pattern):
+        text = text[: -len(pattern)].strip() or text
+    for sep in (" — ", " – ", " - "):
+        if sep in text:
+            return text.split(sep)[-1].strip()
+    return text
 
+
+def _aggregate_columns(df: pd.DataFrame, tile: Tile, columns: list, pattern: str = "") -> dict:
     values: dict[str, float] = {}
-    for col in matched:
+    for col in columns:
+        if col not in df.columns:
+            continue
         series = pd.to_numeric(df[col], errors="coerce")
         if tile.agg == "mean":
             value = series.mean()
@@ -128,21 +134,39 @@ def _columns_pattern_data(df: pd.DataFrame, tile: Tile) -> dict:
         else:
             value = series.sum()
         if pd.isna(value):
-            continue
-        label = col[: -len(pattern)].strip() if pattern else str(col)
-        values[label] = float(value)
+            value = 0.0
+        values[_column_chart_label(str(col), pattern)] = float(value)
 
     if not values:
-        return {"error": f"Колонки по шаблону «{pattern}» пусты"}
+        return {"error": "Нет данных для тайла"}
 
     items = list(values.items())
     if tile.sort == "desc":
         items.sort(key=lambda x: -x[1])
     elif tile.sort == "asc":
         items.sort(key=lambda x: x[1])
-    # sort == "none": порядок колонок = бизнес-порядок этапов воронки
+    return {"groups": dict(items), "group_column": pattern or "columns", "value_column": None}
 
-    return {"groups": dict(items), "group_column": pattern, "value_column": None}
+
+def _columns_pattern_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Агрегат по каждой колонке, оканчивающейся на pattern (проход через этап)."""
+    pattern = tile.source.columns_pattern or ""
+    matched = [c for c in df.columns if str(c).endswith(pattern)]
+    if not matched:
+        return {"error": f"Нет колонок с шаблоном «{pattern}»"}
+    data = _aggregate_columns(df, tile, matched, pattern)
+    if "error" in data:
+        return {"error": f"Колонки по шаблону «{pattern}» пусты"}
+    return data
+
+
+def _named_columns_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Сумма каждой явно перечисленной колонки — блоки «К оплате» и пары оплачено/остаток."""
+    names = tile.source.column_names or []
+    matched = [c for c in names if c in df.columns]
+    if not matched:
+        return {"error": f"Нет колонок для «{tile.title}»"}
+    return _aggregate_columns(df, tile, matched)
 
 
 def _stage_labels(columns: list, pattern: str) -> list[str]:
@@ -247,6 +271,8 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
     kind = tile.source.kind
     if kind == "columns_pattern":
         return _columns_pattern_data(df, tile)
+    if kind == "named_columns":
+        return _named_columns_data(df, tile)
     if kind == "current_stage":
         return _current_stage_data(df, tile)
     if kind == "period":

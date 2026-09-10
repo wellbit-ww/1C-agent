@@ -536,7 +536,11 @@ def full_report_pdf(request: ReportPdfRequest):
         request.file_id,
         file_path,
     )
-    from services.pdf_export import PdfExportError, cached_report_pdf
+    from services.pdf_export import (
+        PdfExportError,
+        cached_report_pdf,
+        pdf_content_disposition,
+    )
 
     filename = request.filename or get_original_name(request.file_id) or Path(file_path).name
     try:
@@ -548,15 +552,15 @@ def full_report_pdf(request: ReportPdfRequest):
             narrative=request.narrative,
             insights=request.insights,
             comment=request.comment,
+            report_charts=[c.model_dump() for c in (request.report_charts or [])] or None,
         )
     except PdfExportError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    safe_name = f"report_{filename.rsplit('.', 1)[0]}.pdf".replace('"', "")
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        headers={"Content-Disposition": pdf_content_disposition(filename)},
     )
 
 

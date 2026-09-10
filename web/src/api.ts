@@ -1,4 +1,4 @@
-import type { ChatMessage, Dashboard, FileContext, Report } from "./types";
+import type { ChatMessage, Dashboard, DashSpec, FileContext, Report, ReportChart } from "./types";
 
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
@@ -13,8 +13,14 @@ async function readError(res: Response): Promise<string> {
   try {
     const payload = await res.json();
     const detail = payload.detail ?? payload.error;
-    if (typeof detail === "string") return detail;
+    if (typeof detail === "string") {
+      if (detail === "Internal Server Error") {
+        return "Сервер не смог обработать запрос. Попробуйте ещё раз.";
+      }
+      return detail;
+    }
     if (Array.isArray(detail)) return detail.map((d) => d.msg ?? d).join("; ");
+    if (res.status >= 500) return "Сервер не смог обработать запрос. Попробуйте ещё раз.";
     return res.statusText;
   } catch {
     return res.statusText || `HTTP ${res.status}`;
@@ -96,18 +102,38 @@ export async function dashboardComments(
   return postJson("/dashboard/comments", { file_id: fileId });
 }
 
+export async function dashboardSaveSpec(fileId: string, spec: DashSpec): Promise<Dashboard> {
+  return postJson("/dashboard/spec", { file_id: fileId, spec });
+}
+
 export async function getReport(fileId: string, filename?: string): Promise<Report> {
   return postJson("/report", { file_id: fileId, filename });
 }
 
 export async function downloadPdf(
   fileId: string,
-  extras: { filename?: string; narrative?: string; insights?: string; comment?: string },
+  extras: {
+    filename?: string;
+    narrative?: string;
+    insights?: string;
+    comment?: string;
+    report_charts?: ReportChart[];
+  },
 ): Promise<Blob> {
   const res = await fetch("/api/report/pdf", {
     method: "POST",
     headers: headers(true),
-    body: JSON.stringify({ file_id: fileId, ...extras }),
+    body: JSON.stringify({
+      file_id: fileId,
+      filename: extras.filename,
+      narrative: extras.narrative,
+      insights: extras.insights,
+      comment: extras.comment,
+      report_charts: extras.report_charts?.map((c) => ({
+        title: c.title,
+        plotly_json: c.plotly_json,
+      })),
+    }),
   });
   if (!res.ok) throw new Error(await readError(res));
   return res.blob();

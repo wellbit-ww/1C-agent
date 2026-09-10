@@ -69,7 +69,10 @@ cd web
 npm run dev
 ```
 
-UI откроется на http://localhost:8501. Без Ollama приложение работает,
+UI откроется на http://localhost:8501. На компьютерах в той же сети —
+`http://<ваш-IP>:8501` (Vite слушает все интерфейсы, API остаётся на
+`127.0.0.1:8000` и доступен через прокси `/api`). Если Windows Firewall
+спросит разрешение — разрешите порт 8501. Без Ollama приложение работает,
 но LLM-функции вернут 503 (статистика и графики — полностью локальные).
 
 ## Конфигурация
@@ -79,8 +82,8 @@ Ollama (`OLLAMA_BASE_URL`, `EXCEL_AGENT_MODEL`, `EXCEL_AGENT_ROUTER_MODEL`),
 лимит загрузки (`EXCEL_AGENT_MAX_UPLOAD_MB`), CORS, адрес backend для UI
 (`EXCEL_AGENT_API_URL`).
 
-`start.bat` поднимает API и UI только на `127.0.0.1`. Если открываете порт
-в сеть — задайте `EXCEL_AGENT_API_TOKEN` в `.env` (тот же ключ для backend
+`start.bat` поднимает API на `127.0.0.1:8000`, а UI на всех интерфейсах
+`:8501`. Если открываете UI в сеть — задайте `EXCEL_AGENT_API_TOKEN` в `.env` (тот же ключ для backend
 и UI, заголовок `X-API-Token`). Без токена любой, кто достучался до API,
 читает чужие выгрузки по `file_id`. Старые файлы старше
 `EXCEL_AGENT_FILE_TTL_HOURS` (по умолчанию 7 суток) удаляются при старте

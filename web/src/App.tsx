@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { ChatPanel } from "./ChatPanel";
+import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
-import type { ChatMessage, Dashboard, FileContext, Report } from "./types";
+import { SpecEditor } from "./SpecEditor";
+import { clearSession, readSession, writeSession, type SavedSession } from "./session";
+import type { ChatMessage, Dashboard, DashSpec, FileContext, Report, ReportChart } from "./types";
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -31,6 +34,7 @@ export function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [table, setTable] = useState<Record<string, unknown>[] | null>(null);
   const [report, setReport] = useState<Report | null>(null);
+  const [reportCharts, setReportCharts] = useState<ReportChart[]>([]);
   const [narrative, setNarrative] = useState("");
   const [insightsText, setInsightsText] = useState("");
   const [comment, setComment] = useState("");
@@ -39,8 +43,11 @@ export function App() {
   const [dashPrompt, setDashPrompt] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [chatOpen, setChatOpen] = useState(true);
   const fileRef = useRef<HTMLInputElement>(null);
   const fileIdRef = useRef<string | null>(null);
+  const restoredRef = useRef(false);
 
   useEffect(() => {
     void api.checkBackend().then(setBackendOk);
@@ -50,7 +57,7 @@ export function App() {
     return () => window.clearInterval(id);
   }, []);
 
-  const loadFile = useCallback(async (id: string, name: string) => {
+  const loadFile = useCallback(async (id: string, name: string, restore?: SavedSession) => {
     fileIdRef.current = id;
     setBusy("Читаю выгрузку…");
     setError(null);
@@ -65,10 +72,16 @@ export function App() {
       setMessages(history.messages ?? []);
       setFilename(name);
       setFileId(id);
-      setView("dash");
-      setTab(0);
-      setComments({});
-      setReport(null);
+      const tabCount = dash.tabs?.length ?? 0;
+      if (restore) {
+        setTab(tabCount ? Math.min(restore.tab, tabCount - 1) : 0);
+      } else {
+        setView("dash");
+        setTab(0);
+        setComments({});
+        setReport(null);
+        setReportCharts([]);
+      }
       setBusy(null);
       void api
         .enrichContext(id)
@@ -86,12 +99,60 @@ export function App() {
         .catch(() => {
           if (fileIdRef.current === id) setTable(null);
         });
+      if (restore?.view === "report") {
+        try {
+          const rep = await api.getReport(id, name);
+          if (fileIdRef.current !== id) return;
+          setReport(rep);
+          setNarrative(rep.narrative ?? "");
+          const ins = rep.insights;
+          setInsightsText(Array.isArray(ins) ? ins.join("\n") : (ins ?? ""));
+          setComment(rep.comment ?? "");
+          setView("report");
+        } catch {
+          setView("dash");
+        }
+      }
     } catch (exc) {
       if (fileIdRef.current !== id) return;
-      setError(exc instanceof Error ? exc.message : String(exc));
+      const message = exc instanceof Error ? exc.message : String(exc);
+      if (restore) {
+        clearSession();
+        fileIdRef.current = null;
+        setFileId(null);
+        setFilename(null);
+        setDashboard(null);
+        setMessages([]);
+        setReportCharts([]);
+        setError("Сессия не найдена на сервере. Загрузите файл снова.");
+      } else {
+        setError(message);
+      }
       setBusy(null);
     }
   }, []);
+
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const saved = readSession();
+    if (!saved) return;
+    setChatOpen(saved.chatOpen);
+    setReportCharts(saved.reportCharts);
+    void loadFile(saved.fileId, saved.filename, saved);
+  }, [loadFile]);
+
+  useEffect(() => {
+    if (!fileId || !filename) return;
+    writeSession({
+      fileId,
+      filename,
+      view,
+      tab,
+      chatOpen,
+      reportCharts,
+    });
+  }, [fileId, filename, view, tab, chatOpen, reportCharts]);
 
   async function onUpload(file: File) {
     setBusy("Загружаю файл…");
@@ -162,11 +223,47 @@ export function App() {
       await api.dashboardPin(fileId, spec);
       const dash = await api.getDashboard(fileId);
       setDashboard(dash);
+      setNotice("График закреплён на дашборде");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
       setBusy(null);
     }
+  }
+
+  async function onSaveSpec(spec: DashSpec) {
+    if (!fileId) return;
+    setBusy("Сохраняю дашборд…");
+    setError(null);
+    try {
+      const patch = await api.dashboardSaveSpec(fileId, spec);
+      setDashboard((cur) => ({
+        ...(cur ?? {}),
+        ...patch,
+        tabs: patch.tabs ?? cur?.tabs,
+        spec: patch.spec ?? spec,
+      }));
+      setTab(0);
+      setNotice("Дашборд сохранён");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function toggleReportChart(chart: ReportChart) {
+    const exists = reportCharts.some((c) => c.id === chart.id);
+    if (!exists && reportCharts.length >= 8) {
+      setNotice("В отчёт можно добавить не больше 8 графиков");
+      return;
+    }
+    setReportCharts((cur) =>
+      exists ? cur.filter((c) => c.id !== chart.id) : [...cur, chart],
+    );
+    setNotice(
+      exists ? `«${chart.title}» убрана из отчёта` : `«${chart.title}» добавлена в отчёт`,
+    );
   }
 
   async function openReport() {
@@ -197,6 +294,7 @@ export function App() {
         narrative,
         insights: insightsText,
         comment,
+        report_charts: reportCharts.length ? reportCharts : undefined,
       });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -220,6 +318,7 @@ export function App() {
       }
     }
     fileIdRef.current = null;
+    clearSession();
     setFileId(null);
     setFilename(null);
     setDashboard(null);
@@ -227,6 +326,7 @@ export function App() {
     setMessages([]);
     setTable(null);
     setReport(null);
+    setReportCharts([]);
     setView("dash");
   }
 
@@ -235,7 +335,7 @@ export function App() {
   const meta = dashboard?.metadata;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full w-full overflow-hidden">
       <nav className="flex w-16 shrink-0 flex-col items-center gap-2 border-r border-line bg-panel py-4">
         <div className="mb-4 h-8 w-8 rounded-lg bg-accent-dim text-center text-sm leading-8 text-accent">
           1C
@@ -247,6 +347,11 @@ export function App() {
           disabled={!fileId}
           onClick={() => void openReport()}
         />
+        <NavBtn
+          active={chatOpen}
+          label="Чат"
+          onClick={() => setChatOpen((open) => !open)}
+        />
         <div className="mt-auto flex flex-col items-center gap-2">
           <span
             className={`h-2 w-2 rounded-full ${backendOk ? "bg-accent" : "bg-red-500"}`}
@@ -255,7 +360,7 @@ export function App() {
         </div>
       </nav>
 
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="flex items-center gap-3 border-b border-line px-5 py-3">
           <button
             type="button"
@@ -286,14 +391,22 @@ export function App() {
           {fileId && (
             <button
               type="button"
-              className="text-xs text-zinc-500 hover:text-zinc-200"
+              className="rounded-lg border border-line px-3 py-1.5 text-sm text-zinc-300 hover:border-red-400/50 hover:text-red-200"
               onClick={() => void resetFile()}
             >
-              Новый файл
+              Закрыть файл
             </button>
           )}
         </header>
 
+        {notice && (
+          <div className="border-b border-accent/30 bg-accent-dim px-5 py-2 text-sm text-accent">
+            {notice}
+            <button className="ml-3 text-xs underline" onClick={() => setNotice(null)}>
+              скрыть
+            </button>
+          </div>
+        )}
         {error && (
           <div className="border-b border-red-900/60 bg-red-950/40 px-5 py-2 text-sm text-red-200">
             {error}
@@ -309,9 +422,15 @@ export function App() {
             narrative={narrative}
             insightsText={insightsText}
             comment={comment}
+            charts={reportCharts}
             onNarrative={setNarrative}
             onInsights={setInsightsText}
             onComment={setComment}
+            onRemoveChart={(id) => {
+              const item = reportCharts.find((c) => c.id === id);
+              setReportCharts((cur) => cur.filter((c) => c.id !== id));
+              if (item) setNotice(`«${item.title}» убрана из отчёта`);
+            }}
             onBack={() => setView("dash")}
             onPdf={() => void onPdf()}
           />
@@ -322,8 +441,14 @@ export function App() {
             ) : (
               <>
                 {ctx?.summary && (
-                  <p className="mb-4 max-w-3xl text-sm text-zinc-400">{ctx.summary}</p>
+                  <p className="mb-3 max-w-3xl text-sm text-zinc-400">{ctx.summary}</p>
                 )}
+                {dashboard?.summary && dashboard.summary !== ctx?.summary && (
+                  <p className="mb-3 max-w-3xl rounded-xl border border-line bg-card px-3 py-2 text-sm text-zinc-300">
+                    {dashboard.summary}
+                  </p>
+                )}
+                {ctx && <FileBrief ctx={ctx} />}
                 {meta && (
                   <p className="mb-4 text-xs text-zinc-500">
                     Период {meta.period ?? "—"} · {meta.rows ?? 0} строк · {meta.columns ?? 0} колонок
@@ -380,6 +505,15 @@ export function App() {
                   </button>
                 </div>
 
+                {dashboard?.spec && (
+                  <SpecEditor
+                    spec={dashboard.spec}
+                    columns={meta?.column_names ?? []}
+                    busy={!!busy}
+                    onSave={(spec) => void onSaveSpec(spec)}
+                  />
+                )}
+
                 {tabs.length > 0 && (
                   <>
                     <div className="mb-3 flex gap-1">
@@ -403,17 +537,41 @@ export function App() {
                         {comments[tabs[tab].title]}
                       </p>
                     )}
-                    <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-                      {(tabs[tab]?.tiles ?? []).map((tile) => (
-                        <div key={tile.title} className="rounded-xl border border-line bg-card p-3">
-                          <div className="mb-2 text-sm font-medium">{tile.title}</div>
+                    <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">
+                      {(tabs[tab]?.tiles ?? []).map((tile) => {
+                        const id = `${tabs[tab]?.title ?? "tab"}::${tile.title}`;
+                        const inReport = reportCharts.some((c) => c.id === id);
+                        return (
+                        <div
+                          key={tile.title}
+                          className="min-w-0 overflow-hidden rounded-xl border border-line bg-card p-3"
+                        >
+                          <div className="mb-2 flex items-start justify-between gap-2">
+                            <div className="text-sm font-medium">{tile.title}</div>
+                            {tile.plotly_json && (
+                              <button
+                                type="button"
+                                className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+                                onClick={() =>
+                                  toggleReportChart({
+                                    id,
+                                    title: tile.title,
+                                    plotly_json: tile.plotly_json!,
+                                  })
+                                }
+                              >
+                                {inReport ? "В отчёте" : "В отчёт"}
+                              </button>
+                            )}
+                          </div>
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
                           ) : tile.plotly_json ? (
                             <PlotChart json={tile.plotly_json} />
                           ) : null}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </>
                 )}
@@ -423,6 +581,24 @@ export function App() {
                     {dashboard!.charts!.map((c, i) =>
                       c.plotly_json ? (
                         <div key={i} className="rounded-xl border border-line bg-card p-3">
+                          <div className="mb-2 flex items-start justify-between gap-2">
+                            <div className="text-sm font-medium">{c.title ?? "График"}</div>
+                            <button
+                              type="button"
+                              className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+                              onClick={() =>
+                                toggleReportChart({
+                                  id: `chart::${c.title ?? i}`,
+                                  title: c.title ?? "График",
+                                  plotly_json: c.plotly_json!,
+                                })
+                              }
+                            >
+                              {reportCharts.some((x) => x.id === `chart::${c.title ?? i}`)
+                                ? "В отчёте"
+                                : "В отчёт"}
+                            </button>
+                          </div>
                           <PlotChart json={c.plotly_json} />
                         </div>
                       ) : null,
@@ -468,14 +644,22 @@ export function App() {
       </main>
 
       <ChatPanel
+        className={
+          chatOpen
+            ? "flex h-full w-[400px] shrink-0 flex-col border-l border-line bg-panel"
+            : "hidden"
+        }
         disabled={!fileId}
         reportType={dashboard?.report_type}
         ideas={ctx?.dashboard_ideas}
         messages={messages}
         busy={!!busy}
         canPin={!!tabs.length}
+        reportChartIds={reportCharts.map((c) => c.id)}
         onSend={(q) => void onSend(q)}
         onPin={(spec) => void onPin(spec)}
+        onAddToReport={(chart) => toggleReportChart(chart)}
+        onClose={() => setChatOpen(false)}
       />
     </div>
   );
@@ -529,9 +713,11 @@ function ReportPane({
   narrative,
   insightsText,
   comment,
+  charts,
   onNarrative,
   onInsights,
   onComment,
+  onRemoveChart,
   onBack,
   onPdf,
 }: {
@@ -539,9 +725,11 @@ function ReportPane({
   narrative: string;
   insightsText: string;
   comment: string;
+  charts: ReportChart[];
   onNarrative: (v: string) => void;
   onInsights: (v: string) => void;
   onComment: (v: string) => void;
+  onRemoveChart: (id: string) => void;
   onBack: () => void;
   onPdf: () => void;
 }) {
@@ -583,6 +771,28 @@ function ReportPane({
         onChange={(e) => onComment(e.target.value)}
         className="mb-4 h-20 w-full rounded-xl border border-line bg-card p-3 text-sm outline-none focus:border-accent/60"
       />
+      {charts.length > 0 && (
+        <>
+          <div className="mb-2 text-xs text-zinc-500">Графики в отчёте</div>
+          <div className="mb-4 grid min-w-0 grid-cols-1 gap-4">
+            {charts.map((chart) => (
+              <div key={chart.id} className="min-w-0 overflow-hidden rounded-xl border border-line bg-card p-3">
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <div className="text-sm font-medium">{chart.title}</div>
+                  <button
+                    type="button"
+                    className="shrink-0 text-[11px] text-zinc-500 hover:text-red-300"
+                    onClick={() => onRemoveChart(chart.id)}
+                  >
+                    Убрать
+                  </button>
+                </div>
+                <PlotChart json={chart.plotly_json} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       {q && (
         <p className="text-xs text-zinc-500">
           Ячеек {q.total_cells ?? 0} · пропуски {q.null_cells ?? 0} ({q.null_pct ?? 0}%) ·

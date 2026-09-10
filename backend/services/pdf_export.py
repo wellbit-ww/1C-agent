@@ -6,11 +6,23 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
 logger = logging.getLogger(__name__)
+
+
+def pdf_content_disposition(filename: str) -> str:
+    """ASCII filename + RFC 5987, чтобы кириллица в имени не роняла Response."""
+    stem = Path(filename or "report").stem.replace('"', "").strip() or "report"
+    utf_name = f"report_{stem}.pdf"
+    return (
+        'attachment; filename="report.pdf"; '
+        f"filename*=UTF-8''{quote(utf_name)}"
+    )
+
 
 _REPORT_TYPE_NAMES = {
     "sales_pipeline": "Этапы продаж",
@@ -163,7 +175,7 @@ def _mpl_png(plotly_json: str) -> bytes | None:
         traces = list(fig.data or [])
         if not traces:
             return None
-        mpl, ax = plt.subplots(figsize=(8.2, 3.8), dpi=120)
+        mpl, ax = plt.subplots(figsize=(11, 4.6), dpi=120)
         trace = traces[0]
         kind = getattr(trace, "type", "") or ""
         if kind == "pie":
@@ -221,12 +233,12 @@ def chart_to_png(item: dict) -> bytes | None:
         fig.update_layout(
             template="plotly_white",
             title=None,
-            width=920,
-            height=420,
-            margin=dict(l=56, r=28, t=20, b=72),
-            font=dict(family="Arial", size=13),
+            width=1100,
+            height=520,
+            margin=dict(l=80, r=28, t=24, b=80),
+            font=dict(family="Arial", size=14),
         )
-        return fig.to_image(format="png", scale=1.3)
+        return fig.to_image(format="png", scale=1.4)
     except Exception as exc:
         logger.warning("kaleido не собрал график, запасной путь: %s", exc)
         return _mpl_png(str(plotly_json))
@@ -248,60 +260,42 @@ def _tile_caption(item: dict) -> str:
 
 def _embed_tiles(pdf: _ReportPdf, tiles: list[dict]) -> None:
     ready = [t for t in tiles if isinstance(t, dict)][:8]
-    i = 0
-    while i < len(ready):
-        pair = ready[i : i + 2]
-        usable = pdf.epw
-        gap = 4
-        col_w = usable if len(pair) == 1 else (usable - gap) / 2
-        pngs = [chart_to_png(tile) for tile in pair]
-        heights = []
-        for png in pngs:
-            if png:
-                _, h = _png_size_mm(png, col_w)
-                heights.append(min(h, 78))
-            else:
-                heights.append(18)
-        block_h = max(heights) + 16
-        _need_page(pdf, block_h)
-        y0 = pdf.get_y()
-        max_bottom = y0
-        for col, tile in enumerate(pair):
-            x = pdf.l_margin + col * (col_w + gap)
-            pdf.set_xy(x, y0)
-            pdf.set_font("Report", style="B", size=10)
-            pdf.set_text_color(20, 55, 110)
-            pdf.multi_cell(col_w, 5, _soft_wrap(str(tile.get("title") or "График"), 36))
-            pdf.set_text_color(0, 0, 0)
-            y_img = pdf.get_y() + 1
-            png = pngs[col]
-            if tile.get("error") and not png:
-                pdf.set_xy(x, y_img)
-                pdf.set_font("Report", size=9)
-                pdf.multi_cell(col_w, 4.5, _soft_wrap(f"Не построен: {tile['error']}", 36))
-                max_bottom = max(max_bottom, pdf.get_y())
-                continue
-            if png:
-                w_mm, h_mm = _png_size_mm(png, col_w)
-                h_mm = min(h_mm, 78)
-                pdf.image(io.BytesIO(png), x=x, y=y_img, w=col_w, h=h_mm)
-                bottom = y_img + h_mm
-                caption = _tile_caption(tile)
-                if caption:
-                    pdf.set_xy(x, bottom + 1)
-                    pdf.set_font("Report", size=8)
-                    pdf.set_text_color(80, 80, 80)
-                    pdf.multi_cell(col_w, 4, _soft_wrap(caption, 40))
-                    pdf.set_text_color(0, 0, 0)
-                    bottom = pdf.get_y()
-                max_bottom = max(max_bottom, bottom)
-            else:
-                pdf.set_xy(x, y_img)
-                pdf.set_font("Report", size=9)
-                pdf.multi_cell(col_w, 4.5, "График не удалось встроить.")
-                max_bottom = max(max_bottom, pdf.get_y())
-        pdf.set_y(max_bottom + 4)
-        i += 2
+    usable = pdf.epw
+    for tile in ready:
+        png = chart_to_png(tile)
+        if png:
+            _, h_mm = _png_size_mm(png, usable)
+            h_mm = min(h_mm, 105)
+        else:
+            h_mm = 18
+        _need_page(pdf, h_mm + 22)
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Report", style="B", size=11)
+        pdf.set_text_color(20, 55, 110)
+        pdf.multi_cell(usable, 6, _soft_wrap(str(tile.get("title") or "График"), 64))
+        pdf.set_text_color(0, 0, 0)
+        y_img = pdf.get_y() + 1
+        if tile.get("error") and not png:
+            pdf.set_font("Report", size=9)
+            pdf.multi_cell(usable, 4.5, _soft_wrap(f"Не построен: {tile['error']}", 72))
+            pdf.ln(3)
+            continue
+        if png:
+            w_mm, img_h = _png_size_mm(png, usable)
+            img_h = min(img_h, 105)
+            pdf.image(io.BytesIO(png), x=pdf.l_margin, y=y_img, w=w_mm, h=img_h)
+            pdf.set_y(y_img + img_h + 1)
+            caption = _tile_caption(tile)
+            if caption:
+                pdf.set_font("Report", size=8)
+                pdf.set_text_color(80, 80, 80)
+                pdf.multi_cell(usable, 4, _soft_wrap(caption, 80))
+                pdf.set_text_color(0, 0, 0)
+            pdf.ln(4)
+        else:
+            pdf.set_font("Report", size=9)
+            pdf.multi_cell(usable, 4.5, "График не удалось встроить.")
+            pdf.ln(3)
 
 
 def _tabs_from_report(report: dict, dashboard_tabs: list | None) -> list[dict]:
@@ -506,13 +500,19 @@ def cached_report_pdf(
     narrative: str | None,
     insights: str | None,
     comment: str | None,
+    report_charts: list[dict] | None = None,
 ) -> bytes:
-    """PDF с кэшем по file_id + data_hash + спека + правки текста."""
+    """PDF с кэшем по file_id + data_hash + спека + правки текста + выбранные графики."""
     from services import db_service
     from services.file_context_service import data_hash
     from services.report_service import get_full_report
 
     spec = db_service.get_dashboard_spec(file_id) or ""
+    extra = report_charts or []
+    extra_key = "|".join(
+        f"{c.get('title', '')}:{hashlib.sha256(str(c.get('plotly_json') or '').encode('utf-8', 'replace')).hexdigest()[:16]}"
+        for c in extra
+    )
     key_src = "\0".join(
         [
             file_id,
@@ -522,6 +522,8 @@ def cached_report_pdf(
             narrative or "",
             insights or "",
             comment or "",
+            extra_key,
+            "charts-stack-v1",
         ]
     )
     key = hashlib.sha256(key_src.encode("utf-8", "replace")).hexdigest()
@@ -531,12 +533,16 @@ def cached_report_pdf(
         return hit
 
     report = get_full_report(df, filename)
+    if extra:
+        tabs = [{"title": "Графики отчёта", "tiles": extra}]
+    else:
+        tabs = load_dashboard_tabs(file_id, df)
     pdf_bytes = render_report_pdf(
         report,
         narrative=narrative,
         insights=insights,
         comment=comment,
-        dashboard_tabs=load_dashboard_tabs(file_id, df),
+        dashboard_tabs=tabs,
     )
     with _pdf_lock:
         if key not in _pdf_cache:

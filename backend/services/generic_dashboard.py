@@ -49,7 +49,8 @@ def _numeric_columns(df: pd.DataFrame) -> list[str]:
         name = str(c).lower()
         if name in {"номер"} or name.startswith("номер "):
             continue
-        if n > 20 and df[c].nunique(dropna=True) > 0.85 * n:
+        amount_like = any(m in name for m in _AMOUNT_MARKERS)
+        if n > 20 and df[c].nunique(dropna=True) > 0.85 * n and not amount_like:
             continue
         cols.append(c)
     return cols
@@ -60,6 +61,9 @@ def pick_metrics(df: pd.DataFrame) -> list[str]:
     preferred = [
         c for c in nums if any(m in str(c).lower() for m in _AMOUNT_MARKERS)
     ]
+    if any("руб" in str(c).lower() or "₽" in str(c) for c in nums):
+        preferred = [c for c in preferred if "валют" not in str(c).lower()]
+        nums = [c for c in nums if "валют" not in str(c).lower()] or nums
     rub = [c for c in preferred if any(h in str(c).lower() for h in ("руб", "₽"))]
     if rub:
         preferred = rub + [c for c in preferred if c not in rub]

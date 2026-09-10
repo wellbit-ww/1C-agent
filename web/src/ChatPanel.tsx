@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PlotChart } from "./PlotChart";
-import type { ChatMessage } from "./types";
+import type { ChatMessage, ReportChart } from "./types";
 
 const FALLBACK: Record<string, string[]> = {
   sales_pipeline: [
@@ -13,8 +13,8 @@ const FALLBACK: Record<string, string[]> = {
   deficit_report: [
     "Общий дефицит",
     "Топ-5 заказчиков",
+    "Что с заказом Алабуги",
     "Круговая диаграмма дефицита по подразделениям",
-    "Сколько уникальных клиентов?",
   ],
 };
 
@@ -28,7 +28,11 @@ type Props = {
   busy: boolean;
   onSend: (q: string) => void;
   onPin?: (spec: Record<string, unknown>) => void;
+  onAddToReport?: (chart: ReportChart) => void;
+  reportChartIds?: string[];
   canPin: boolean;
+  className?: string;
+  onClose?: () => void;
 };
 
 export function ChatPanel({
@@ -40,6 +44,10 @@ export function ChatPanel({
   onSend,
   onPin,
   canPin,
+  onAddToReport,
+  reportChartIds = [],
+  className,
+  onClose,
 }: Props) {
   const [text, setText] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
@@ -69,12 +77,24 @@ export function ChatPanel({
   }
 
   return (
-    <aside className="flex h-full w-[400px] shrink-0 flex-col border-l border-line bg-panel">
-      <div className="border-b border-line px-4 py-3">
-        <div className="text-sm font-medium">Чат</div>
-        <p className="mt-1 text-xs text-zinc-500">
-          Спросите про данные или попросите диаграмму
-        </p>
+    <aside
+      className={
+        className ??
+        "flex h-full w-[400px] shrink-0 flex-col border-l border-line bg-panel"
+      }
+    >
+      <div className="flex items-start justify-between border-b border-line px-4 py-3">
+        <div>
+          <div className="text-sm font-medium">Чат</div>
+          <p className="mt-1 text-xs text-zinc-500">
+            Спросите про данные или попросите диаграмму
+          </p>
+        </div>
+        {onClose && (
+          <button type="button" className="text-xs text-zinc-500 hover:text-zinc-200" onClick={onClose}>
+            скрыть
+          </button>
+        )}
       </div>
       <div className="flex flex-wrap gap-1.5 border-b border-line px-3 py-2">
         {chips.map((chip) => (
@@ -112,15 +132,36 @@ export function ChatPanel({
               chart.plotly_json ? (
                 <div key={ci} className="mt-2 overflow-hidden rounded-xl border border-line bg-card p-2">
                   <PlotChart json={chart.plotly_json} className="h-52 w-full" />
-                  {canPin && chart.pin_spec && onPin && (
-                    <button
-                      type="button"
-                      className="mt-1 text-[11px] text-accent hover:underline"
-                      onClick={() => onPin(chart.pin_spec!)}
-                    >
-                      На дашборд
-                    </button>
-                  )}
+                  <div className="mt-1 flex gap-3">
+                    {canPin && chart.pin_spec && onPin && (
+                      <button
+                        type="button"
+                        className="text-[11px] text-accent hover:underline"
+                        onClick={() => onPin(chart.pin_spec!)}
+                      >
+                        На дашборд
+                      </button>
+                    )}
+                    {onAddToReport && (
+                      <button
+                        type="button"
+                        className="text-[11px] text-accent hover:underline"
+                        onClick={() =>
+                          onAddToReport({
+                            id: `chat::${chart.title ?? msg.content.slice(0, 40)}::${ci}`,
+                            title: chart.title ?? "График из чата",
+                            plotly_json: chart.plotly_json!,
+                          })
+                        }
+                      >
+                        {reportChartIds.includes(
+                          `chat::${chart.title ?? msg.content.slice(0, 40)}::${ci}`,
+                        )
+                          ? "В отчёте"
+                          : "В отчёт"}
+                      </button>
+                    )}
+                  </div>
                 </div>
               ) : null,
             )}

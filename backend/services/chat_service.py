@@ -21,6 +21,7 @@ from services.chat_keywords import (
     _keyword_chart_action,
     _keyword_stat_action,
 )
+from services.chat_lookup import exec_order_lookup, wants_order_lookup
 from services.chat_narrative import (
     _describe_other_sheets,
     _exec_general,
@@ -46,6 +47,7 @@ _LLM_PROMPT = """/no_think
 - {{"action": "stat", "operation": "group", "agg": "sum"|"mean"|"count", "semantic": "<группа>"}}
 - {{"action": "chart", "chart_type": "bar"|"pie"|"line", "group_semantic": "<группа>", "value_semantic": "<метрика>", "period": "month"|"quarter"|"year", "agg": "sum"|"mean"|"count", "top_n": 10, "group_column": "<точное имя>", "value_column": "<точное имя>"}}
 - {{"action": "insights"}} — основные выводы по данным
+- {{"action": "lookup", "query": "<номер заказа, заказчик или дата>"}} — один заказ: комментарий и карточка строки
 - {{"action": "general"}} — открытый вопрос о содержимом файла
 - {{"action": "help"}} — вопрос не связан с данными
 
@@ -59,7 +61,7 @@ group_column / value_column — точные имена из списка кол
 
 Вопрос: {question}"""
 
-_ALLOWED_ACTIONS = {"stat", "chart", "insights", "general", "help"}
+_ALLOWED_ACTIONS = {"stat", "chart", "insights", "lookup", "general", "help"}
 
 _INTERPRET_HINT = re.compile(
     r"поясн|интерпрет|почему\s+так|что это знач|прокоммент",
@@ -223,6 +225,8 @@ def _execute_actions(
         kind = action.get("action")
         if kind == "chart":
             result = _exec_chart(df, action)
+        elif kind == "lookup":
+            result = exec_order_lookup(df, str(action.get("query") or question))
         elif kind == "general":
             result = _exec_general(df, action, file_context=file_context)
         elif kind == "help":
@@ -269,6 +273,10 @@ def handle_question(
     sheet_text = _describe_other_sheets(question, file_context)
     if sheet_text:
         return {"answer": sheet_text, "charts": []}
+
+    if wants_order_lookup(question):
+        result = exec_order_lookup(df, question)
+        return {"answer": result["answer"], "charts": []}
 
     if _is_compound(q):
         actions = _llm_classify(

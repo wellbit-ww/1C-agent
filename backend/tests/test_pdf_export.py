@@ -100,3 +100,14 @@ def test_pdf_embeds_dashboard_images():
     assert pdf.startswith(b"%PDF")
     assert b"/XObject" in pdf or b"/Image" in pdf
     assert len(pdf) > len(render_report_pdf(_sample_report()))
+
+
+def test_pdf_content_disposition_allows_cyrillic():
+    from starlette.responses import Response
+
+    from services.pdf_export import pdf_content_disposition
+
+    header = pdf_content_disposition("08.06.2026_Дефицит по КС.xlsx")
+    Response(content=b"%PDF", headers={"Content-Disposition": header})
+    assert "filename*=UTF-8''" in header
+    assert "report.pdf" in header

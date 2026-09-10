@@ -127,6 +127,7 @@ _SPEC_PROMPT = """Ты конфигуратор BI-дашборда. По про
 - {"kind": "period", "period": "month|quarter|year", "value_column": "<колонка>"} — динамика по дате
 - {"kind": "current_stage", "columns_pattern": "(сумма)", "value_column": "<колонка суммы сделки>"} — воронка 1С: сделка на ПОСЛЕДНЕМ заполненном этапе
 - {"kind": "columns_pattern", "columns_pattern": "(сумма)"} — сумма КАЖДОЙ колонки-этапа (проход через этап)
+- {"kind": "named_columns", "column_names": ["колонка1", "колонка2"]} — сумма каждой названной колонки (блоки «К оплате»)
 
 Правила:
 - Используй ТОЛЬКО колонки из списка ниже, имена копируй посимвольно. Не выдумывай колонки (в том числе «инвестиции»), если их нет в списке.
@@ -183,7 +184,7 @@ _AGG_ALIASES = {
 
 _VALID_CHARTS = {"bar", "hbar", "pie", "line", "area"}
 _VALID_AGGS = {"sum", "mean", "count"}
-_VALID_KINDS = {"group", "columns_pattern", "period", "current_stage"}
+_VALID_KINDS = {"group", "columns_pattern", "named_columns", "period", "current_stage"}
 _VALID_PERIODS = {"month", "quarter", "year"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
 _VALID_SORTS = {"desc", "asc", "none"}
@@ -276,6 +277,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
     if kind not in _VALID_KINDS:
         if "current" in kind_raw or "funnel" in kind_raw or "ворон" in kind_raw:
             kind = "current_stage"
+        elif source.get("column_names"):
+            kind = "named_columns"
         elif source.get("columns_pattern"):
             kind = "columns_pattern"
         elif source.get("period"):
@@ -302,6 +305,18 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
                 src["value_semantic"] = source["value_semantic"]
         if chart not in ("bar", "hbar"):
             chart = "hbar"
+    elif kind == "named_columns":
+        raw_names = source.get("column_names") or []
+        if not isinstance(raw_names, list):
+            raw_names = [raw_names]
+        resolved = []
+        for name in raw_names:
+            col = _best_column(df, name)
+            if col and col not in resolved:
+                resolved.append(col)
+        if len(resolved) < 2:
+            return None
+        src["column_names"] = resolved[:12]
     elif kind == "period":
         period = str(source.get("period") or "month").lower()
         src["period"] = period if period in _VALID_PERIODS else "month"

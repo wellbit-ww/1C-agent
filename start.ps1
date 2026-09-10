@@ -109,5 +109,20 @@ if ($uiReady) {
 
 Write-Host ""
 Write-Host "UI:  http://127.0.0.1:8501"
-Write-Host "API: http://127.0.0.1:8000"
+$lanIps = @(
+    Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -notlike "127.*" -and
+            $_.IPAddress -notlike "169.254.*" -and
+            $_.PrefixOrigin -ne "WellKnown"
+        } |
+        Select-Object -ExpandProperty IPAddress -Unique
+)
+if ($lanIps.Count -gt 0) {
+    Write-Host "LAN:"
+    foreach ($ip in $lanIps) {
+        Write-Host "     http://${ip}:8501"
+    }
+}
+Write-Host "API: http://127.0.0.1:8000 (local only)"
 Write-Host "Leave the Backend and UI windows open."
