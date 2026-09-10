@@ -5,19 +5,7 @@ from services.cache_service import get_dataframe, set_dataframe
 from services.question_service import detect_intent
 from services.insights_service import get_basic_insights
 from services.data_tools import (
-    get_row_count,
-    get_column_count,
-    get_columns,
-    get_sum,
-    get_mean,
-    get_max,
-    get_min,
-    get_unique_count,
-    get_null_count,
-    get_duplicates_count,
     group_sum,
-    group_mean,
-    group_count,
     get_top_n,
     group_by_month,
     group_by_year,
@@ -26,7 +14,6 @@ from services.data_tools import (
 from services.chart_service import (
     create_bar_chart,
     create_line_chart,
-    create_pie_chart,
     create_top_clients_chart,
     create_region_chart,
     create_manager_chart,
@@ -113,7 +100,6 @@ class ExcelAgent:
                     "group_column": group_col,
                     "value_column": val_col
                 }
-                from services.chart_service import create_bar_chart
                 return create_bar_chart(data, title=f"ТОП-10: {group_col} (по {val_col})")
             else:
                 return {"error": "В таблице нет текстовых и числовых колонок для автоматического графика."}
@@ -123,9 +109,13 @@ class ExcelAgent:
 
     def get_dashboard(self, file_id: str, file_path: str) -> dict:
         df = self._load_dataframe(file_id, file_path)
+        from pathlib import Path
         from services.report_service import get_profile_for_df
-        report_type, profile = get_profile_for_df(df)
-        
+        from services.storage_service import get_original_name
+
+        filename = get_original_name(file_id) or Path(file_path).name
+        report_type, profile = get_profile_for_df(df, filename=filename)
+
         summary = ""
         if hasattr(profile, "get_summary"):
             summary = profile.get_summary(df)
@@ -133,101 +123,56 @@ class ExcelAgent:
         from services.insights_service import _get_date_period
         period = _get_date_period(df) or "Не определен"
 
-        return {
+        result = {
             "report_type": report_type,
             "summary": summary,
             "kpis": profile.get_kpis(df),
-            "charts": profile.get_charts(df),
+            "charts": [],
             "insights": profile.get_insights(df),
             "metadata": {
                 "rows": len(df),
                 "columns": len(df.columns),
-                "period": period
+                "period": period,
+                "column_names": [str(c) for c in df.columns],
             }
         }
 
-    def answer_question(
+        # вкладочный дашборд (v2): сначала пользовательская спека из SQLite,
+        # иначе дефолтная спека профиля; без спек — старый плоский список
+        from services import dashboard_service
+
+        spec = dashboard_service.get_current_spec(file_id, df)
+        if spec is not None:
+            from services.dashboard_engine import render_spec
+            result["tabs"] = render_spec(df, spec)["tabs"]
+            result["spec"] = spec.model_dump()
+        else:
+            result["charts"] = profile.get_charts(df)
+
+        from services.file_context_service import ensure_context, get_context
+
+        try:
+            ctx = get_context(file_id) or ensure_context(
+                file_id, df, filename=filename, use_llm=False
+            )
+            result["file_context"] = ctx.model_dump()
+        except Exception:
+            pass
+
+        return result
+
+    def handle_chat_message(
         self,
         file_id: str,
         file_path: str,
         question: str,
-    ):
+        history: list[dict] | None = None,
+    ) -> dict:
+        """Новый обработчик чата: возвращает {"answer": str, "charts": [...]}."""
         df = self._load_dataframe(file_id, file_path)
-        intent = detect_intent(question)
+        from services.chat_service import handle_question
+        from services.file_context_service import get_context
 
-        if intent == "row_count":
-            result = get_row_count(df)
-
-        elif intent == "column_count":
-            result = get_column_count(df)
-
-        elif intent == "columns":
-            result = get_columns(df)
-
-        elif intent == "sum":
-            result = get_sum(df, question)
-
-        elif intent == "mean":
-            result = get_mean(df, question)
-
-        elif intent == "max":
-            result = get_max(df, question)
-
-        elif intent == "min":
-            result = get_min(df, question)
-
-        elif intent == "unique_count":
-            result = get_unique_count(df, question)
-
-        elif intent == "null_count":
-            result = get_null_count(df, question)
-
-        elif intent == "duplicates_count":
-            result = get_duplicates_count(df)
-
-        elif intent == "group_sum" or intent == "chart_regions" or intent == "chart_managers" or intent == "chart_revenue" or intent == "chart_sales":
-            result = group_sum(df, question)
-
-        elif intent == "group_mean":
-            result = group_mean(df, question)
-
-        elif intent == "group_count":
-            result = group_count(df, question)
-
-        elif intent == "top_client" or intent == "chart_clients":
-            result = get_top_n(df, question, semantic="client")
-
-        elif intent == "top_manager":
-            result = get_top_n(df, question, semantic="manager")
-
-        elif intent == "top_region":
-            result = get_top_n(df, question, semantic="region")
-
-        elif intent == "trend_month" or intent == "chart_monthly":
-            result = group_by_month(df, question)
-
-        elif intent == "trend_year" or intent == "chart_yearly":
-            result = group_by_year(df, question)
-
-        elif intent == "trend_quarter" or intent == "chart_quarterly":
-            result = group_by_quarter(df, question)
-
-        elif intent == "insights":
-            result = {"insights": get_basic_insights(df)}
-
-        else:
-            return "Я пока не умею отвечать на такой вопрос."
-
-        prompt = f"""
-Вопрос пользователя:
-
-{question}
-
-Результат анализа:
-
-{result}
-
-Сформулируй короткий и понятный ответ пользователю на русском языке.
-"""
-
-        return ask_llm(prompt)
+        return handle_question(
+            df, question, history=history, file_context=get_context(file_id)
+        )

@@ -24,7 +24,7 @@ def _get_date_period(df: pd.DataFrame) -> str | None:
         return None
 
     date_col = detected[0]
-    dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+    dates = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True).dropna()
 
     if dates.empty:
         return None
@@ -33,7 +33,7 @@ def _get_date_period(df: pd.DataFrame) -> str | None:
     max_date = dates.max()
 
     if min_date.year == max_date.year and min_date.month == max_date.month:
-        return f"{min_date.strftime('%B %Y')}"
+        return f"{min_date.strftime('%m.%Y')}"
 
     return (
         f"{min_date.strftime('%d.%m.%Y')} — "
