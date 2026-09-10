@@ -1,5 +1,5 @@
 fastapi==0.136.3
-uvicorn==0.48.0
+uvicorn==0.52.4
 pandas==3.0.3
 openpyxl==3.1.5
 xlrd==2.0.2
