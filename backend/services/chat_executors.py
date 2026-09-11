@@ -10,6 +10,7 @@ from services.chart_service import (
     create_pie_chart,
 )
 from services.chat_keywords import _PERIOD_FUNCS, _PERIOD_LABELS
+from services.chat_lookup import match_entity_slice
 from services.column_resolver import resolve_semantic_column, _canonical_semantic
 from services.insights_service import _format_number, get_basic_insights
 
@@ -29,6 +30,30 @@ def _fmt(value) -> str:
     if isinstance(value, (int, float)):
         return _format_number(value)
     return str(value)
+
+
+def _who_label(names: list[str]) -> str:
+    if len(names) == 1:
+        return f"«{names[0]}»"
+    shown = ", ".join(f"«{name}»" for name in names[:3])
+    extra = len(names) - 3
+    if extra > 0:
+        shown += f" и ещё {extra}"
+    return shown
+
+
+def _rows_ru(n: int) -> str:
+    n_abs = abs(int(n)) % 100
+    n1 = n_abs % 10
+    if 11 <= n_abs <= 14:
+        word = "строк"
+    elif n1 == 1:
+        word = "строка"
+    elif 2 <= n1 <= 4:
+        word = "строки"
+    else:
+        word = "строк"
+    return f"{int(n)} {word}"
 
 
 def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
@@ -71,9 +96,31 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
     }
     if op in simple_ops:
         label, func = simple_ops[op]
-        result = func(df, q)
+        frame = df
+        who = ""
+        found = match_entity_slice(df, q) if op in {"sum", "mean", "max", "min"} else None
+        if found is not None:
+            if found["frame"] is None or found["frame"].empty:
+                hint = " ".join(found["words"])
+                return {
+                    "answer": (
+                        f"Не нашёл «{hint}» среди заказчиков, ответственных "
+                        "и подразделений. Уточните название как в файле."
+                    )
+                }
+            frame = found["frame"]
+            who = _who_label(found["names"])
+        result = func(frame, q)
         if "error" in result:
             return {"answer": f"Не удалось посчитать: {result['error']}"}
+        if who:
+            extra = f" ({_rows_ru(len(frame))})" if op == "sum" else ""
+            return {
+                "answer": (
+                    f"{label} «{result['column']}» у {who}{extra}: "
+                    f"**{_fmt(result['value'])}**"
+                )
+            }
         return {
             "answer": f"{label} по колонке «{result['column']}»: **{_fmt(result['value'])}**"
         }

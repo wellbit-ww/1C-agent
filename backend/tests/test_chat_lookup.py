@@ -4,6 +4,7 @@ from services.chat_lookup import (
     exec_order_lookup,
     extract_order_clues,
     find_order_rows,
+    match_entity_slice,
     wants_order_lookup,
 )
 
@@ -21,6 +22,19 @@ class TestOrderLookupDetect:
         assert not wants_order_lookup("Какой общий дефицит?")
         assert not wants_order_lookup("Топ-5 заказчиков")
         assert not wants_order_lookup("Сколько строк в таблице?")
+        assert not wants_order_lookup("Сколько у Алабуги неоплаченный остаток?")
+
+
+class TestEntitySlice:
+    def test_alabuga_not_whole_file(self, deficit_df):
+        found = match_entity_slice(deficit_df, "Сколько у Алабуги неоплаченный остаток?")
+        assert found is not None
+        assert found["frame"] is not None
+        assert any("АЛАБУГ" in name.upper() for name in found["names"])
+        assert len(found["frame"]) < len(deficit_df)
+
+    def test_total_question_has_no_entity(self, deficit_df):
+        assert match_entity_slice(deficit_df, "Какой общий дефицит?") is None
 
 
 class TestOrderLookupClues:

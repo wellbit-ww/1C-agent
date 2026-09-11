@@ -21,7 +21,12 @@ from services.chat_keywords import (
     _keyword_chart_action,
     _keyword_stat_action,
 )
-from services.chat_lookup import exec_order_lookup, wants_order_lookup
+from services.chat_lookup import (
+    exec_entity_metrics,
+    exec_order_lookup,
+    wants_entity_metrics,
+    wants_order_lookup,
+)
 from services.chat_narrative import (
     _describe_other_sheets,
     _exec_general,
@@ -276,6 +281,10 @@ def handle_question(
 
     if wants_order_lookup(question):
         result = exec_order_lookup(df, question)
+        return {"answer": result["answer"], "charts": []}
+
+    if wants_entity_metrics(question):
+        result = exec_entity_metrics(df, question)
         return {"answer": result["answer"], "charts": []}
 
     if _is_compound(q):

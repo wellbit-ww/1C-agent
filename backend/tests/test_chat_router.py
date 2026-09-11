@@ -2,6 +2,9 @@
 import pytest
 
 from services import chat_service
+from services.chat_lookup import match_entity_slice
+from services.data_tools import get_sum
+from services.insights_service import _format_number
 
 from conftest import requires_ollama
 
@@ -42,6 +45,24 @@ class TestFastPathStats:
     def test_deficit_sum(self, deficit_df):
         result = chat_service.handle_question(deficit_df, "Какой общий дефицит?")
         assert _digits(result["answer"]), "ответ должен содержать сумму"
+
+    def test_sum_filters_named_customer(self, deficit_df, monkeypatch):
+        def fail_classify(*_a, **_kw):
+            raise AssertionError("сумма по заказчику не должна идти в LLM")
+
+        monkeypatch.setattr(chat_service, "_llm_classify", fail_classify)
+        question = "Сколько у Алабуги неоплаченный остаток?"
+        found = match_entity_slice(deficit_df, question)
+        assert found and found["frame"] is not None and not found["frame"].empty
+        filtered = get_sum(found["frame"], question)
+        total = get_sum(deficit_df, question)
+        assert "error" not in filtered and "error" not in total
+        assert abs(filtered["value"] - total["value"]) > 1
+
+        result = chat_service.handle_question(deficit_df, question)
+        assert "АЛАБУГА" in result["answer"].upper()
+        assert _digits(_format_number(filtered["value"])) in _digits(result["answer"])
+        assert _digits(_format_number(total["value"])) not in _digits(result["answer"])
 
 
 class TestFastPathCharts:

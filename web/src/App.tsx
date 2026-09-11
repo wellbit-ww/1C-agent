@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { ChatPanel } from "./ChatPanel";
 import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
-import { SpecEditor } from "./SpecEditor";
+import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
 import type { ChatMessage, Dashboard, DashSpec, FileContext, Report, ReportChart } from "./types";
 
@@ -45,6 +45,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
+  const [chartEditor, setChartEditor] = useState<ChartEditorMode | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const fileIdRef = useRef<string | null>(null);
   const restoredRef = useRef(false);
@@ -196,6 +197,7 @@ export function App() {
       setDashboard((cur) => ({ ...(cur ?? {}), ...patch, tabs: patch.tabs ?? cur?.tabs, spec: patch.spec ?? cur?.spec }));
       if (patch.warning) setError(patch.warning);
       setTab(0);
+      setChartEditor(null);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -243,7 +245,7 @@ export function App() {
         tabs: patch.tabs ?? cur?.tabs,
         spec: patch.spec ?? spec,
       }));
-      setTab(0);
+      setChartEditor(null);
       setNotice("Дашборд сохранён");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -327,6 +329,7 @@ export function App() {
     setTable(null);
     setReport(null);
     setReportCharts([]);
+    setChartEditor(null);
     setView("dash");
   }
 
@@ -435,6 +438,7 @@ export function App() {
             onPdf={() => void onPdf()}
           />
         ) : (
+          <div className="flex min-h-0 flex-1 overflow-hidden">
           <div className="min-h-0 flex-1 overflow-y-auto p-5">
             {!fileId ? (
               <EmptyState onPick={() => fileRef.current?.click()} />
@@ -505,23 +509,17 @@ export function App() {
                   </button>
                 </div>
 
-                {dashboard?.spec && (
-                  <SpecEditor
-                    spec={dashboard.spec}
-                    columns={meta?.column_names ?? []}
-                    busy={!!busy}
-                    onSave={(spec) => void onSaveSpec(spec)}
-                  />
-                )}
-
                 {tabs.length > 0 && (
                   <>
-                    <div className="mb-3 flex gap-1">
+                    <div className="mb-3 flex flex-wrap items-center gap-1">
                       {tabs.map((t, i) => (
                         <button
                           key={t.title}
                           type="button"
-                          onClick={() => setTab(i)}
+                          onClick={() => {
+                            setTab(i);
+                            setChartEditor(null);
+                          }}
                           className={
                             i === tab
                               ? "rounded-lg bg-accent-dim px-3 py-1.5 text-sm text-accent"
@@ -531,6 +529,15 @@ export function App() {
                           {t.title}
                         </button>
                       ))}
+                      {dashboard?.spec && (
+                        <button
+                          type="button"
+                          className="ml-auto rounded-lg border border-line px-3 py-1.5 text-sm text-zinc-300 hover:border-accent/50 hover:text-accent"
+                          onClick={() => setChartEditor({ mode: "add", tabI: tab })}
+                        >
+                          Добавить график
+                        </button>
+                      )}
                     </div>
                     {comments[tabs[tab]?.title] && (
                       <p className="mb-3 rounded-lg border border-line bg-card px-3 py-2 text-sm text-zinc-300">
@@ -538,31 +545,48 @@ export function App() {
                       </p>
                     )}
                     <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">
-                      {(tabs[tab]?.tiles ?? []).map((tile) => {
+                      {(tabs[tab]?.tiles ?? []).map((tile, tileI) => {
                         const id = `${tabs[tab]?.title ?? "tab"}::${tile.title}`;
                         const inReport = reportCharts.some((c) => c.id === id);
+                        const editing =
+                          chartEditor?.mode === "edit" &&
+                          chartEditor.tabI === tab &&
+                          chartEditor.tileI === tileI;
                         return (
                         <div
-                          key={tile.title}
-                          className="min-w-0 overflow-hidden rounded-xl border border-line bg-card p-3"
+                          key={`${tile.title}-${tileI}`}
+                          className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
+                            editing ? "border-accent/60" : "border-line"
+                          }`}
                         >
                           <div className="mb-2 flex items-start justify-between gap-2">
                             <div className="text-sm font-medium">{tile.title}</div>
-                            {tile.plotly_json && (
-                              <button
-                                type="button"
-                                className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
-                                onClick={() =>
-                                  toggleReportChart({
-                                    id,
-                                    title: tile.title,
-                                    plotly_json: tile.plotly_json!,
-                                  })
-                                }
-                              >
-                                {inReport ? "В отчёте" : "В отчёт"}
-                              </button>
-                            )}
+                            <div className="flex shrink-0 gap-1">
+                              {dashboard?.spec && (
+                                <button
+                                  type="button"
+                                  className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+                                  onClick={() => setChartEditor({ mode: "edit", tabI: tab, tileI })}
+                                >
+                                  Настроить
+                                </button>
+                              )}
+                              {tile.plotly_json && (
+                                <button
+                                  type="button"
+                                  className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+                                  onClick={() =>
+                                    toggleReportChart({
+                                      id,
+                                      title: tile.title,
+                                      plotly_json: tile.plotly_json!,
+                                    })
+                                  }
+                                >
+                                  {inReport ? "В отчёте" : "В отчёт"}
+                                </button>
+                              )}
+                            </div>
                           </div>
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
@@ -639,6 +663,18 @@ export function App() {
                 )}
               </>
             )}
+          </div>
+          {chartEditor && dashboard?.spec && (
+            <ChartEditor
+              key={`${chartEditor.mode}-${chartEditor.tabI}-${chartEditor.mode === "edit" ? chartEditor.tileI : "new"}`}
+              spec={dashboard.spec}
+              columns={meta?.column_names ?? []}
+              busy={!!busy}
+              mode={chartEditor}
+              onClose={() => setChartEditor(null)}
+              onSave={(spec) => void onSaveSpec(spec)}
+            />
+          )}
           </div>
         )}
       </main>
