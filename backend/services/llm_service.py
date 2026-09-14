@@ -1,3 +1,5 @@
+import logging
+
 from langchain_ollama import ChatOllama
 
 from config import (
@@ -7,8 +9,11 @@ from config import (
     OLLAMA_CONNECT_TIMEOUT,
     OLLAMA_REQUEST_TIMEOUT,
     ROUTER_MODEL,
+    ROUTER_NUM_PREDICT,
 )
 from services.exceptions import OllamaUnavailableError
+
+logger = logging.getLogger(__name__)
 
 
 def ollama_client_kwargs() -> dict:
@@ -47,6 +52,7 @@ def make_chat_ollama(
 llm = make_chat_ollama(model=MAIN_MODEL, num_predict=LLM_NUM_PREDICT_DEFAULT)
 
 _router_llm: ChatOllama | None = None
+_router_fallback_llm: ChatOllama | None = None
 
 
 def _get_router_llm() -> ChatOllama:
@@ -54,9 +60,35 @@ def _get_router_llm() -> ChatOllama:
     if _router_llm is None:
         _router_llm = make_chat_ollama(
             model=ROUTER_MODEL,
-            num_predict=300,
+            num_predict=ROUTER_NUM_PREDICT,
         )
     return _router_llm
+
+
+def _get_router_fallback_llm() -> ChatOllama:
+    """Тот же короткий JSON-вызов, но на 8B, если малая модель не установлена."""
+    global _router_fallback_llm
+    if _router_fallback_llm is None:
+        _router_fallback_llm = make_chat_ollama(
+            model=MAIN_MODEL,
+            num_predict=ROUTER_NUM_PREDICT,
+        )
+    return _router_fallback_llm
+
+
+def _is_missing_model(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "not found",
+            "not exist",
+            "does not exist",
+            "no such model",
+            "pull",
+            "404",
+        )
+    )
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -93,13 +125,24 @@ def ask_llm(prompt: str, *, num_predict: int | None = None):
 
 
 def classify(prompt: str) -> str:
-    """Короткий вызов LLM для классификации запросов (роутер чата).
+    """Короткий JSON-вызов роутера. num_predict не поднимать.
 
-    Использует ROUTER_MODEL — ей может быть более быстрая малая модель.
+    Сначала ROUTER_MODEL (1–3B). Если её нет в Ollama — тот же потолок
+    на MAIN_MODEL, не потолок ответа/брифинга.
     """
     try:
-        response = _get_router_llm().invoke(prompt)
+        return _get_router_llm().invoke(prompt).content
     except Exception as exc:
+        if _is_missing_model(exc) and ROUTER_MODEL != MAIN_MODEL:
+            logger.warning(
+                "Роутер %s недоступен (%s). JSON-команда через %s, num_predict=%s",
+                ROUTER_MODEL,
+                exc,
+                MAIN_MODEL,
+                ROUTER_NUM_PREDICT,
+            )
+            try:
+                return _get_router_fallback_llm().invoke(prompt).content
+            except Exception as fallback_exc:
+                raise _ollama_error(fallback_exc) from fallback_exc
         raise _ollama_error(exc) from exc
-
-    return response.content

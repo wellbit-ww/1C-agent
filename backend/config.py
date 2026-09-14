@@ -33,18 +33,24 @@ CORS_ORIGINS = [
     if origin.strip()
 ]
 
-# Ollama
+# Ollama: три роли — роутер (малая JSON-команда), брифинг файла, ответ пользователю.
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
 MAIN_MODEL = os.getenv("EXCEL_AGENT_MODEL", "qwen3:8b")
-ROUTER_MODEL = os.getenv("EXCEL_AGENT_ROUTER_MODEL", MAIN_MODEL)
+# 1–3B для JSON-команды. Если модели нет в Ollama, classify() один раз
+# уходит на MAIN_MODEL с тем же коротким num_predict, не с потолком ответа.
+ROUTER_MODEL = os.getenv("EXCEL_AGENT_ROUTER_MODEL", "qwen3:1.7b")
 # Таймаут health-check при старте, секунды
 OLLAMA_HEALTHCHECK_TIMEOUT = float(os.getenv("EXCEL_AGENT_OLLAMA_HC_TIMEOUT", "3"))
 # HTTP-таймауты клиента ChatOllama: connect — «Ollama не запущена»,
 # request — сколько ждать генерацию (ChatOllama своего timeout-поля не имеет)
 OLLAMA_CONNECT_TIMEOUT = float(os.getenv("EXCEL_AGENT_OLLAMA_CONNECT_TIMEOUT", "5"))
 OLLAMA_REQUEST_TIMEOUT = float(os.getenv("EXCEL_AGENT_OLLAMA_TIMEOUT", "90"))
-# Потолок токенов для ask_llm, если вызывающий не задал num_predict
+# Потолок токенов для ask_llm (живой текст ответа), если вызывающий не задал
 LLM_NUM_PREDICT_DEFAULT = int(os.getenv("EXCEL_AGENT_LLM_NUM_PREDICT", "800"))
+# Роутер: JSON-команда. Не поднимать — малая модель и низкая цена ошибки.
+ROUTER_NUM_PREDICT = 300
+# Брифинг файла: один раз при загрузке (саммари, идеи дашборда)
+BRIEF_NUM_PREDICT = 1800
 
 # Персистентность (Фаза 1): SQLite + parquet-кэш
 DATA_DIR = Path(

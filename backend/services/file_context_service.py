@@ -15,7 +15,7 @@ import pandas as pd
 from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
-from config import MAIN_MODEL
+from config import BRIEF_NUM_PREDICT, MAIN_MODEL
 from models.file_context import ColumnNote, FileContext, SheetBrief
 from services import db_service
 from services.exceptions import OllamaUnavailableError
@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 _CELL = 48
 _MAX_COLS = 24
+_MAX_FACTS = 18
+_HINT_SKIP = {"ооо", "пао", "оао", "зао", "ао", "инн", "ип"}
 
 _PROMPT = """Ты аналитик выгрузок 1С. По снимку таблицы собери JSON-карточку понимания файла.
 
@@ -36,6 +38,7 @@ _PROMPT = """Ты аналитик выгрузок 1С. По снимку та�
 - metrics — суммы, долги, количества, проценты. Не id и не «номер».
 - groupers — клиент, менеджер, статус, подразделение, поставщик и т.п.
 - Если в снимке несколько листов — назови каждый в summary. metrics/groupers бери только с листа active=true.
+- Лист с role=dashboard или summary — готовая витрина 1С: не складывай её цифры с рабочим листом data.
 - Не выдумывай листы и колонки, которых нет в снимке.
 - summary на русском, без markdown.
 
@@ -51,7 +54,7 @@ _brief_llm: ChatOllama | None = None
 def _get_brief_llm() -> ChatOllama:
     global _brief_llm
     if _brief_llm is None:
-        _brief_llm = make_chat_ollama(model=MAIN_MODEL, num_predict=1800)
+        _brief_llm = make_chat_ollama(model=MAIN_MODEL, num_predict=BRIEF_NUM_PREDICT)
     return _brief_llm
 
 
@@ -91,8 +94,12 @@ def _num(value) -> float | None:
 
 def catalog_sheets(workbook: dict[str, pd.DataFrame]) -> list[dict]:
     """Компактные карточки всех непустых листов. Первый — рабочий (дашборд/чат)."""
+    from services.sheet_brief import enrich_sheet_card
+
+    items = list(workbook.items())[:8]
     cards: list[dict] = []
-    for index, (name, frame) in enumerate(list(workbook.items())[:8]):
+    active_name = str(items[0][0]) if items else ""
+    for index, (name, frame) in enumerate(items):
         columns = [str(c) for c in frame.columns[:24]]
         card: dict = {
             "name": str(name),
@@ -107,6 +114,7 @@ def catalog_sheets(workbook: dict[str, pd.DataFrame]) -> list[dict]:
                 {str(k): _cell(v) for k, v in row.items() if str(k) in keep}
                 for row in frame.head(2).to_dict(orient="records")
             ]
+        enrich_sheet_card(card, frame, active_name=active_name)
         cards.append(card)
     return cards
 
@@ -134,36 +142,177 @@ def _sheet_cards(
         "n_columns": int(len(df.columns)),
         "columns": [str(c) for c in df.columns[:24]],
         "active": True,
+        "role": "data",
+        "role_label": "рабочие данные",
+        "facts": [f"{int(len(df))} строк, {int(len(df.columns))} колонок"],
+        "grain_note": "Рабочий лист: чат и дашборд считают отсюда.",
     }]
+
+
+def _short_label(value, limit: int = 36) -> str:
+    text = str(value).replace("\n", " ").strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def _top_sums(
+    df: pd.DataFrame,
+    group_col: str,
+    value_col: str,
+    n: int = 5,
+) -> list[tuple[str, float]]:
+    labels = df[group_col].map(
+        lambda value: "" if pd.isna(value) else _short_label(value)
+    )
+    tmp = pd.DataFrame(
+        {
+            "g": labels,
+            "v": pd.to_numeric(df[value_col], errors="coerce"),
+        }
+    )
+    tmp = tmp[tmp["g"].astype(str).str.len() > 0]
+    grouped = tmp.groupby("g", dropna=True)["v"].sum().sort_values(ascending=False)
+    out: list[tuple[str, float]] = []
+    for name, total in grouped.head(n).items():
+        if pd.isna(total):
+            continue
+        out.append((str(name), float(total)))
+    return out
+
+
+def _fmt_top_line(label: str, items: list[tuple[str, float]]) -> str:
+    from services.insights_service import _format_number
+
+    listing = ", ".join(
+        f"{name} ({_format_number(value)})" for name, value in items
+    )
+    return f"{label}: {listing}"
+
+
+def build_entity_hints(df: pd.DataFrame, limit: int = 40) -> list[str]:
+    """Короткие имена заказчиков/менеджеров для фильтра. Не кладём в промпт целиком."""
+    from services.column_resolver import resolve_semantic_column
+
+    cols: list[str] = []
+    for semantic in ("client", "manager"):
+        col = resolve_semantic_column(df, "", semantic, dtype="categorical")
+        if col and col not in cols:
+            cols.append(col)
+    hints: list[str] = []
+    seen: set[str] = set()
+    for col in cols:
+        for raw in df[col].dropna().unique():
+            text = str(raw).strip()
+            if not text or text.lower() in {"nan", "none"}:
+                continue
+            tokens = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
+            caps = [
+                token
+                for token in tokens
+                if token.isupper() and token.lower().replace("ё", "е") not in _HINT_SKIP
+            ]
+            pick = None
+            if caps:
+                pick = caps[0]
+            else:
+                for token in tokens:
+                    low = token.lower().replace("ё", "е")
+                    if low in _HINT_SKIP or len(token) < 4:
+                        continue
+                    pick = token
+                    break
+            if not pick:
+                continue
+            key = pick.lower().replace("ё", "е")
+            if key in seen:
+                continue
+            seen.add(key)
+            hints.append(pick)
+            if len(hints) >= limit:
+                return hints
+    return hints
 
 
 def compute_facts(
     df: pd.DataFrame,
     metrics: list[str],
     groupers: list[str],
+    *,
+    active_sheet: str | None = None,
+    n_sheets: int = 1,
 ) -> list[str]:
     """Короткие цифры pandas для карточки и чата. LLM их не считает."""
-    from services.insights_service import _format_number
+    from services.column_resolver import resolve_semantic_column
+    from services.insights_service import _format_number, _get_date_period
+    from services.report_profiles.deficit_profile import (
+        deficit_kpis,
+        detect_deficit_money_layout,
+    )
 
     facts = [f"Строк: {len(df)}", f"Колонок: {len(df.columns)}"]
     if len(df):
         empty = round(float(df.isna().mean().mean()) * 100, 1)
         facts.append(f"Пустых ячеек: {empty}%")
+
+    span = _get_date_period(df)
+    if span:
+        facts.append(f"Период дат: {span}")
+
     known = {str(c) for c in df.columns}
-    for name in metrics[:2]:
-        if name not in known:
-            continue
-        total = pd.to_numeric(df[name], errors="coerce").sum()
-        facts.append(f"Сумма «{name}»: {_format_number(float(total))}")
-    for name in groupers[:2]:
-        if name not in known:
-            continue
-        top = df[name].dropna().astype(str).value_counts().head(3)
-        if top.empty:
-            continue
-        listing = ", ".join(f"{k} ({int(v)})" for k, v in top.items())
-        facts.append(f"Топ «{name}»: {listing}")
-    return facts[:8]
+    layout = detect_deficit_money_layout(df)
+    deficit_like = bool(layout.unpaid or layout.paid or layout.stages)
+    if deficit_like:
+        for kpi in deficit_kpis(df):
+            facts.append(f"{kpi['label']}: {kpi['value']}")
+        money_grouper = resolve_semantic_column(
+            df, "", "client", dtype="categorical"
+        )
+        if money_grouper and layout.unpaid:
+            unpaid_top = _top_sums(df, money_grouper, layout.unpaid, n=5)
+            if unpaid_top:
+                facts.append(_fmt_top_line("Топ по неоплаченному остатку", unpaid_top))
+        if money_grouper and layout.order_sum:
+            order_top = _top_sums(df, money_grouper, layout.order_sum, n=5)
+            if order_top:
+                facts.append(_fmt_top_line("Топ по сумме заказов", order_top))
+    else:
+        for name in metrics[:2]:
+            if name not in known:
+                continue
+            total = pd.to_numeric(df[name], errors="coerce").sum()
+            facts.append(f"Сумма «{name}»: {_format_number(float(total))}")
+        money_grouper = resolve_semantic_column(
+            df, "", "client", dtype="categorical"
+        )
+        metric0 = next((m for m in metrics if m in known), None)
+        if money_grouper and metric0:
+            order_top = _top_sums(df, money_grouper, metric0, n=5)
+            if order_top:
+                facts.append(_fmt_top_line(f"Топ по «{metric0}»", order_top))
+        else:
+            for name in groupers[:2]:
+                if name not in known:
+                    continue
+                top = df[name].dropna().astype(str).value_counts().head(3)
+                if top.empty:
+                    continue
+                listing = ", ".join(
+                    f"{_short_label(k, 28)} ({int(v)})" for k, v in top.items()
+                )
+                facts.append(f"Топ «{name}»: {listing}")
+
+    if len(df) and len(df.columns):
+        null_pct = df.isna().mean() * 100
+        worst = null_pct[null_pct >= 20].sort_values(ascending=False).head(3)
+        if not worst.empty:
+            listing = ", ".join(
+                f"«{_short_label(col, 28)}» ({pct:.0f}%)"
+                for col, pct in worst.items()
+            )
+            facts.append(f"Хуже всего заполнены: {listing}")
+
+    if n_sheets > 1 and active_sheet:
+        facts.append(f"Цифры считаются только с листа «{active_sheet}».")
+    return facts[:_MAX_FACTS]
 
 
 def build_column_notes(
@@ -237,7 +386,13 @@ def build_snapshot(
 
     sheet_cards = _sheet_cards(df, filename, workbook, saved_sheets)
     active = next((s for s in sheet_cards if s.get("active")), sheet_cards[0])
-    facts = compute_facts(df, metrics_guess, groupers_guess)
+    facts = compute_facts(
+        df,
+        metrics_guess,
+        groupers_guess,
+        active_sheet=str(active.get("name") or "") or None,
+        n_sheets=len(sheet_cards),
+    )
     return {
         "filename": filename or "",
         "sheets": sheet_cards,
@@ -335,6 +490,15 @@ def deterministic_context(
             "Остальные листы есть в брифинге, но цифры дашборда считаются "
             f"по листу «{snap['active_sheet']}»: " + ", ".join(f"«{n}»" for n in extra)
         )
+    vitrines = [
+        s.name for s in sheet_models if s.role in {"dashboard", "summary"}
+    ]
+    if vitrines:
+        caveats.append(
+            "Витрины 1С не то же зерно, что pandas: "
+            + ", ".join(f"«{n}»" for n in vitrines)
+            + " — не складывать с рабочим листом."
+        )
     facts = list(snap.get("facts") or [])
     notes = build_column_notes(
         df,
@@ -356,6 +520,7 @@ def deterministic_context(
         active_sheet=str(snap.get("active_sheet") or ""),
         facts=facts,
         column_notes=notes,
+        entity_hints=build_entity_hints(df),
         llm_ready=False,
     )
 
@@ -400,6 +565,7 @@ def _from_llm_dict(data: dict, df: pd.DataFrame, fallback: FileContext) -> FileC
     ctx.active_sheet = fallback.active_sheet
     ctx.facts = fallback.facts or ctx.facts
     ctx.column_notes = fallback.column_notes or ctx.column_notes
+    ctx.entity_hints = fallback.entity_hints or ctx.entity_hints
     if fallback.caveats and not any(
         "лист" in str(c).lower() for c in ctx.caveats
     ):

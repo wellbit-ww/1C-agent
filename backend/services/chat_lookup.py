@@ -14,7 +14,7 @@ from services.insights_service import _format_number
 
 _ORDER_WORD = re.compile(r"\bзаказ(?:а|у|ом|е|ы|ов)?\b", re.I)
 _CODE_RE = re.compile(
-    r"[A-Za-zА-Яа-яЁё]{2,}\d*[-_/][0-9A-Za-zА-Яа-яЁё._/-]{2,}"
+    r"[A-Za-zА-Яа-яЁё]{2,}\d*[-_/][0-9A-Za-zА-Яа-яЁё._/-]*\d[0-9A-Za-zА-Яа-яЁё._/-]*"
 )
 _DATE_RE = re.compile(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b")
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]{3,}")
@@ -26,6 +26,7 @@ _ENTITY_SKIP_STEMS = (
     "дефицит",
     "задолжен",
     "долг",
+    "долж",
     "сумм",
     "выручк",
     "оплат",
@@ -52,6 +53,26 @@ _ENTITY_SKIP_STEMS = (
     "запис",
     "сделк",
     "договор",
+    "больш",
+    "меньш",
+    "заказал",
+    "происход",
+    "целом",
+    "обзор",
+    "файл",
+    "служб",
+    "разбив",
+    "кругов",
+    "диаграмм",
+    "динамик",
+    "месяц",
+    "квартал",
+    "наглядн",
+    "основн",
+    "компани",
+    "виде",
+    "сравни",
+    "сравнен",
 )
 
 _STOP = {
@@ -171,7 +192,11 @@ def _col_matches(col, markers: tuple[str, ...]) -> bool:
 
 def extract_order_clues(question: str) -> dict[str, list[str]]:
     """Номер документа, дата и текстовый хвост («Алабуги») из вопроса."""
-    codes_raw = [m.group(0).rstrip(".,;:)") for m in _CODE_RE.finditer(question)]
+    codes_raw = [
+        m.group(0).rstrip(".,;:)")
+        for m in _CODE_RE.finditer(question)
+        if sum(ch.isdigit() for ch in m.group(0)) >= 3
+    ]
     codes = [_norm(c) for c in codes_raw]
     dates = [m.group(0) for m in _DATE_RE.finditer(question)]
     leftover = question
@@ -248,7 +273,43 @@ def match_entity_slice(df: pd.DataFrame, question: str) -> dict | None:
     return {"column": None, "names": [], "words": words, "frame": None}
 
 
-_CHART_SKIP = ("график", "диаграмм", "построй", "нарисуй", "визуализ")
+def match_entities_separately(df: pd.DataFrame, question: str) -> list[dict]:
+    """Отдельный срез на каждое имя из вопроса (для сравнения, не сумма вместе)."""
+    words = entity_name_words(question)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for word in words:
+        found = match_entity_slice(df, word)
+        if not found or not found["names"] or found["frame"] is None or found["frame"].empty:
+            continue
+        col = found["column"]
+        for name in found["names"]:
+            key = _norm(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            mask = found["frame"][col].map(
+                lambda value: False if _is_blank(value) else str(value).strip() == name
+            )
+            frame = found["frame"].loc[mask]
+            if frame.empty:
+                continue
+            out.append({"column": col, "name": name, "word": word, "frame": frame})
+    return out
+
+
+_CHART_SKIP = (
+    "график",
+    "диаграмм",
+    "построй",
+    "нарисуй",
+    "визуализ",
+    "кругов",
+    "разбивк",
+    "гистограм",
+    "столбик",
+    "наглядн",
+)
 _GROUP_ALL_SKIP = (
     "по заказчик",
     "по клиент",
@@ -273,7 +334,7 @@ _MONEY_ASK = (
 )
 
 
-def wants_entity_metrics(question: str) -> bool:
+def wants_entity_metrics(question: str, df: pd.DataFrame | None = None) -> bool:
     """Именованный заказчик/менеджер + «сколько оплатил / осталось» — не группировка."""
     if wants_order_lookup(question):
         return False
@@ -284,7 +345,12 @@ def wants_entity_metrics(question: str) -> bool:
         return False
     if not entity_name_words(question):
         return False
-    return any(marker in q for marker in _MONEY_ASK)
+    if not any(marker in q for marker in _MONEY_ASK):
+        return False
+    if df is None:
+        return True
+    found = match_entity_slice(df, question)
+    return bool(found and found.get("names") and found.get("frame") is not None)
 
 
 def _paid_asked(q: str) -> bool:
@@ -305,6 +371,10 @@ def _unpaid_asked(q: str) -> bool:
 def _count_asked(q: str) -> bool:
     if any(m in q for m in ("сумм", "оплат", "остал", "остат", "неоплач", "дефицит", "долг")):
         return False
+    return bool(re.search(r"скольк\w*\s+заказ", q)) or "число заказ" in q
+
+
+def _also_count_asked(q: str) -> bool:
     return bool(re.search(r"скольк\w*\s+заказ", q)) or "число заказ" in q
 
 
@@ -380,11 +450,28 @@ def exec_entity_metrics(df: pd.DataFrame, question: str) -> dict:
         }
 
     n = len(frame)
-    lines = [f"**{who}**", f"Строк в выборке: {n}."]
-    for label, col in wanted:
-        val = _col_sum(frame, col)
-        lines.append(f"• {label} («{col}»): **{_format_number(val)}**")
-    return {"answer": "\n".join(lines)}
+    from services.chat_answers import format_entity_answer, money_title
+    from services.report_profiles.deficit_profile import _col_sum
+
+    items: list[tuple[str, str, float]] = []
+    for title, col in wanted:
+        items.append((title, col, _col_sum(frame, col)))
+    # titles already set; if order used generic "Сумма заказов", fix via money_title
+    fixed = []
+    for title, col, val in items:
+        if title == "Сумма заказов":
+            title = money_title("order", col)
+        fixed.append((title, col, val))
+    return {
+        "answer": format_entity_answer(
+            who=who,
+            n=n,
+            items=fixed,
+            frame=frame,
+            layout=layout,
+            also_count=_also_count_asked(q),
+        )
+    }
 
 
 def wants_order_lookup(question: str) -> bool:

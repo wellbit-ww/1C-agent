@@ -76,7 +76,16 @@ export type FileContext = {
   dashboard_ideas?: string[];
   caveats?: string[];
   llm_ready?: boolean;
-  sheets?: { name: string; rows: number; n_columns: number; active?: boolean }[];
+  sheets?: {
+    name: string;
+    rows: number;
+    n_columns: number;
+    active?: boolean;
+    role?: string;
+    role_label?: string;
+    facts?: string[];
+    grain_note?: string;
+  }[];
 };
 
 export type Report = {

@@ -10,7 +10,7 @@ import pandas as pd
 from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
-from config import MAIN_MODEL, ROUTER_MODEL
+from config import MAIN_MODEL
 from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
 from services import db_service
 from services.exceptions import OllamaUnavailableError
@@ -111,7 +111,7 @@ def _get_spec_llm() -> ChatOllama:
     global _spec_llm
     if _spec_llm is None:
         _spec_llm = make_chat_ollama(
-            model=ROUTER_MODEL,
+            model=MAIN_MODEL,
             num_predict=2500,
         )
     return _spec_llm

@@ -19,6 +19,10 @@ class SheetBrief(BaseModel):
     columns: list[str] = Field(default_factory=list)
     active: bool = False
     sample: list[dict] = Field(default_factory=list)
+    role: str = "data"
+    role_label: str = ""
+    facts: list[str] = Field(default_factory=list)
+    grain_note: str = ""
 
 
 class FileContext(BaseModel):
@@ -35,6 +39,7 @@ class FileContext(BaseModel):
     active_sheet: str = ""
     facts: list[str] = Field(default_factory=list)
     column_notes: list[ColumnNote] = Field(default_factory=list)
+    entity_hints: list[str] = Field(default_factory=list)
     llm_ready: bool = False
 
     def prompt_block(self) -> str:
@@ -54,11 +59,18 @@ class FileContext(BaseModel):
             lines.append("Листы книги:")
             for sheet in self.sheets[:8]:
                 mark = " — рабочий лист дашборда и чата" if sheet.active else ""
+                role = sheet.role_label or sheet.role
+                role_bit = f" [{role}]" if role else ""
                 cols = ", ".join(f"«{c}»" for c in sheet.columns[:8])
                 lines.append(
-                    f"- «{sheet.name}»{mark}: {sheet.rows} строк, {sheet.n_columns} колонок"
+                    f"- «{sheet.name}»{mark}{role_bit}: {sheet.rows} строк, {sheet.n_columns} колонок"
                     + (f", колонки: {cols}" if cols else "")
                 )
+                if sheet.grain_note:
+                    lines.append(f"  {sheet.grain_note}")
+                for fact in list(sheet.facts or [])[:3]:
+                    if fact and fact != sheet.grain_note:
+                        lines.append(f"  {fact}")
         if self.metrics:
             lines.append("Метрики: " + ", ".join(f"«{m}»" for m in self.metrics[:8]))
         if self.groupers:
@@ -68,5 +80,34 @@ class FileContext(BaseModel):
         if self.caveats:
             lines.append("Ограничения: " + "; ".join(self.caveats[:4]))
         if self.facts:
-            lines.append("Посчитанные факты: " + "; ".join(self.facts[:8]))
+            lines.append("Посчитанные факты: " + "; ".join(self.facts[:16]))
+        return "\n".join(lines)
+
+    def router_block(self) -> str:
+        """Короткий контекст для малой модели-роутера. Без сампли витрин."""
+        lines: list[str] = []
+        if self.title:
+            lines.append(f"Название: {self.title}")
+        if self.report_kind:
+            lines.append(f"Тип: {self.report_kind}")
+        if self.grain:
+            lines.append(f"Зерно: {self.grain}")
+        if self.summary:
+            lines.append(self.summary[:240])
+        if self.sheets:
+            bits = []
+            for sheet in self.sheets[:8]:
+                role = sheet.role_label or sheet.role
+                mark = "*" if sheet.active else ""
+                label = f"«{sheet.name}»{mark}"
+                if role:
+                    label += f"[{role}]"
+                bits.append(label)
+            lines.append("Листы: " + ", ".join(bits))
+        if self.metrics:
+            lines.append("Метрики: " + ", ".join(f"«{m}»" for m in self.metrics[:6]))
+        if self.groupers:
+            lines.append("Группы: " + ", ".join(f"«{g}»" for g in self.groupers[:4]))
+        if self.facts:
+            lines.append("Факты: " + "; ".join(self.facts[:6]))
         return "\n".join(lines)

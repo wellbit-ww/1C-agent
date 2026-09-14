@@ -77,6 +77,32 @@ class TestFastPathCharts:
         )
         assert [c["chart_type"] for c in result["charts"]] == ["pie"]
 
+    def test_visual_companies_is_bar_by_client(self, sales_df, monkeypatch):
+        def fail_classify(*_a, **_kw):
+            raise AssertionError("наглядно по компаниям — keyword chart, не роутер")
+
+        monkeypatch.setattr(chat_service, "_llm_classify", fail_classify)
+        result = chat_service.handle_question(
+            sales_df, "покажи пожалуйста кто у нас основные компании по выручке наглядно"
+        )
+        assert [c["chart_type"] for c in result["charts"]] == ["bar"]
+        assert "компани" in result["answer"].lower() or "клиент" in result["answer"].lower()
+        assert "по годам" not in result["answer"].lower()
+
+    def test_chart_followup_pie_skips_router(self, sales_df, monkeypatch):
+        def fail_classify(*_a, **_kw):
+            raise AssertionError("смена типа диаграммы не должна идти в роутер")
+
+        monkeypatch.setattr(chat_service, "_llm_classify", fail_classify)
+        history = [
+            {"role": "user", "content": "покажи выручку по клиентам"},
+            {"role": "assistant", "content": "Построил диаграмму по клиентам."},
+        ]
+        result = chat_service.handle_question(
+            sales_df, "а теперь круговая", history=history
+        )
+        assert [c["chart_type"] for c in result["charts"]] == ["pie"]
+
     def test_explicit_pie_over_period(self, sales_df):
         # «круговая по месяцам» — pie по месячным срезам, а не line
         result = chat_service.handle_question(
@@ -135,7 +161,7 @@ class TestFallback:
             sales_df, "расскажи про содержимое файла", file_context=ctx
         )
         assert "я пока не понял" not in result["answer"].lower()
-        assert "Строк: 2394" in result["answer"] or "Фактфайл XYZ" in result["answer"]
+        assert "2394" in result["answer"]
 
 
 class TestNarrativeReport:
@@ -185,16 +211,35 @@ class TestNarrativeReport:
         assert result["answer"] == polished.strip()
 
 
+class TestExtractJson:
+    def test_concatenated_objects_from_small_router(self):
+        raw = (
+            '{"action": "stat", "operation": "sum"}\n'
+            '{"action": "stat", "operation": "top", "semantic": "client", "n": 5}'
+        )
+        parsed = chat_service._extract_json(raw)
+        assert isinstance(parsed, list)
+        assert [a["operation"] for a in parsed] == ["sum", "top"]
+
+    def test_strips_think_tags(self):
+        raw = '<think>хм</think>{"action":"general"}'
+        assert chat_service._extract_json(raw) == {"action": "general"}
+
+
 @requires_ollama
 class TestLlmPath:
     def test_compound_question(self, deficit_df):
         result = chat_service.handle_question(
             deficit_df, "Какой общий дефицит и кто топ-заказчик?"
         )
-        assert len(result["answer"]) > 20
+        assert "Не нашёл заказ" not in result["answer"]
+        assert "374617149" in _digits(result["answer"])
+        assert "АЛАБУГА" in result["answer"].upper() or "1." in result["answer"]
 
     def test_free_form_chart(self, sales_df):
         result = chat_service.handle_question(
             sales_df, "покажи пожалуйста кто у нас основные компании по выручке наглядно"
         )
+        assert result["charts"], "должен быть график"
+        assert "по годам" not in result["answer"].lower()
         assert result["charts"], "LLM должен был запросить диаграмму"

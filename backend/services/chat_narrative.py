@@ -162,8 +162,70 @@ def _top_line(df: pd.DataFrame, question: str, semantic: str, label: str) -> str
     return f"По {label}: " + "; ".join(bits) + "."
 
 
-def _draft_narrative(df: pd.DataFrame, question: str) -> str:
+def _draft_deficit_narrative(df: pd.DataFrame) -> str:
+    from services.chat_answers import deficit_meaning, layout_values, rub
+    from services.column_resolver import resolve_semantic_column
+    from services.file_context_service import _top_sums
+    from services.report_profiles.deficit_profile import deficit_kpis, detect_deficit_money_layout
+
+    layout = detect_deficit_money_layout(df)
+    lines = ["**Отчёт по дефициту**", ""]
+    span = _get_date_period(df)
+    opener = f"В выгрузке {len(df)} записей"
+    if span:
+        opener += f" за период {span}"
+    opener += ". Одна строка — заказ/позиция задолженности."
+    lines.append(opener)
+    lines.append("")
+    lines.append("**Деньги**")
+    for kpi in deficit_kpis(df)[:8]:
+        unit = "" if kpi["name"] in {"unique_customers", "unique_departments"} else " руб."
+        lines.append(f"• {kpi['label']}: {_format_number(kpi['raw_value'])}{unit}")
+    vals = layout_values(df, layout)
+    meaning = deficit_meaning(
+        unpaid=vals["unpaid"] if layout.unpaid else None,
+        order=vals["order"] if layout.order_sum else None,
+        paid=vals["paid"] if layout.paid else None,
+        order_col=layout.order_sum,
+    )
+    if meaning:
+        lines.append(meaning)
+    client = resolve_semantic_column(df, "", "client", dtype="categorical")
+    if client and layout.unpaid:
+        unpaid_top = _top_sums(df, client, layout.unpaid, n=5)
+        if unpaid_top:
+            lines.append("")
+            lines.append("**Кто больше должен**")
+            for name, value in unpaid_top:
+                lines.append(f"• {name}: {rub(value)}")
+    if client and layout.order_sum:
+        order_top = _top_sums(df, client, layout.order_sum, n=5)
+        if order_top:
+            lines.append("")
+            lines.append("**Кто больше заказал**")
+            for name, value in order_top:
+                lines.append(f"• {name}: {rub(value)}")
+            if layout.unpaid and unpaid_top and order_top:
+                if unpaid_top[0][0] != order_top[0][0]:
+                    lines.append(
+                        f"Лидеры разные: по остатку «{unpaid_top[0][0]}», "
+                        f"по сумме заказа «{order_top[0][0]}» — это разные колонки."
+                    )
+    lines.append("")
+    lines.append("**Выводы**")
+    lines.append(
+        "Остаток нельзя читать как объём заказов. Смотрите обе колонки, "
+        "иначе крупный заказчик с маленьким долгом выглядит «меньше», чем должник."
+    )
+    return "\n".join(lines)
+
+
+def _draft_narrative(df: pd.DataFrame, question: str, file_context=None) -> str:
     """Готовый отчёт для руководителя: цифры pandas, без карточки файла."""
+    from services.chat_answers import report_kind_hint
+
+    if report_kind_hint(file_context, df) == "deficit":
+        return _draft_deficit_narrative(df)
     total = data_tools.get_sum(df, question)
     span = _get_date_period(df)
     metric = total.get("column") or "сумма"
@@ -274,7 +336,7 @@ def _drops_period_facts(polished: str, draft: str) -> bool:
     return found < max(2, len(periods) // 2)
 
 
-def _format_sheet_sample(sample: list | None) -> str:
+def _format_sheet_sample(sample: list | None, *, showcase: bool = False) -> str:
     if not sample:
         return ""
     rows: list[str] = []
@@ -290,7 +352,31 @@ def _format_sheet_sample(sample: list | None) -> str:
             rows.append(" · ".join(bits))
     if not rows:
         return ""
-    return " Образец: " + "; ".join(rows) + "."
+    prefix = " На витрине 1С в образце: " if showcase else " Образец: "
+    return prefix + "; ".join(rows) + "."
+
+
+def _sheet_mentioned(question: str, name: str) -> bool:
+    q = (question or "").lower().replace("ё", "е")
+    n = (name or "").strip().lower().replace("ё", "е")
+    if not n:
+        return False
+    if n in q:
+        return True
+    tokens = re.findall(r"[a-zа-я0-9]{4,}", n)
+    tokens = [t for t in tokens if t not in {"лист", "sheet"}]
+    if not tokens:
+        return False
+
+    def _in_question(token: str) -> bool:
+        if token in q:
+            return True
+        stem = token[:4] if len(token) >= 4 else token
+        return len(stem) >= 4 and stem in q
+
+    if len(tokens) >= 2:
+        return all(_in_question(t) for t in tokens)
+    return _in_question(tokens[0])
 
 
 def _sheet_catalog_answer(file_context, sheets) -> str:
@@ -300,24 +386,52 @@ def _sheet_catalog_answer(file_context, sheets) -> str:
     lines = ["В книге такие листы:"]
     for sheet in sheets:
         mark = " (рабочий)" if getattr(sheet, "active", False) else ""
+        role = getattr(sheet, "role_label", "") or getattr(sheet, "role", "")
+        role_bit = f", {role}" if role else ""
         cols = ", ".join(f"«{c}»" for c in list(sheet.columns)[:8])
         lines.append(
-            f"• «{sheet.name}»{mark}: {sheet.rows} строк"
+            f"• «{sheet.name}»{mark}{role_bit}: {sheet.rows} строк"
             + (f", колонки {cols}" if cols else "")
             + "."
         )
+        note = getattr(sheet, "grain_note", "") or ""
+        if note and not getattr(sheet, "active", False):
+            lines.append(f"  {note}")
     if active:
         lines.append(
             f"Цифры дашборда и расчёты чата сейчас берутся с листа «{active}»."
         )
+        vitrines = [
+            s.name
+            for s in sheets
+            if getattr(s, "role", "") in {"dashboard", "summary"}
+        ]
+        if vitrines:
+            lines.append(
+                "Витрины 1С ("
+                + ", ".join(f"«{n}»" for n in vitrines)
+                + ") — другое зерно, их итоги не складывать с рабочим листом."
+            )
     return "\n".join(lines)
+
+
+_SHEET_METRIC = (
+    "скольк",
+    "сумм",
+    "топ",
+    "график",
+    "диаграмм",
+    "остат",
+    "оплат",
+    "выручк",
+)
 
 
 def _describe_other_sheets(question: str, file_context) -> str | None:
     if file_context is None:
         return None
     sheets = list(getattr(file_context, "sheets", None) or [])
-    if len(sheets) < 2:
+    if not sheets:
         return None
     q = question.lower()
     catalog_markers = (
@@ -332,27 +446,48 @@ def _describe_other_sheets(question: str, file_context) -> str | None:
     if any(marker in q for marker in catalog_markers):
         return _sheet_catalog_answer(file_context, sheets)
 
-    active = (getattr(file_context, "active_sheet", "") or "").lower()
-    matches = []
-    for sheet in sheets:
-        name = (getattr(sheet, "name", "") or "").strip()
-        if name and name.lower() in q and name.lower() != active:
-            matches.append(sheet)
+    if len(sheets) < 2:
+        return None
+
+    matches = [
+        sheet
+        for sheet in sheets
+        if _sheet_mentioned(question, getattr(sheet, "name", "") or "")
+    ]
     if not matches:
         return None
-    active_name = getattr(file_context, "active_sheet", "") or ""
+    only_active = (
+        len(matches) == 1
+        and getattr(matches[0], "active", False)
+        and any(marker in q for marker in _SHEET_METRIC)
+    )
+    if only_active:
+        return None
     parts = []
     for sheet in matches:
         cols = ", ".join(f"«{c}»" for c in list(sheet.columns)[:12])
-        sample = _format_sheet_sample(getattr(sheet, "sample", None) or [])
-        extra = ""
-        if not getattr(sheet, "active", False) and active_name:
-            extra = (
-                f" Цифры дашборда считаются по листу «{active_name}», не по этому."
-            )
+        role = getattr(sheet, "role_label", "") or getattr(sheet, "role", "")
+        showcase = getattr(sheet, "role", "") in {"dashboard", "summary"}
+        sample = _format_sheet_sample(
+            getattr(sheet, "sample", None) or [], showcase=showcase
+        )
+        extra = getattr(sheet, "grain_note", "") or ""
+        facts = [
+            f
+            for f in list(getattr(sheet, "facts", None) or [])[:4]
+            if f and f != extra
+        ]
+        fact_text = (" " + " ".join(facts)) if facts else ""
+        if not extra and not getattr(sheet, "active", False):
+            active_name = getattr(file_context, "active_sheet", "") or ""
+            if active_name:
+                extra = (
+                    f"Цифры дашборда считаются по листу «{active_name}», не по этому."
+                )
         parts.append(
-            f"Лист «{sheet.name}»: {sheet.rows} строк, "
-            f"{sheet.n_columns} колонок. Колонки: {cols}.{sample}{extra}"
+            f"Лист «{sheet.name}» ({role or 'лист'}): {sheet.rows} строк, "
+            f"{sheet.n_columns} колонок. Колонки: {cols}.{sample}{fact_text}"
+            + (f" {extra}" if extra else "")
         )
     return "\n".join(parts)
 
@@ -360,31 +495,52 @@ def _describe_other_sheets(question: str, file_context) -> str | None:
 def _exec_general(df: pd.DataFrame, action: dict, file_context=None) -> dict:
     if _wants_narrative(str(action.get("question") or "").lower()):
         return _exec_narrative(df, str(action.get("question") or ""), file_context)
-    facts = _facts_pack(df, file_context)
-    prompt = f"""Ты аналитик выгрузок 1С. Ответь на вопрос 2–5 предложениями на русском.
+    from services.chat_answers import (
+        report_kind_hint,
+        typed_frame_rules,
+        typed_overview_draft,
+    )
+    from services.chat_question_pack import build_answer_facts
 
-Вопрос: {action.get("question", "")}
+    question = str(action.get("question") or "")
+    kind = report_kind_hint(file_context, df)
+    draft = typed_overview_draft(df, file_context)
+    facts = build_answer_facts(df, question, file_context=file_context)
+    prompt = f"""Ты аналитик выгрузок 1С. Ответь на вопрос 2–5 предложениями на русском.
+{typed_frame_rules(kind)}
+
+Вопрос: {question}
 
 Посчитанные факты (опирайся ТОЛЬКО на них, не выдумывай цифры и колонки):
 {facts}
 
+Черновик с верными цифрами (можно переписать живее, числа не менять):
+{draft}
+
+Если в блоке «Срез по вопросу» есть цифры — отвечай по срезу, а не по итогам всего файла.
 Если фактов не хватает — скажи, чего не хватает. Не предлагай меню умений."""
 
     try:
         answer = _ask_llm(prompt)
     except OllamaUnavailableError:
-        if facts:
-            return {"answer": facts}
-        return {"answer": "LLM недоступна, а посчитанных фактов по файлу нет."}
+        return {"answer": draft or facts or "LLM недоступна, а посчитанных фактов по файлу нет."}
 
-    return {"answer": answer}
+    polished = (answer or "").strip()
+    if not polished or _looks_like_file_card(polished):
+        return {"answer": draft or facts}
+    return {"answer": polished}
 
 
 def _exec_narrative(df: pd.DataFrame, question: str, file_context=None) -> dict:
-    draft = _draft_narrative(df, question)
-    prompt = f"""Ты аналитик продаж. Ниже уже посчитанный отчёт с верными цифрами.
+    draft = _draft_narrative(df, question, file_context)
+    kind_line = (
+        "Для дефицита сохрани разницу остатка и суммы заказа."
+        if "**Отчёт по дефициту**" in draft
+        else "Сохрани ВСЕ цифры и названия периодов. Можно чуть пояснить рост/падение."
+    )
+    prompt = f"""Ты аналитик 1С. Ниже уже посчитанный отчёт с верными цифрами.
 Перепиши его живым языком для руководителя: 8–15 предложений, абзацы.
-Сохрани ВСЕ цифры и названия периодов. Можно чуть пояснить рост/падение.
+{kind_line}
 Запрещено: копировать карточку файла, писать «понимание файла», перечислять колонки
 и долю пустых ячеек, выдумывать периоды и суммы, которых нет в тексте.
 

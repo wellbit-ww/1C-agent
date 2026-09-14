@@ -29,10 +29,17 @@ export function FileBrief({ ctx }: { ctx: FileContext }) {
             <div className="mb-1 text-xs text-zinc-500">Листы книги</div>
             {sheets.map((sheet) => (
               <p key={sheet.name}>
-                · {sheet.name}: {sheet.rows} строк, {sheet.n_columns} колонок
+                · {sheet.name}
+                {sheet.role_label ? ` — ${sheet.role_label}` : ""}: {sheet.rows}{" "}
+                строк, {sheet.n_columns} колонок
                 {sheet.active ? " — рабочий" : ""}
               </p>
             ))}
+            {sheets.some((s) => s.role === "dashboard" || s.role === "summary") && (
+              <p className="mt-1 text-xs text-zinc-500">
+                Витрины 1С не складываются с рабочим листом.
+              </p>
+            )}
           </div>
         )}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

@@ -18,10 +18,12 @@ import pandas as pd
 from services.chat_executors import _exec_chart, _exec_stat
 from services.chat_keywords import (
     _CHART_MARKERS,
+    _group_semantic_from_text,
     _keyword_chart_action,
     _keyword_stat_action,
 )
 from services.chat_lookup import (
+    entity_name_words,
     exec_entity_metrics,
     exec_order_lookup,
     wants_entity_metrics,
@@ -34,6 +36,14 @@ from services.chat_narrative import (
     _help_answer,
     _wants_help,
     _wants_narrative,
+)
+from services.chat_question_pack import (
+    exec_named_compare,
+    exec_rank_compare,
+    wants_file_overview,
+    wants_named_compare,
+    wants_payment_overview,
+    wants_rank_compare,
 )
 from services.exceptions import OllamaUnavailableError
 from services.llm_service import ask_llm, classify
@@ -53,11 +63,14 @@ _LLM_PROMPT = """/no_think
 - {{"action": "chart", "chart_type": "bar"|"pie"|"line", "group_semantic": "<группа>", "value_semantic": "<метрика>", "period": "month"|"quarter"|"year", "agg": "sum"|"mean"|"count", "top_n": 10, "group_column": "<точное имя>", "value_column": "<точное имя>"}}
 - {{"action": "insights"}} — основные выводы по данным
 - {{"action": "lookup", "query": "<номер заказа, заказчик или дата>"}} — один заказ: комментарий и карточка строки
+- {{"action": "entity", "query": "<заказчик или менеджер>"}} — оплачено, остаток, сумма заказов по имени из вопроса
+- {{"action": "compare"}} — сравнить двух заказчиков или «кто больше должен / кто больше заказал»
 - {{"action": "general"}} — открытый вопрос о содержимом файла
 - {{"action": "help"}} — вопрос не связан с данными
 
 <группа>: client, manager, region, department, supplier, status. <метрика>: revenue, deficit, amount.
 group_column / value_column — точные имена из списка колонок (предпочтительнее semantic, если имя известно). Не выдумывай колонки.
+Имя из вопроса (КЭАЗ, Алабуга, Кусков) — action=entity, не group. Два имени («сравни Алабугу и Робел») — action=compare.
 Предпочитай action=general (ответ по фактам файла), а не help. help — только если спросили «что ты умеешь».
 Просьба написать отчёт, подробный анализ, обзор продаж — action=general, не chart.
 Если вопрос составной («и», «а также») — верни список команд: [{{...}}, {{...}}].
@@ -66,7 +79,7 @@ group_column / value_column — точные имена из списка кол
 
 Вопрос: {question}"""
 
-_ALLOWED_ACTIONS = {"stat", "chart", "insights", "lookup", "general", "help"}
+_ALLOWED_ACTIONS = {"stat", "chart", "insights", "lookup", "entity", "compare", "general", "help"}
 
 _INTERPRET_HINT = re.compile(
     r"поясн|интерпрет|почему\s+так|что это знач|прокоммент",
@@ -76,28 +89,39 @@ _INTERPRET_HINT = re.compile(
 _COMPOUND_SEPARATORS = re.compile(r"\s+(?:и|а также|также|плюс)\s+")
 
 
-def _extract_json(text: str) -> dict | list | None:
-    start = None
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            start = i
-            break
-    if start is None:
-        return None
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_FOLLOWUP_CHART = re.compile(
+    r"^\s*а\s+(?:теперь\s+)?(кругов|пирог|столб|гистограм|линейн|линия)",
+    re.I,
+)
 
-    depth = 0
-    for j in range(start, len(text)):
-        ch = text[j]
-        if ch in "{[":
-            depth += 1
-        elif ch in "}]":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(text[start:j + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
+
+def _extract_json(text: str) -> dict | list | None:
+    """Один объект, массив или несколько JSON подряд (так отвечает 1.7B)."""
+    if not text:
+        return None
+    cleaned = _THINK_RE.sub("", text)
+    decoder = json.JSONDecoder()
+    found: list[dict] = []
+    i = 0
+    n = len(cleaned)
+    while i < n:
+        while i < n and cleaned[i] not in "{[":
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, end = decoder.raw_decode(cleaned[i:])
+        except json.JSONDecodeError:
+            break
+        if isinstance(obj, list):
+            found.extend(item for item in obj if isinstance(item, dict))
+        elif isinstance(obj, dict):
+            found.append(obj)
+        i += end
+    if not found:
+        return None
+    return found if len(found) > 1 else found[0]
 
 
 def _build_history_block(history: list[dict] | None) -> str:
@@ -116,10 +140,13 @@ def _build_history_block(history: list[dict] | None) -> str:
     return "Контекст диалога:\n" + "\n".join(lines) + "\n"
 
 
-def _file_context_block(file_context) -> str:
+def _file_context_block(file_context, *, compact: bool = False) -> str:
     if file_context is None:
         return ""
-    block = getattr(file_context, "prompt_block", lambda: "")()
+    if compact:
+        block = getattr(file_context, "router_block", lambda: "")()
+    else:
+        block = getattr(file_context, "prompt_block", lambda: "")()
     if not block:
         return ""
     return block.replace("{", "{{").replace("}", "}}") + "\n"
@@ -134,7 +161,7 @@ def _llm_classify(
     columns = ", ".join(str(c) for c in df.columns[:25])
     prompt = _LLM_PROMPT.format(
         columns=columns,
-        file_context_block=_file_context_block(file_context),
+        file_context_block=_file_context_block(file_context, compact=True),
         history_block=_build_history_block(history),
         question=question,
     )
@@ -189,8 +216,27 @@ def _normalize_actions(actions: list[dict] | None, question: str) -> list[dict]:
     if _wants_narrative(q):
         return [{"action": "general"}]
     out = []
+    words = entity_name_words(question)
     for action in actions:
         kind = action.get("action")
+        op = action.get("operation")
+        is_group = kind == "group" or (kind == "stat" and op == "group")
+        if is_group and wants_named_compare(question):
+            out.append({**action, "action": "compare"})
+            continue
+        if is_group and words and not any(
+            marker in q
+            for marker in (
+                "по заказчик",
+                "по клиент",
+                "по менеджер",
+                "по ответственн",
+                "по подразделен",
+                "по отдел",
+            )
+        ):
+            out.append({**action, "action": "entity", "query": action.get("query") or question})
+            continue
         if kind == "help" and not _wants_help(q):
             out.append({**action, "action": "general"})
         else:
@@ -215,6 +261,62 @@ def _is_compound(q: str) -> bool:
     return meaningful >= 2
 
 
+def _keyword_compound_actions(question: str) -> list[dict] | None:
+    """Две понятные части без роутера: «дефицит и топ-заказчик»."""
+    q = (question or "").lower().strip()
+    if not _is_compound(q):
+        return None
+    parts = [part.strip() for part in _COMPOUND_SEPARATORS.split(q) if part.strip()]
+    actions: list[dict] = []
+    for part in parts:
+        chart = _keyword_chart_action(part)
+        if chart:
+            actions.append(chart)
+            continue
+        stat = _keyword_stat_action(part)
+        if stat:
+            actions.append(stat)
+    return actions if len(actions) >= 2 else None
+
+
+def _followup_chart_action(question: str, history: list[dict] | None) -> dict | None:
+    """«А теперь круговая» — сменить тип диаграммы, не звать 1.7B."""
+    if not history:
+        return None
+    match = _FOLLOWUP_CHART.search(question or "")
+    if not match:
+        return None
+    token = match.group(1).lower()
+    if token.startswith("кругов") or token.startswith("пирог"):
+        chart_type = "pie"
+    elif token.startswith("линейн") or token.startswith("линия"):
+        chart_type = "line"
+    else:
+        chart_type = "bar"
+    last = ""
+    for message in reversed(history):
+        if message.get("role") == "user":
+            last = str(message.get("content") or "")
+            break
+    prev = _keyword_chart_action(last.lower()) or {}
+    group = prev.get("group_semantic") or _group_semantic_from_text(last.lower())
+    period = prev.get("period")
+    action = {
+        "action": "chart",
+        "chart_type": chart_type,
+        "agg": prev.get("agg") or "sum",
+        "top_n": prev.get("top_n") or 10,
+        "question": f"{last} {question}".strip(),
+    }
+    if group:
+        action["group_semantic"] = group
+    elif period or chart_type == "line":
+        action["period"] = period or "month"
+    else:
+        action["group_semantic"] = "client"
+    return action
+
+
 def _execute_actions(
     df: pd.DataFrame,
     question: str,
@@ -232,6 +334,13 @@ def _execute_actions(
             result = _exec_chart(df, action)
         elif kind == "lookup":
             result = exec_order_lookup(df, str(action.get("query") or question))
+        elif kind == "entity":
+            result = exec_entity_metrics(df, str(action.get("query") or question))
+        elif kind == "compare":
+            if wants_rank_compare(question) and not wants_named_compare(question):
+                result = exec_rank_compare(df, question)
+            else:
+                result = exec_named_compare(df, question)
         elif kind == "general":
             result = _exec_general(df, action, file_context=file_context)
         elif kind == "help":
@@ -259,6 +368,41 @@ def _execute_actions(
     return {"answer": text, "charts": charts}
 
 
+_FOLLOWUP_METRIC = (
+    "остат",
+    "остал",
+    "оплат",
+    "сумм",
+    "выручк",
+    "неоплач",
+    "долг",
+    "задолжен",
+    "дефицит",
+)
+
+
+def _rewrite_followup(question: str, history: list[dict] | None) -> str:
+    """«А по остатку?» после вопроса про КЭАЗ → тот же срез, без роутера."""
+    if not history:
+        return question
+    q = (question or "").strip()
+    if not q or len(q) > 72:
+        return question
+    low = q.lower().replace("ё", "е")
+    if not (low.startswith("а ") or low.startswith("а?")):
+        return question
+    if not any(marker in low for marker in _FOLLOWUP_METRIC):
+        return question
+    last = ""
+    for message in reversed(history):
+        if message.get("role") == "user":
+            last = str(message.get("content") or "").strip()
+            break
+    if not last or last.lower().replace("ё", "е") == low:
+        return question
+    return f"{last.rstrip(' ?!.')} {q}"
+
+
 def handle_question(
     df: pd.DataFrame,
     question: str,
@@ -266,6 +410,7 @@ def handle_question(
     file_context=None,
 ) -> dict:
     """Возвращает {"answer": str, "charts": [chart_dict, ...]}."""
+    question = _rewrite_followup(question, history)
     q = question.lower().strip()
 
     if _wants_help(q):
@@ -275,6 +420,14 @@ def handle_question(
         result = _exec_narrative(df, question, file_context=file_context)
         return {"answer": result["answer"], "charts": []}
 
+    chart_follow = _followup_chart_action(question, history)
+    if chart_follow:
+        result = _exec_chart(df, chart_follow)
+        return {
+            "answer": result["answer"],
+            "charts": [result["chart"]] if result.get("chart") else [],
+        }
+
     sheet_text = _describe_other_sheets(question, file_context)
     if sheet_text:
         return {"answer": sheet_text, "charts": []}
@@ -283,9 +436,27 @@ def handle_question(
         result = exec_order_lookup(df, question)
         return {"answer": result["answer"], "charts": []}
 
-    if wants_entity_metrics(question):
+    if wants_named_compare(question):
+        result = exec_named_compare(df, question)
+        return {"answer": result["answer"], "charts": []}
+
+    if wants_rank_compare(question):
+        result = exec_rank_compare(df, question)
+        return {"answer": result["answer"], "charts": []}
+
+    if wants_payment_overview(question) or wants_file_overview(question):
+        result = _exec_general(
+            df, {"action": "general", "question": question}, file_context=file_context
+        )
+        return {"answer": result["answer"], "charts": []}
+
+    if wants_entity_metrics(question, df):
         result = exec_entity_metrics(df, question)
         return {"answer": result["answer"], "charts": []}
+
+    keyword_compound = _keyword_compound_actions(question)
+    if keyword_compound:
+        return _execute_actions(df, question, keyword_compound, file_context=file_context)
 
     if _is_compound(q):
         actions = _llm_classify(

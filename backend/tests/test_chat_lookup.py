@@ -21,6 +21,7 @@ class TestOrderLookupDetect:
     def test_does_not_steal_aggregates(self):
         assert not wants_order_lookup("Какой общий дефицит?")
         assert not wants_order_lookup("Топ-5 заказчиков")
+        assert not wants_order_lookup("Какой общий дефицит и кто топ-заказчик?")
         assert not wants_order_lookup("Сколько строк в таблице?")
         assert not wants_order_lookup("Сколько у Алабуги неоплаченный остаток?")
 
@@ -49,6 +50,10 @@ class TestOrderLookupClues:
 
         clues = extract_order_clues("Что с заказом от 29.12")
         assert clues["dates"] == ["29.12"]
+
+    def test_hyphenated_russian_is_not_order_code(self):
+        clues = extract_order_clues("Какой общий дефицит и кто топ-заказчик?")
+        assert clues["codes"] == []
 
 
 class TestOrderLookupOnDeficit:
