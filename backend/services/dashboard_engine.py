@@ -267,6 +267,138 @@ def _period_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
+def _pivot_date_column(df: pd.DataFrame) -> str | None:
+    from services.chat_question_pack import _start_date_column
+
+    start = _start_date_column(df)
+    if start:
+        return start
+    dates = data_tools.detect_date_columns(df).get("columns") or []
+    return dates[0] if dates else None
+
+
+def _pivot_cell(value) -> float:
+    if pd.isna(value):
+        return 0.0
+    number = float(value)
+    if abs(number - round(number)) < 1e-9:
+        return float(int(round(number)))
+    return number
+
+
+def _period_label(period: pd.Period, freq: str) -> str:
+    if freq == "Q":
+        return f"{int(period.quarter)} кв {int(period.year)}"
+    if freq == "M":
+        return f"{int(period.month):02d}.{int(period.year)}"
+    return str(int(period.year))
+
+
+def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
+    group_col = _resolve_group_column(df, tile)
+    date_col = _pivot_date_column(df)
+    if not group_col:
+        return {"error": f"Не нашёл колонку подразделения для «{tile.title}»"}
+    if not date_col:
+        return {"error": f"Не нашёл дату начала сделки для «{tile.title}»"}
+
+    freq = {"month": "M", "year": "Y", "quarter": "Q"}.get(
+        tile.source.period or "quarter", "Q"
+    )
+    work = df[[group_col, date_col]].copy()
+    value_col = None
+    if tile.agg != "count":
+        value_col = _resolve_value_column(df, tile)
+        if not value_col:
+            return {"error": f"Не нашёл числовую метрику для «{tile.title}»"}
+        work[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+
+    names = work[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    work = work.loc[~blank].copy()
+    work[group_col] = names.loc[~blank]
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+    work = work.dropna(subset=[date_col, group_col])
+    if work.empty:
+        return {"error": "Нет сделок с датой начала и подразделением"}
+
+    work["_period"] = work[date_col].dt.to_period(freq)
+    if tile.agg == "count":
+        grouped = work.groupby([group_col, "_period"], sort=False).size()
+    elif tile.agg == "mean":
+        grouped = work.groupby([group_col, "_period"], sort=False)[value_col].mean()
+    else:
+        grouped = work.groupby([group_col, "_period"], sort=False)[value_col].sum()
+    pivot = grouped.unstack(fill_value=0)
+    if pivot.empty:
+        return {"error": "Нет данных для таблицы сделок"}
+
+    all_periods = pd.period_range(pivot.columns.min(), pivot.columns.max(), freq=freq)
+    pivot = pivot.reindex(columns=all_periods, fill_value=0)
+
+    order: list[str] = []
+    for name in work[group_col]:
+        text = str(name).strip()
+        if text and text not in order:
+            order.append(text)
+    pivot = pivot.reindex(index=[name for name in order if name in pivot.index])
+    row_totals = pivot.sum(axis=1)
+    if tile.sort == "desc":
+        pivot = pivot.loc[row_totals.sort_values(ascending=False).index]
+    elif tile.sort == "asc":
+        pivot = pivot.loc[row_totals.sort_values(ascending=True).index]
+    pivot = pivot.head(tile.top_n)
+
+    columns: list[str] = []
+    year_spans: list[dict] = []
+    matrix: list[list[float]] = [[] for _ in range(len(pivot.index))]
+    col_totals: list[float] = []
+
+    years: list[int] = []
+    for period in pivot.columns:
+        year = int(period.year)
+        if not years or years[-1] != year:
+            years.append(year)
+
+    for year in years:
+        year_periods = [p for p in pivot.columns if int(p.year) == year]
+        start_len = len(columns)
+        for period in year_periods:
+            columns.append(_period_label(period, freq))
+            series = pivot[period]
+            values = [_pivot_cell(v) for v in series.tolist()]
+            for i, value in enumerate(values):
+                matrix[i].append(value)
+            col_totals.append(_pivot_cell(series.sum()))
+        if freq != "Y" and year_periods:
+            columns.append(str(year))
+            year_vals = [_pivot_cell(sum(row[start_len:])) for row in matrix]
+            for i, value in enumerate(year_vals):
+                matrix[i].append(value)
+            col_totals.append(_pivot_cell(sum(year_vals)))
+        year_spans.append({"label": str(year), "count": len(columns) - start_len})
+
+    rows = []
+    groups: dict[str, float] = {}
+    for i, name in enumerate(pivot.index.astype(str)):
+        period_total = _pivot_cell(float(row_totals.loc[name]))
+        rows.append({"label": name, "values": matrix[i], "total": period_total})
+        groups[name] = period_total
+
+    return {
+        "groups": groups,
+        "group_column": group_col,
+        "value_column": value_col,
+        "table": {
+            "index_label": str(group_col),
+            "columns": columns,
+            "year_spans": year_spans,
+            "rows": rows,
+            "totals": col_totals,
+        },
+    }
+
+
 def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
     kind = tile.source.kind
     if kind == "columns_pattern":
@@ -277,6 +409,8 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _current_stage_data(df, tile)
     if kind == "period":
         return _period_data(df, tile)
+    if kind == "pivot" or tile.chart_type == "table":
+        return _pivot_data(df, tile)
     return _group_data(df, tile)
 
 
@@ -375,6 +509,17 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
 
             if "error" in data:
                 tiles.append({"title": tile.title, "error": data["error"]})
+                continue
+
+            if tile.chart_type == "table" or data.get("table"):
+                tiles.append(
+                    {
+                        "title": tile.title,
+                        "chart_type": "table",
+                        "table": data["table"],
+                        "stats": _tile_stats(tile, data),
+                    }
+                )
                 continue
 
             try:

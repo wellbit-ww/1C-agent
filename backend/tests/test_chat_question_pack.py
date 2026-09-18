@@ -1,4 +1,6 @@
 """Срез по вопросу, сравнение заказчиков и команды роутера entity/compare."""
+import pandas as pd
+
 from models.file_context import FileContext
 from services import chat_service
 from services.chat_question_pack import (
@@ -6,6 +8,10 @@ from services.chat_question_pack import (
     wants_file_overview,
     wants_named_compare,
     wants_payment_overview,
+    wants_product_catalog,
+    wants_quarter_deals,
+    wants_department_deals,
+    wants_period_deals,
     wants_rank_compare,
 )
 from services.insights_service import _format_number
@@ -33,6 +39,31 @@ class TestDetectors:
         assert wants_file_overview("Что в файле?")
         assert wants_file_overview("Расскажи про файл")
         assert not wants_file_overview("Сколько у Алабуги неоплаченный остаток?")
+        assert wants_product_catalog("Сколько и каких шкафов заказали?")
+        assert wants_product_catalog("Сколько и каких шкафов было продано?")
+        assert not wants_named_compare("сколько и каких шкафов заказали?")
+        assert not wants_named_compare("сколько и каих шкафов заказали?")
+        assert not wants_product_catalog("Сколько у Алабуги неоплаченный остаток?")
+        assert not wants_product_catalog("Сколько строк в таблице?")
+        assert not wants_product_catalog("Какие заказчики в файле?")
+        assert wants_quarter_deals("Сколько сделок в первом квартале?")
+        assert wants_quarter_deals("сколько сделок было во 2 квартале 2024")
+        assert wants_quarter_deals("разбивка сделок по кварталам")
+        assert wants_period_deals("сколько сделок в январе 2025")
+        assert wants_period_deals("сколько сделок за неделю с 13 по 19 января")
+        assert wants_period_deals("сколько сделок 15.01.2025")
+        assert wants_period_deals("сколько сделок с 1 по 15 марта 2025")
+        assert not wants_period_deals("динамика выручки по месяцам")
+        assert not wants_period_deals("Сколько у Алабуги неоплаченный остаток?")
+        assert not wants_period_deals("разбивка сделок по кварталам")
+        assert wants_department_deals("Сколько сделок в подразделении COOK")
+        assert wants_department_deals("сколько сделок в СИО")
+        assert wants_department_deals("сколько сделок в СМ")
+        assert not wants_department_deals("Сколько у Алабуги неоплаченный остаток?")
+        assert not wants_department_deals("Сколько у Алабуги неоплаченный остаток?")
+        assert not wants_quarter_deals("Сколько у Алабуги неоплаченный остаток?")
+        assert not wants_quarter_deals("Сколько у Алабуги неоплаченный остаток?")
+        assert not wants_quarter_deals("Динамика по кварталам")
 
 
 class TestNamedCompare:
@@ -205,3 +236,334 @@ class TestAnswerFacts:
         assert _digits(_format_number(ala_unpaid)) in _digits(pack)
         assert abs(ala_unpaid - total) > 1
         assert "АЛАБУГА" in pack.upper() or "Алабуг" in pack
+
+
+def _qr_cabinets_df():
+    return pd.DataFrame(
+        {
+            "сделка": [
+                "Конвекционная печь JTR-1200",
+                "Шкаф сухого хранения SDB1106NM",
+                "Шкаф сухого хранения SDB1106NM",
+                "Шкаф сухого хранения SDB1106NM",
+                "Шкаф сухого хранения SDB1106NM",
+                "Шкаф сухого хранения SDB1106NM",
+                None,
+                "ШСХ SDB702NM",
+                "Шкаф SDB302NM",
+            ],
+            "комментарий": [
+                "печь",
+                "шкаф",
+                "шкаф",
+                "шкаф",
+                "шкаф",
+                "шкаф",
+                "ШСХSDB1106NM",
+                "шкаф",
+                "шкаф",
+            ],
+            "заказ клиента": [f"САУП-00010{i}" for i in range(1, 10)],
+            "заказчик": [
+                "АЛАБУГА МАШИНЕРИ ООО",
+                "Клиент А",
+                "Клиент Б",
+                "Клиент В",
+                "Клиент Г",
+                "Клиент Д",
+                "Клиент Е",
+                "Клиент Ж",
+                "Клиент З",
+            ],
+            "модель/ количество": [
+                "SDB1106NM × 15 шт.",
+                "SDB1106NM × 4 шт.",
+                "SDB1106NM × 5 шт.",
+                "SDB1106NM × 3 шт.",
+                "SDB1106NM × 2 шт.",
+                "SDB1106NM × 1 шт.",
+                "SDB1106NM × 1 шт.",
+                "SDB702NM × 1 шт.",
+                "SDB302NM × 1 шт.",
+            ],
+        }
+    )
+
+
+class TestProductCatalog:
+    def test_cabinets_counted_without_llm(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = _qr_cabinets_df()
+        text = chat_service.handle_question(df, "Сколько и каких шкафов заказали?")["answer"]
+        assert "Не удалось выполнить операцию" not in text
+        assert "33 шт" in text
+        assert "SDB1106NM" in text and "31 шт" in text
+        assert "SDB702NM" in text
+        assert "SDB302NM" in text
+        assert "JTR-1200" not in text
+
+    def test_sold_and_typo_still_count(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = _qr_cabinets_df()
+        sold = chat_service.handle_question(
+            df, "Сколько и каких шкафов было продано?"
+        )["answer"]
+        typo = chat_service.handle_question(
+            df, "сколько и каих шкафов заказали?"
+        )["answer"]
+        for text in (sold, typo):
+            assert "Не нашёл двух сторон" not in text
+            assert "нет данных" not in text.lower()
+            assert "18 шт" not in text.split("SDB")[0]
+            assert "33 шт" in text
+            assert "SDB1106NM" in text
+
+    def test_empty_stat_does_not_dead_end(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = _qr_cabinets_df()
+        text = chat_service._execute_actions(
+            df,
+            "Сколько и каких шкафов заказали?",
+            [{"action": "stat"}],
+        )["answer"]
+        assert "Не удалось выполнить операцию" not in text
+        assert "18 шт" not in text.split("SDB")[0]
+        assert "33 шт" in text
+        assert "SDB1106NM" in text
+
+    def test_does_not_steal_named_customer(self, deficit_df, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        assert not wants_product_catalog(
+            "Сколько у Алабуги неоплаченный остаток?", deficit_df
+        )
+        text = chat_service.handle_question(
+            deficit_df, "Сколько у Алабуги неоплаченный остаток?"
+        )["answer"]
+        assert "АЛАБУГА" in text.upper()
+        assert "остаток" in text.lower()
+
+
+def _start_deals_df():
+    return pd.DataFrame(
+        {
+            "заказчик": [
+                "АЛАБУГА МАШИНЕРИ ООО",
+                "РОБЕЛ ООО",
+                "КЭАЗ",
+                "АЛАБУГА МАШИНЕРИ ООО",
+                "ТОРН АО",
+            ],
+            "дата начала сделки": [
+                "15.01.2024",
+                "01.03.2024",
+                "10.04.2024",
+                "02.07.2024",
+                "20.11.2025",
+            ],
+            "сумма по сделке": [100, 200, 300, 400, 500],
+        }
+    )
+
+
+class TestQuarterDeals:
+    def test_first_quarter_count(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        text = chat_service.handle_question(
+            _start_deals_df(), "Сколько сделок в первом квартале?"
+        )["answer"]
+        assert "2" in text
+        assert "01.01–31.03" in text or "01.01-31.03" in text
+        assert "апрель" not in text.lower()
+
+    def test_named_quarter_and_year(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = _start_deals_df()
+        q2 = chat_service.handle_question(df, "сколько сделок во втором квартале 2024")["answer"]
+        q4 = chat_service.handle_question(df, "сколько сделок в 4 квартале 2025")["answer"]
+        assert "1" in q2
+        assert "2 кв" in q2 or "2 квартал" in q2
+        assert "1" in q4
+        assert "2025" in q4
+
+    def test_breakdown_and_missing_column(self, deficit_df, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        all_q = chat_service.handle_question(
+            _start_deals_df(), "разбивка сделок по кварталам"
+        )["answer"]
+        assert "1 кв. 2024" in all_q
+        assert "2 кв. 2024" in all_q
+        assert "3 кв. 2024" in all_q
+        assert "4 кв. 2025" in all_q
+        missing = chat_service.handle_question(
+            deficit_df, "Сколько сделок в первом квартале?"
+        )["answer"]
+        assert "дата начала сделки" in missing.lower()
+
+    def test_typo_column_nchala(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = pd.DataFrame(
+            {
+                "Дата нчала сделки": ["05.02.2024", "01.08.2024"],
+                "заказчик": ["А", "Б"],
+            }
+        )
+        text = chat_service.handle_question(df, "Сколько сделок в 1 квартале")["answer"]
+        assert "1" in text
+        assert "1 кв" in text
+
+
+def _dept_deals_df():
+    return pd.DataFrame(
+        {
+            "заказчик": ["АЛАБУГА", "РОБЕЛ", "КЭАЗ", "ТОРН", "КЭАЗ"],
+            "подразделение": ["СООК", "СООК", "СТО", "СООК", "СООК"],
+            "дата начала сделки": [
+                "15.01.2025",
+                "01.03.2025",
+                "10.02.2025",
+                "20.02.2026",
+                "05.05.2025",
+            ],
+        }
+    )
+
+
+class TestDepartmentDeals:
+    def test_cook_latin_and_short_year(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        text = chat_service.handle_question(
+            _dept_deals_df(),
+            "Сколько сделок было в первом квартале 25 года в подразделении COOK",
+        )["answer"]
+        assert "СООК" in text.upper() or "COOK" in text.upper()
+        assert "2025" in text
+        assert "2026" not in text
+        assert "**2**" in text
+        assert "СТО" not in text
+
+    def test_department_total_and_breakdown(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = _dept_deals_df()
+        total = chat_service.handle_question(
+            df, "Сколько сделок в подразделении СООК"
+        )["answer"]
+        assert "**4**" in total
+        by_dept = chat_service.handle_question(
+            df, "сколько сделок по подразделениям"
+        )["answer"]
+        assert "СООК" in by_dept
+        assert "СТО" in by_dept
+        assert "**4**" in by_dept
+        assert "**1**" in by_dept
+        period = chat_service.handle_question(
+            df, "сколько сделок было совершено за этот промежуток по отделам?"
+        )["answer"]
+        assert "Не нашёл" not in period
+        assert "совершено" not in period.lower()
+        assert "СООК" in period
+        assert "СТО" in period
+        assert "**4**" in period
+        assert "2025" in period or "2024" in period
+
+
+    def test_service_full_name_and_abbrev(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = pd.DataFrame(
+            {
+                "подразделение": [
+                    "Отдел АПЛиС",
+                    "ОВК",
+                    "Отдел неразрушающего контроля",
+                    "ОФК",
+                    "Сервисная служба",
+                    "СИО",
+                    "Служба микроэлектроники",
+                    "Служба оборудования обработки кабеля",
+                ],
+                "дата начала сделки": ["10.01.2025"] * 8,
+                "заказчик": ["А"] * 8,
+            }
+        )
+        cases = (
+            ("сколько сделок в АПЛиС", "аплис"),
+            ("сколько сделок в отделе внутрисхемного контроля", "овк"),
+            ("сколько сделок в ОНК", "неразрушающ"),
+            ("сколько сделок в ОФК", "офк"),
+            ("сколько сделок в СС", "сервисная"),
+            ("сколько сделок в СИО", "сио"),
+            ("сколько сделок в СМ", "микроэлектрон"),
+            ("сколько сделок в СМЭ", "микроэлектрон"),
+            ("сколько сделок в службе оборудования обработки кабеля", "кабел"),
+        )
+        for question, needle in cases:
+            text = chat_service.handle_question(df, question)["answer"].lower()
+            assert "**1**" in chat_service.handle_question(df, question)["answer"], question
+            assert needle in text, question
+        ss = chat_service.handle_question(df, "сколько сделок в СС")["answer"]
+        assert "СИО" not in ss
+        sm = chat_service.handle_question(df, "сколько сделок в СМ")["answer"]
+        assert "кабел" not in sm.lower()
+
+
+class TestPeriodDeals:
+    def test_month_week_and_day(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = pd.DataFrame(
+            {
+                "подразделение": ["СТО", "СТО", "СООК", "СМЭ", "СТО"],
+                "дата начала сделки": [
+                    "15.01.2025",
+                    "16.01.2025",
+                    "20.01.2025",
+                    "03.02.2025",
+                    "10.03.2025",
+                ],
+            }
+        )
+        month = chat_service.handle_question(df, "сколько сделок в январе 2025")["answer"]
+        assert "**3**" in month
+        assert "январ" in month.lower()
+        assert "СТО" in month
+        assert "СООК" in month
+        assert "СМЭ" not in month
+        day = chat_service.handle_question(df, "сколько сделок 15 января 2025")["answer"]
+        assert "**1**" in day
+        assert "СТО" in day
+        assert "СООК" not in day
+        week = chat_service.handle_question(
+            df, "сколько сделок за неделю с 13 по 19 января 2025"
+        )["answer"]
+        assert "**2**" in week
+        assert "СТО" in week
+        assert "СООК" not in week
+        around = chat_service.handle_question(
+            df, "сколько сделок за неделю 15.01.2025"
+        )["answer"]
+        assert "**2**" in around
+        empty = chat_service.handle_question(df, "сколько сделок 1 апреля 2025")["answer"]
+        assert "**0**" in empty or "нет" in empty.lower()
+
+    def test_range_and_named_department(self, monkeypatch):
+        monkeypatch.setattr(chat_service, "_llm_classify", _fail_llm)
+        monkeypatch.setattr(chat_service, "ask_llm", _fail_llm)
+        df = _dept_deals_df()
+        text = chat_service.handle_question(
+            df, "сколько сделок с 1 по 31 января 2025 в СООК"
+        )["answer"]
+        assert "**1**" in text
+        assert "СООК" in text
+        assert "СТО" not in text
+
+
+
+

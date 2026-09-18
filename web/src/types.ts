@@ -11,9 +11,19 @@ export type ChatMessage = {
   charts?: ChartPayload[];
 };
 
+export type PivotTable = {
+  index_label?: string;
+  columns: string[];
+  year_spans?: { label: string; count: number }[];
+  rows: { label: string; values: number[]; total?: number }[];
+  totals?: number[];
+};
+
 export type Tile = {
   title: string;
   plotly_json?: string;
+  chart_type?: string;
+  table?: PivotTable;
   error?: string;
 };
 

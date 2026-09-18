@@ -5,10 +5,13 @@ from services.report_profiles.base_profile import ReportProfile
 
 def build_sales_dashboard_spec(df):
     """Вкладочный дашборд «Воронка / Менеджеры / Клиенты» (эталон 1С)."""
+    from services.generic_dashboard import build_deals_tab, build_generic_spec
+
     has_funnel = any(str(c).endswith("(сумма)") for c in df.columns)
     if not has_funnel:
-        from services.generic_dashboard import build_generic_spec
         return build_generic_spec(df)
+
+    deals = build_deals_tab(df)
 
     sum_col = resolve_semantic_column(df, "", semantic="sales", dtype="numeric")
     total = float(df[sum_col].sum()) if sum_col else None
@@ -44,13 +47,6 @@ def build_sales_dashboard_spec(df):
                 source=TileSource(kind="period", period="month", value_semantic="revenue"),
                 unit="auto",
                 sort="none",
-            ),
-            Tile(
-                title="Распределение сделок по подразделениям",
-                chart_type="pie",
-                source=TileSource(kind="group", group_semantic="department"),
-                agg="count",
-                top_n=12,
             ),
         ],
     )
@@ -124,7 +120,12 @@ def build_sales_dashboard_spec(df):
         ],
     )
 
-    return DashboardSpec(tabs=[funnel_tab, managers_tab, clients_tab])
+    tabs = [deals, funnel_tab, managers_tab, clients_tab] if deals else [
+        funnel_tab,
+        managers_tab,
+        clients_tab,
+    ]
+    return DashboardSpec(tabs=tabs)
 
 
 class SalesProfile(ReportProfile):

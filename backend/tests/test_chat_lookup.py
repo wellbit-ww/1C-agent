@@ -1,6 +1,7 @@
 """Поиск заказа по заказчику, номеру и дате — комментарий и карточка."""
 from services import chat_service
 from services.chat_lookup import (
+    department_keys,
     exec_order_lookup,
     extract_order_clues,
     find_order_rows,
@@ -89,3 +90,17 @@ class TestOrderLookupOnDeficit:
         assert result["charts"] == []
         assert "Комментарий" in result["answer"]
         assert "АЛАБУГА" in result["answer"].upper()
+
+
+class TestDepartmentKeys:
+    def test_abbrev_and_full_name_same_service(self):
+        assert department_keys("СООК") == department_keys("COOK")
+        assert department_keys("СМ") & department_keys("Служба микроэлектроники")
+        assert department_keys("СС") & department_keys("Сервисная служба")
+        assert department_keys("ОВК") & department_keys("Отдел внутрисхемного контроля")
+        assert department_keys("ОНК") & department_keys("Отдел неразрушающего контроля")
+        assert department_keys("ОФК") & department_keys("Отдел функционального контроля")
+        assert department_keys("АПЛиС") & department_keys("Отдел АПЛиС")
+        assert department_keys("СИО") & department_keys("Служба испытательного оборудования")
+        assert not (department_keys("СМ") & department_keys("СООК"))
+        assert not (department_keys("СС") & department_keys("СИО"))

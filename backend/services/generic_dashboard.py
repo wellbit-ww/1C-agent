@@ -129,6 +129,41 @@ def _fmt(value: float) -> str:
     return f"{float(value):,.2f}".replace(",", " ")
 
 
+def build_deals_tab(df: pd.DataFrame) -> Tab | None:
+    """Первая вкладка «Сделки»: сводная квартал×подразделение и круговая."""
+    from services.chat_question_pack import _start_date_column
+    from services.column_resolver import resolve_semantic_column
+
+    dept = resolve_semantic_column(df, "", "department", dtype="categorical")
+    start = _start_date_column(df)
+    if not dept or not start:
+        return None
+    return Tab(
+        title="Сделки",
+        tiles=[
+            Tile(
+                title="Сделки по кварталам и подразделениям",
+                chart_type="table",
+                source=TileSource(
+                    kind="pivot",
+                    group_semantic="department",
+                    period="quarter",
+                ),
+                agg="count",
+                top_n=30,
+                sort="none",
+            ),
+            Tile(
+                title="Распределение сделок по подразделениям",
+                chart_type="pie",
+                source=TileSource(kind="group", group_semantic="department"),
+                agg="count",
+                top_n=12,
+            ),
+        ],
+    )
+
+
 def build_generic_spec(df: pd.DataFrame) -> DashboardSpec | None:
     metrics = pick_metrics(df)
     groupers = pick_groupers(df)
@@ -213,10 +248,15 @@ def build_generic_spec(df: pd.DataFrame) -> DashboardSpec | None:
     elif metrics:
         return None
 
-    if not tiles:
-        return None
+    tabs: list[Tab] = []
+    deals = build_deals_tab(df)
+    if deals:
+        tabs.append(deals)
 
-    tabs = [Tab(title="Обзор", tiles=tiles[:4])]
+    if tiles:
+        tabs.append(Tab(title="Обзор", tiles=tiles[:4]))
+    elif not tabs:
+        return None
 
     from services import data_tools
 

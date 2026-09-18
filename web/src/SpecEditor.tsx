@@ -11,6 +11,7 @@ const CHARTS: { id: string; label: string }[] = [
   { id: "pie", label: "Круг" },
   { id: "line", label: "Линия" },
   { id: "area", label: "Область" },
+  { id: "table", label: "Таблица" },
 ];
 
 const AGGS: { id: string; label: string }[] = [
@@ -53,6 +54,11 @@ const INTENTS: { id: string; label: string; hint: string }[] = [
     id: "current_stage",
     label: "Воронка этапов",
     hint: "Сделки на текущей стадии, как в 1С",
+  },
+  {
+    id: "pivot",
+    label: "Сделки по кварталам",
+    hint: "Таблица: подразделения × кварталы",
   },
 ];
 
@@ -102,12 +108,23 @@ function blankTile(intent: string, columns: string[]): TileSpec {
   if (intent === "current_stage") {
     return {
       title: "Воронка этапов",
-      chart_type: "bar",
+      chart_type: "hbar",
       agg: "sum",
       top_n: 12,
       unit: "auto",
       sort: "none",
       source: { kind: "current_stage" },
+    };
+  }
+  if (intent === "pivot") {
+    return {
+      title: "Сделки по кварталам и подразделениям",
+      chart_type: "table",
+      agg: "count",
+      top_n: 30,
+      unit: "auto",
+      sort: "none",
+      source: { kind: "pivot", period: "quarter", group_semantic: "department" },
     };
   }
   return {

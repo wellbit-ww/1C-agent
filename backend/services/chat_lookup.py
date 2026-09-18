@@ -73,6 +73,72 @@ _ENTITY_SKIP_STEMS = (
     "виде",
     "сравни",
     "сравнен",
+    "шкаф",
+    "издел",
+    "номенклатур",
+    "перв",
+    "втор",
+    "трет",
+    "четверт",
+    "подраздел",
+    "департамент",
+    "отдел",
+    "контрол",
+    "соверш",
+    "промежут",
+    "период",
+    "текущ",
+    "январ",
+    "феврал",
+    "март",
+    "апрел",
+    "август",
+    "сентябр",
+    "октябр",
+    "ноябр",
+    "декабр",
+    "недел",
+    "числ",
+)
+
+_YEAR_STEMS = {"год", "года", "году", "годе", "годом"}
+_CYR_LAT = str.maketrans(
+    {
+        "а": "a",
+        "в": "b",
+        "е": "e",
+        "к": "k",
+        "м": "m",
+        "н": "h",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "т": "t",
+        "у": "y",
+        "х": "x",
+    }
+)
+
+# Полное имя и код — одна служба. Короткие коды (СС, СМ) только целиком.
+_DEPARTMENT_ALIASES: dict[str, tuple[str, ...]] = {
+    "аплис": ("аплис", "оаплис", "отдел аплис"),
+    "овк": ("овк", "внутрисхемн"),
+    "онк": ("онк", "неразрушающ"),
+    "офк": ("офк", "функциональн"),
+    "сс": ("сс", "сервисная служба", "сервисн"),
+    "сио": ("сио", "испытательн"),
+    "смэ": ("смэ", "см", "микроэлектрон"),
+    "соок": ("соок", "cook", "обработки кабел"),
+}
+_DEPT_SHORT_CODES = tuple(
+    sorted(
+        {
+            alias
+            for aliases in _DEPARTMENT_ALIASES.values()
+            for alias in aliases
+            if 2 <= len(alias) <= 3 and " " not in alias
+        }
+    )
 )
 
 _STOP = {
@@ -81,10 +147,28 @@ _STOP = {
     "состоянии", "комментарий", "комментарии", "пожалуйста", "про",
     "заказ", "заказа", "заказу", "заказом", "заказе", "заказы", "заказов",
     "клиент", "клиента", "клиенту", "номер", "номера", "номеру",
-    "договор", "договора", "сделка", "сделки", "сделке",
+    "договор", "договора", "сделка", "сделки", "сделке", "сделок",
     "наш", "наша", "наше", "нас", "мне", "его", "её", "ее",
     "какая", "какой", "какое", "каких", "каков", "какова",
     "сумма", "суммы", "сумме", "сумму",
+    "было", "были", "была", "был",
+    "совершено", "совершили", "совершил",
+    "промежуток", "промежутка", "промежутке",
+    "неделя", "неделю", "недели", "неделе",
+    "день", "дня", "дне", "дню",
+    "месяц", "месяца", "месяце", "месяцем",
+    "январь", "января", "январе",
+    "февраль", "февраля", "феврале",
+    "март", "марта", "марте",
+    "апрель", "апреля", "апреле",
+    "май", "мая", "мае",
+    "июнь", "июня", "июне",
+    "июль", "июля", "июле",
+    "август", "августа", "августе",
+    "сентябрь", "сентября", "сентябре",
+    "октябрь", "октября", "октябре",
+    "ноябрь", "ноября", "ноябре",
+    "декабрь", "декабря", "декабре",
 }
 _ACRONYM_SKIP = {"ооо", "пао", "оао", "зао", "ао"}
 
@@ -209,9 +293,21 @@ def extract_order_clues(question: str) -> dict[str, list[str]]:
             continue
         stem = _stem(n)
         if len(stem) < 4:
+            if _is_dept_short(n):
+                words.append(token)
+                continue
             if not token.isupper() or len(token) < 3 or n in _ACRONYM_SKIP:
                 continue
         words.append(token)
+    for code in _DEPT_SHORT_CODES:
+        if not re.search(
+            rf"(?<![A-Za-zА-Яа-яЁё0-9]){re.escape(code)}(?![A-Za-zА-Яа-яЁё0-9])",
+            leftover,
+            flags=re.I,
+        ):
+            continue
+        if not any(_norm(existing) == _norm(code) for existing in words):
+            words.append(code)
     return {"codes": codes, "dates": dates, "words": words}
 
 
@@ -220,9 +316,54 @@ def _skip_entity_word(word: str) -> bool:
     if n in _ACRONYM_SKIP:
         return True
     stem = _stem(n)
+    if stem in _YEAR_STEMS:
+        return True
+    if _is_dept_short(n):
+        return False
     if len(stem) < 4:
         return not (word.isupper() and len(word) >= 3)
     return any(stem == marker or stem.startswith(marker) for marker in _ENTITY_SKIP_STEMS)
+
+
+def _fold_lookalike(text: str) -> str:
+    """СООК и COOK — одно подразделение: кириллица как латиница."""
+    return _norm(text).translate(_CYR_LAT)
+
+
+def _dept_plain(text: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", " ", _norm(text)).strip()
+
+
+def department_keys(text: str) -> set[str]:
+    """Канонические службы из текста: «COOK» и «обработки кабеля» → соок."""
+    plain = _dept_plain(text)
+    if not plain:
+        return set()
+    folded = _fold_lookalike(plain)
+    tokens_plain = set(plain.split())
+    tokens_fold = set(folded.split())
+    keys: set[str] = set()
+    for key, aliases in _DEPARTMENT_ALIASES.items():
+        for alias in aliases:
+            ap = _dept_plain(alias)
+            if not ap:
+                continue
+            af = _fold_lookalike(ap)
+            long = " " in ap or len(ap) >= 4
+            if long:
+                if ap in plain or af in folded:
+                    keys.add(key)
+            elif ap in tokens_plain or af in tokens_fold or ap == plain or af == folded:
+                keys.add(key)
+    return keys
+
+
+def _is_dept_short(word: str) -> bool:
+    plain = _dept_plain(word)
+    folded = _fold_lookalike(plain)
+    return plain in _DEPT_SHORT_CODES or folded in {
+        _fold_lookalike(code) for code in _DEPT_SHORT_CODES
+    }
 
 
 def entity_name_words(question: str) -> list[str]:
@@ -230,11 +371,15 @@ def entity_name_words(question: str) -> list[str]:
     return [word for word in extract_order_clues(question)["words"] if not _skip_entity_word(word)]
 
 
-def _entity_columns(df: pd.DataFrame) -> list[str]:
+def _entity_columns(df: pd.DataFrame, question: str = "") -> list[str]:
     from services.column_resolver import resolve_semantic_column
 
+    q = _norm(question)
+    semantics = ("client", "manager", "department")
+    if any(marker in q for marker in ("подраздел", "отдел", "департамент", "служб")) or department_keys(question):
+        semantics = ("department", "client", "manager")
     cols: list[str] = []
-    for semantic in ("client", "manager", "department"):
+    for semantic in semantics:
         col = resolve_semantic_column(df, "", semantic, dtype="categorical")
         if col and col not in cols:
             cols.append(col)
@@ -247,16 +392,22 @@ def _entity_columns(df: pd.DataFrame) -> list[str]:
 def match_entity_slice(df: pd.DataFrame, question: str) -> dict | None:
     """Выборка строк по имени из вопроса. None — имени нет, пустые names — не нашли."""
     words = entity_name_words(question)
-    if not words:
+    if not words and not department_keys(question):
         return None
-    for col in _entity_columns(df):
+    q_keys = department_keys(question)
+    if not words and q_keys:
+        words = list(q_keys)
+    for col in _entity_columns(df, question):
         names: list[str] = []
         seen: set[str] = set()
         for raw in df[col].dropna().unique():
             if _is_blank(raw):
                 continue
             label = str(raw).strip()
-            if not any(_text_matches(word, label) for word in words):
+            hit = any(_text_matches(word, label) for word in words)
+            if not hit and q_keys and q_keys & department_keys(label):
+                hit = True
+            if not hit:
                 continue
             key = _norm(label)
             if key in seen:
@@ -559,7 +710,18 @@ def _text_matches(query: str, value) -> bool:
         return False
     cell = _norm(value)
     qn = _norm(query)
+    q_keys = department_keys(query)
+    v_keys = department_keys(value)
+    if q_keys and v_keys and q_keys & v_keys:
+        return True
+    if len(qn) <= 3:
+        tokens = set(_dept_plain(cell).split())
+        return bool(qn and qn in tokens)
     if qn and qn in cell:
+        return True
+    folded_q = _fold_lookalike(qn)
+    folded_cell = _fold_lookalike(cell)
+    if folded_q and folded_q in folded_cell:
         return True
     qs = _stem(qn)
     if len(qs) < 4:

@@ -66,7 +66,9 @@ class TestSpecPersistence:
         fid = f"test-{uuid.uuid4()}"
         spec = dashboard_service.get_current_spec(fid, sales_df)
         assert spec is not None  # дефолт sales_pipeline v2
-        assert [t.title for t in spec.tabs] == ["Воронка", "Менеджеры", "Клиенты"]
+        assert [t.title for t in spec.tabs] == ["Сделки", "Воронка", "Менеджеры", "Клиенты"]
+        assert spec.tabs[0].tiles[0].chart_type == "table"
+        assert spec.tabs[0].tiles[1].chart_type == "pie"
 
     def test_get_current_spec_prefers_saved(self, sales_df):
         fid = f"test-{uuid.uuid4()}"
@@ -80,7 +82,7 @@ class TestSpecPersistence:
         fid = f"test-{uuid.uuid4()}"
         db_service.save_dashboard_spec(fid, "{not valid json")
         spec = dashboard_service.get_current_spec(fid, sales_df)
-        assert [t.title for t in spec.tabs] == ["Воронка", "Менеджеры", "Клиенты"]
+        assert [t.title for t in spec.tabs] == ["Сделки", "Воронка", "Менеджеры", "Клиенты"]
         assert db_service.get_dashboard_spec(fid) is None  # мусор вычищен
 
 

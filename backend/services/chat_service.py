@@ -39,10 +39,16 @@ from services.chat_narrative import (
 )
 from services.chat_question_pack import (
     exec_named_compare,
+    exec_product_catalog,
+    exec_quarter_deals,
     exec_rank_compare,
     wants_file_overview,
     wants_named_compare,
     wants_payment_overview,
+    wants_product_catalog,
+    wants_quarter_deals,
+    wants_department_deals,
+    wants_period_deals,
     wants_rank_compare,
 )
 from services.exceptions import OllamaUnavailableError
@@ -224,18 +230,38 @@ def _normalize_actions(actions: list[dict] | None, question: str) -> list[dict]:
         if is_group and wants_named_compare(question):
             out.append({**action, "action": "compare"})
             continue
-        if is_group and words and not any(
-            marker in q
-            for marker in (
-                "по заказчик",
-                "по клиент",
-                "по менеджер",
-                "по ответственн",
-                "по подразделен",
-                "по отдел",
+        if wants_product_catalog(question) and (
+            kind in {"group", "general", "catalog"}
+            or (kind == "stat" and (not op or op == "group"))
+        ):
+            out.append({"action": "catalog"})
+            continue
+        if (
+            is_group
+            and words
+            and not wants_product_catalog(question)
+            and not any(
+                marker in q
+                for marker in (
+                    "по заказчик",
+                    "по клиент",
+                    "по менеджер",
+                    "по ответственн",
+                    "по подразделен",
+                    "по отдел",
+                )
             )
         ):
             out.append({**action, "action": "entity", "query": action.get("query") or question})
+            continue
+        if kind == "group":
+            out.append({**action, "action": "stat", "operation": op or "group"})
+            continue
+        if kind == "stat" and not op:
+            if wants_product_catalog(question):
+                out.append({**action, "action": "catalog"})
+            else:
+                out.append({**action, "action": "general"})
             continue
         if kind == "help" and not _wants_help(q):
             out.append({**action, "action": "general"})
@@ -345,10 +371,24 @@ def _execute_actions(
             result = _exec_general(df, action, file_context=file_context)
         elif kind == "help":
             result = _help_answer(df, file_context=file_context)
+        elif kind == "catalog":
+            result = exec_product_catalog(df, question)
         else:
             if kind == "insights":
                 action["operation"] = "insights"
-            result = _exec_stat(df, action)
+            elif kind == "group":
+                action["operation"] = "group"
+            if not action.get("operation"):
+                if wants_product_catalog(question, df):
+                    result = exec_product_catalog(df, question)
+                else:
+                    result = _exec_general(
+                        df,
+                        {"action": "general", "question": question},
+                        file_context=file_context,
+                    )
+            else:
+                result = _exec_stat(df, action)
 
         if not answers or result["answer"] != answers[-1]:
             answers.append(result["answer"])
@@ -436,6 +476,18 @@ def handle_question(
         result = exec_order_lookup(df, question)
         return {"answer": result["answer"], "charts": []}
 
+    if wants_quarter_deals(question, df) or wants_department_deals(question, df) or wants_period_deals(question, df):
+        result = exec_quarter_deals(df, question)
+        return {"answer": result["answer"], "charts": []}
+
+    if wants_entity_metrics(question, df):
+        result = exec_entity_metrics(df, question)
+        return {"answer": result["answer"], "charts": []}
+
+    if wants_product_catalog(question, df):
+        result = exec_product_catalog(df, question)
+        return {"answer": result["answer"], "charts": []}
+
     if wants_named_compare(question):
         result = exec_named_compare(df, question)
         return {"answer": result["answer"], "charts": []}
@@ -448,10 +500,6 @@ def handle_question(
         result = _exec_general(
             df, {"action": "general", "question": question}, file_context=file_context
         )
-        return {"answer": result["answer"], "charts": []}
-
-    if wants_entity_metrics(question, df):
-        result = exec_entity_metrics(df, question)
         return {"answer": result["answer"], "charts": []}
 
     keyword_compound = _keyword_compound_actions(question)

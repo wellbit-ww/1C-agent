@@ -192,3 +192,73 @@ class TestRender:
         tiles = result["tabs"][0]["tiles"]
         assert "error" in tiles[0]
         assert "plotly_json" in tiles[1]
+
+
+class TestDealsPivot:
+    def test_quarter_department_table(self):
+        df = pd.DataFrame(
+            {
+                "подразделение": [
+                    "СИОиАПЛиС",
+                    "СТО",
+                    "СИОиАПЛиС",
+                    "СМЭ",
+                    "СТО",
+                    "СООК",
+                ],
+                "дата начала сделки": [
+                    "10.01.2025",
+                    "15.01.2025",
+                    "01.04.2025",
+                    "10.04.2025",
+                    "01.01.2026",
+                    "20.01.2026",
+                ],
+            }
+        )
+        spec = DashboardSpec(
+            tabs=[
+                Tab(
+                    title="Сделки",
+                    tiles=[
+                        Tile(
+                            title="Сделки по кварталам и подразделениям",
+                            chart_type="table",
+                            source={"kind": "pivot", "group_semantic": "department", "period": "quarter"},
+                            agg="count",
+                            top_n=30,
+                            sort="none",
+                        )
+                    ],
+                )
+            ]
+        )
+        tile = render_spec(df, spec)["tabs"][0]["tiles"][0]
+        assert "error" not in tile
+        table = tile["table"]
+        assert "1 кв 2025" in table["columns"]
+        assert "2 кв 2025" in table["columns"]
+        assert "2025" in table["columns"]
+        assert "1 кв 2026" in table["columns"]
+        labels = [row["label"] for row in table["rows"]]
+        assert labels == ["СИОиАПЛиС", "СТО", "СМЭ", "СООК"]
+        by_name = {row["label"]: dict(zip(table["columns"], row["values"])) for row in table["rows"]}
+        assert by_name["СИОиАПЛиС"]["1 кв 2025"] == 1
+        assert by_name["СИОиАПЛиС"]["2 кв 2025"] == 1
+        assert by_name["СИОиАПЛиС"]["2025"] == 2
+        assert by_name["СТО"]["1 кв 2026"] == 1
+        totals = dict(zip(table["columns"], table["totals"]))
+        assert totals["1 кв 2025"] == 2
+        assert totals["2026"] == 2
+
+    def test_sales_default_starts_with_deals(self, sales_df):
+        from services.report_profiles.sales_profile import build_sales_dashboard_spec
+
+        spec = build_sales_dashboard_spec(sales_df)
+        assert spec.tabs[0].title == "Сделки"
+        rendered = render_spec(sales_df, spec)
+        deals = rendered["tabs"][0]["tiles"]
+        assert deals[0]["chart_type"] == "table"
+        assert "1 кв" in " ".join(deals[0]["table"]["columns"])
+        assert deals[1]["chart_type"] == "pie"
+        assert "plotly_json" in deals[1]

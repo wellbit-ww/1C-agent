@@ -67,7 +67,7 @@ def test_dashboard_has_working_tiles(filename):
         tile
         for tab in rendered["tabs"]
         for tile in tab["tiles"]
-        if "plotly_json" in tile
+        if "plotly_json" in tile or tile.get("table")
     ]
     assert ok, f"все тайлы с ошибкой: {filename} {rendered}"
 
@@ -76,4 +76,10 @@ def test_sales_pipeline_unchanged(sales_df):
     assert detect_report_type(sales_df, filename="Этапы продаж.xlsx") == "sales_pipeline"
     _, profile = get_profile_for_df(sales_df, filename="Этапы продаж.xlsx")
     spec = profile.get_dashboard_spec(sales_df)
-    assert [t.title for t in spec.tabs] == ["Воронка", "Менеджеры", "Клиенты"]
+    assert [t.title for t in spec.tabs] == ["Сделки", "Воронка", "Менеджеры", "Клиенты"]
+    assert spec.tabs[0].tiles[0].chart_type == "table"
+    rendered = render_spec(sales_df, spec)
+    table_tile = rendered["tabs"][0]["tiles"][0]
+    assert table_tile["chart_type"] == "table"
+    assert table_tile["table"]["rows"]
+    assert table_tile["table"]["columns"]

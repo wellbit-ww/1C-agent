@@ -165,7 +165,12 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
             )
         }
 
-    return {"answer": "Не удалось выполнить операцию."}
+    return {
+        "answer": (
+            "Не понял, что посчитать. Уточните: сколько строк, сумму, "
+            "топ заказчиков или какие изделия заказали."
+        )
+    }
 
 
 def _exec_chart(df: pd.DataFrame, action: dict) -> dict:

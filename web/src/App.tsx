@@ -5,7 +5,7 @@ import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
-import type { ChatMessage, Dashboard, DashSpec, FileContext, Report, ReportChart } from "./types";
+import type { ChatMessage, Dashboard, DashSpec, FileContext, PivotTable, Report, ReportChart } from "./types";
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -20,6 +20,100 @@ const TYPE_NAMES: Record<string, string> = {
 
 function typeName(t?: string) {
   return TYPE_NAMES[t ?? ""] ?? "Отчёт";
+}
+
+function formatPivotNumber(value: number | null | undefined) {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  const n = Number(value);
+  if (Number.isInteger(n)) return n.toLocaleString("ru-RU");
+  return n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+}
+
+function isYearTotalColumn(name: string) {
+  return /^\d{4}$/.test(String(name).trim());
+}
+
+function PivotTableView({ table }: { table: PivotTable }) {
+  const spans = table.year_spans ?? [];
+  const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
+  return (
+    <div className="max-h-[28rem] overflow-auto rounded-lg border border-line">
+      <table className="min-w-full border-collapse text-right text-xs">
+        <thead className="sticky top-0 z-10 bg-panel">
+          {hasYears && (
+            <tr className="text-zinc-400">
+              <th
+                rowSpan={2}
+                className="sticky left-0 z-20 border-b border-r border-line bg-panel px-3 py-1.5 text-left font-medium text-zinc-300"
+              >
+                {table.index_label || "Подразделение"}
+              </th>
+              {spans.map((span) => (
+                <th
+                  key={span.label}
+                  colSpan={span.count}
+                  className="border-b border-line px-2 py-1.5 text-center font-semibold text-zinc-200"
+                >
+                  {span.label}
+                </th>
+              ))}
+            </tr>
+          )}
+          <tr className="text-zinc-500">
+            {!hasYears && (
+              <th className="sticky left-0 z-20 border-b border-r border-line bg-panel px-3 py-1.5 text-left font-medium text-zinc-300">
+                {table.index_label || "Подразделение"}
+              </th>
+            )}
+            {table.columns.map((col) => (
+              <th
+                key={col}
+                className={`border-b border-line px-2 py-1.5 font-medium whitespace-nowrap ${
+                  isYearTotalColumn(col) ? "text-zinc-200" : ""
+                }`}
+              >
+                {hasYears && isYearTotalColumn(col) ? col : hasYears ? col.replace(/\s+\d{4}$/, "") : col}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {table.rows.map((row) => (
+            <tr key={row.label} className="border-t border-line">
+              <th className="sticky left-0 bg-card px-3 py-1.5 text-left font-medium text-zinc-200">
+                {row.label}
+              </th>
+              {table.columns.map((col, i) => (
+                <td
+                  key={`${row.label}-${col}`}
+                  className={`px-2 py-1.5 tabular-nums ${
+                    isYearTotalColumn(col) ? "font-medium text-zinc-100" : "text-zinc-300"
+                  }`}
+                >
+                  {formatPivotNumber(row.values[i])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+        {table.totals && table.totals.length > 0 && (
+          <tfoot>
+            <tr className="border-t border-line bg-panel font-medium">
+              <th className="sticky left-0 bg-panel px-3 py-1.5 text-left text-zinc-100">Итого</th>
+              {table.totals.map((value, i) => (
+                <td
+                  key={`total-${table.columns[i] ?? i}`}
+                  className="px-2 py-1.5 tabular-nums text-accent"
+                >
+                  {formatPivotNumber(value)}
+                </td>
+              ))}
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
 }
 
 type View = "dash" | "report";
@@ -557,7 +651,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          }`}
+                          } ${tile.table ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex items-start justify-between gap-2">
                             <div className="text-sm font-medium">{tile.title}</div>
@@ -590,6 +684,8 @@ export function App() {
                           </div>
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
+                          ) : tile.table ? (
+                            <PivotTableView table={tile.table} />
                           ) : tile.plotly_json ? (
                             <PlotChart json={tile.plotly_json} />
                           ) : null}

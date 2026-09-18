@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { PlotChart } from "./PlotChart";
 import type { ChatMessage, ReportChart } from "./types";
 
@@ -19,6 +19,30 @@ const FALLBACK: Record<string, string[]> = {
 };
 
 const DEFAULT_CHIPS = ["Сколько строк в таблице?", "Какие колонки есть?", "Основные выводы"];
+
+function ChatMarkdown({ text }: { text: string }) {
+  const nodes: ReactNode[] = [];
+  const re = /\*\*(.+?)\*\*/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) {
+      nodes.push(text.slice(last, match.index));
+    }
+    nodes.push(
+      <strong key={key} className="font-semibold text-zinc-50">
+        {match[1]}
+      </strong>,
+    );
+    key += 1;
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) {
+    nodes.push(text.slice(last));
+  }
+  return <>{nodes}</>;
+}
 
 type Props = {
   disabled: boolean;
@@ -126,7 +150,7 @@ export function ChatPanel({
                   : "rounded-2xl rounded-tl-sm bg-card px-3 py-2 text-sm whitespace-pre-wrap text-zinc-200"
               }
             >
-              {msg.content}
+              {msg.role === "assistant" ? <ChatMarkdown text={msg.content} /> : msg.content}
             </div>
             {msg.charts?.map((chart, ci) =>
               chart.plotly_json ? (

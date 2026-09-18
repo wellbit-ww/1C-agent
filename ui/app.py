@@ -267,7 +267,7 @@ def _render_charts_grid(charts: list) -> None:
                     st.plotly_chart(fig, use_container_width=True)
 
 
-_CHART_TYPES = ["bar", "hbar", "pie", "line", "area"]
+_CHART_TYPES = ["bar", "hbar", "pie", "line", "area", "table"]
 _AGGS = ["sum", "mean", "count"]
 _UNITS = ["auto", "rub", "k", "mln", "mlrd"]
 
@@ -468,6 +468,18 @@ def _render_tabs(tabs: list) -> None:
                         st.markdown(f"**{tile['title']}**")
                         if "error" in tile:
                             st.warning(f"Не удалось построить: {tile['error']}")
+                        elif tile.get("table"):
+                            data = tile["table"]
+                            import pandas as pd
+
+                            frame = pd.DataFrame(
+                                [row.get("values", []) for row in data.get("rows", [])],
+                                index=[row.get("label", "") for row in data.get("rows", [])],
+                                columns=data.get("columns", []),
+                            )
+                            if data.get("totals"):
+                                frame.loc["Итого"] = data["totals"]
+                            st.dataframe(frame, use_container_width=True)
                         elif "plotly_json" in tile:
                             fig = pio.from_json(tile["plotly_json"])
                             st.plotly_chart(fig, use_container_width=True)

@@ -153,7 +153,6 @@ _CHART_ALIASES = {
     "donut": "pie",
     "doughnut": "pie",
     "scatter": "bar",
-    "table": "bar",
     "kpi": "bar",
     "horizontalbar": "hbar",
     "horizontal_bar": "hbar",
@@ -172,6 +171,9 @@ _KIND_ALIASES = {
     "time": "period",
     "timeseries": "period",
     "trend": "period",
+    "pivot": "pivot",
+    "crosstab": "pivot",
+    "сводн": "pivot",
 }
 
 _AGG_ALIASES = {
@@ -182,9 +184,9 @@ _AGG_ALIASES = {
     "size": "count",
 }
 
-_VALID_CHARTS = {"bar", "hbar", "pie", "line", "area"}
+_VALID_CHARTS = {"bar", "hbar", "pie", "line", "area", "table"}
 _VALID_AGGS = {"sum", "mean", "count"}
-_VALID_KINDS = {"group", "columns_pattern", "named_columns", "period", "current_stage"}
+_VALID_KINDS = {"group", "columns_pattern", "named_columns", "period", "current_stage", "pivot"}
 _VALID_PERIODS = {"month", "quarter", "year"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
 _VALID_SORTS = {"desc", "asc", "none"}
@@ -232,6 +234,8 @@ def _normalize_chart(value) -> str:
         return v
     if v in _CHART_ALIASES:
         return _CHART_ALIASES[v]
+    if "table" in v or "pivot" in v or "свод" in v:
+        return "table"
     if "pie" in v or "donut" in v:
         return "pie"
     if "area" in v:
@@ -277,6 +281,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
     if kind not in _VALID_KINDS:
         if "current" in kind_raw or "funnel" in kind_raw or "ворон" in kind_raw:
             kind = "current_stage"
+        elif "pivot" in kind_raw or "свод" in kind_raw or chart == "table":
+            kind = "pivot"
         elif source.get("column_names"):
             kind = "named_columns"
         elif source.get("columns_pattern"):
@@ -285,6 +291,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             kind = "period"
         else:
             kind = "group"
+    if chart == "table":
+        kind = "pivot"
 
     src: dict = {"kind": kind}
     if kind in ("columns_pattern", "current_stage"):
@@ -317,6 +325,22 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         if len(resolved) < 2:
             return None
         src["column_names"] = resolved[:12]
+    elif kind == "pivot":
+        group_column = _best_column(df, source.get("group_column"))
+        if group_column:
+            src["group_column"] = group_column
+        elif source.get("group_semantic"):
+            src["group_semantic"] = source["group_semantic"]
+        else:
+            src["group_semantic"] = "department"
+        period = str(source.get("period") or "quarter").lower()
+        src["period"] = period if period in _VALID_PERIODS else "quarter"
+        value_column = _best_column(df, source.get("value_column"))
+        if value_column:
+            src["value_column"] = value_column
+        if source.get("value_semantic"):
+            src["value_semantic"] = source["value_semantic"]
+        chart = "table"
     elif kind == "period":
         period = str(source.get("period") or "month").lower()
         src["period"] = period if period in _VALID_PERIODS else "month"
@@ -341,7 +365,11 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         if source.get("value_semantic"):
             src["value_semantic"] = source["value_semantic"]
 
-    agg = _AGG_ALIASES.get(str(tile.get("agg") or "sum").lower(), str(tile.get("agg") or "sum").lower())
+    default_agg = "count" if kind == "pivot" else "sum"
+    agg = _AGG_ALIASES.get(
+        str(tile.get("agg") or default_agg).lower(),
+        str(tile.get("agg") or default_agg).lower(),
+    )
     if agg not in _VALID_AGGS:
         agg = "sum"
     unit = str(tile.get("unit") or "auto").lower()

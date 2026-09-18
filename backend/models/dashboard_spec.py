@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-ChartType = Literal["bar", "hbar", "pie", "line", "area"]
+ChartType = Literal["bar", "hbar", "pie", "line", "area", "table"]
 AggType = Literal["sum", "mean", "count"]
 PeriodType = Literal["month", "quarter", "year"]
 UnitType = Literal["auto", "rub", "k", "mln", "mlrd"]
@@ -22,10 +22,11 @@ class TileSource(BaseModel):
     named_columns — сумма каждой явно названной колонки (блоки «К оплате»);
     current_stage — воронка «как в 1С»: сделка целиком на ПОСЛЕДНЕМ
     заполненном этапе (сумма сделки или число сделок);
-    period — динамика по дате.
+    period — динамика по дате;
+    pivot — таблица: категория × период (кварталы по подразделениям).
     """
 
-    kind: Literal["group", "columns_pattern", "named_columns", "period", "current_stage"]
+    kind: Literal["group", "columns_pattern", "named_columns", "period", "current_stage", "pivot"]
     group_semantic: str | None = None
     group_column: str | None = None
     value_semantic: str | None = None

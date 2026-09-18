@@ -70,6 +70,8 @@ def detect_intent(question: str):
     if any(
         marker in q
         for marker in ("по квартал", "квартал", "quarter")
+    ) and not (
+        "скольк" in q or "сделк" in q or "разбив" in q
     ):
         return "trend_quarter"
 
