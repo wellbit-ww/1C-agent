@@ -116,6 +116,86 @@ function PivotTableView({ table }: { table: PivotTable }) {
   );
 }
 
+function reportChartVerb(chart: ReportChart, removed: boolean) {
+  if (chart.table) return removed ? "убрана" : "добавлена";
+  return removed ? "убран" : "добавлен";
+}
+
+function reportChartNotice(chart: ReportChart, removed: boolean) {
+  const verb = reportChartVerb(chart, removed);
+  return removed ? `«${chart.title}» ${verb} из отчёта` : `«${chart.title}» ${verb} в отчёт`;
+}
+
+function GrowingTextarea({
+  value,
+  onChange,
+  className,
+  minHeight = 192,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  className?: string;
+  minHeight?: number;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.max(minHeight, el.scrollHeight)}px`;
+  }, [value, minHeight]);
+  return (
+    <textarea
+      ref={ref}
+      value={value}
+      rows={8}
+      onChange={(e) => onChange(e.target.value)}
+      className={`overflow-hidden ${className ?? ""}`}
+    />
+  );
+}
+
+function isNarrowViewport() {
+  return typeof window !== "undefined" && window.innerWidth <= 900;
+}
+
+const LLM_ESTIMATE_SEC: Record<string, number> = {
+  "Собираю дашборд…": 80,
+  "Правлю дашборд…": 60,
+  "Формирую отчёт…": 55,
+  "Комментарии…": 40,
+};
+
+function formatRemain(seconds: number) {
+  const min = Math.floor(seconds / 60);
+  const sec = seconds % 60;
+  if (min > 0) return `${min} мин ${sec} с`;
+  return `${sec} с`;
+}
+
+function useBusyLabel(busy: string | null) {
+  const [left, setLeft] = useState<number | null>(null);
+  useEffect(() => {
+    const total = busy ? LLM_ESTIMATE_SEC[busy] : undefined;
+    if (!busy || total == null) {
+      setLeft(null);
+      return;
+    }
+    const started = Date.now();
+    setLeft(total);
+    const id = window.setInterval(() => {
+      const elapsed = Math.floor((Date.now() - started) / 1000);
+      setLeft(Math.max(0, total - elapsed));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [busy]);
+  if (!busy) return null;
+  if (left == null) return busy;
+  const stem = busy.replace(/…$/, "");
+  if (left <= 0) return `${stem}… ещё немного`;
+  return `${stem}… ещё около ${formatRemain(left)}`;
+}
+
 type View = "dash" | "report";
 
 export function App() {
@@ -138,8 +218,10 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [chatOpen, setChatOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(() => !isNarrowViewport());
   const [chartEditor, setChartEditor] = useState<ChartEditorMode | null>(null);
+  const [specBackup, setSpecBackup] = useState<DashSpec | null>(null);
+  const busyLabel = useBusyLabel(busy);
   const fileRef = useRef<HTMLInputElement>(null);
   const fileIdRef = useRef<string | null>(null);
   const restoredRef = useRef(false);
@@ -232,7 +314,7 @@ export function App() {
     restoredRef.current = true;
     const saved = readSession();
     if (!saved) return;
-    setChatOpen(saved.chatOpen);
+    setChatOpen(saved.chatOpen && !isNarrowViewport());
     setReportCharts(saved.reportCharts);
     void loadFile(saved.fileId, saved.filename, saved);
   }, [loadFile]);
@@ -283,7 +365,14 @@ export function App() {
 
   async function onGenerate(edit: boolean) {
     if (!fileId || !dashPrompt.trim()) return;
-    setBusy(edit ? "Праваю дашборд…" : "Собираю дашборд…");
+    if (!edit && (dashboard?.tabs?.length ?? 0) > 0) {
+      const ok = window.confirm(
+        "Сгенерировать дашборд заново? Текущие вкладки и закреплённые графики будут заменены. После этого можно вернуть прежний дашборд.",
+      );
+      if (!ok) return;
+    }
+    const previousSpec = dashboard?.spec ?? null;
+    setBusy(edit ? "Правлю дашборд…" : "Собираю дашборд…");
     setError(null);
     try {
       const fn = edit ? api.dashboardEdit : api.dashboardGenerate;
@@ -292,6 +381,10 @@ export function App() {
       if (patch.warning) setError(patch.warning);
       setTab(0);
       setChartEditor(null);
+      if (!edit && previousSpec) {
+        setSpecBackup(previousSpec);
+        setNotice("Дашборд собран заново. Можно вернуть прежний.");
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -319,7 +412,35 @@ export function App() {
       await api.dashboardPin(fileId, spec);
       const dash = await api.getDashboard(fileId);
       setDashboard(dash);
-      setNotice("График закреплён на дашборде");
+      setView("dash");
+      const title = String(spec.title ?? "");
+      const idx = (dash.tabs ?? []).findIndex((item) => item.tiles.some((tile) => tile.title === title));
+      if (idx >= 0) setTab(idx);
+      const tabTitle = idx >= 0 ? dash.tabs?.[idx]?.title : undefined;
+      setNotice(tabTitle ? `График закреплён на вкладке «${tabTitle}»` : "График закреплён на дашборде");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onRestoreSpec() {
+    if (!fileId || !specBackup) return;
+    setBusy("Возвращаю дашборд…");
+    setError(null);
+    try {
+      const patch = await api.dashboardSaveSpec(fileId, specBackup);
+      setDashboard((cur) => ({
+        ...(cur ?? {}),
+        ...patch,
+        tabs: patch.tabs ?? cur?.tabs,
+        spec: patch.spec ?? specBackup,
+      }));
+      setSpecBackup(null);
+      setChartEditor(null);
+      setTab(0);
+      setNotice("Прежний дашборд возвращён");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -357,9 +478,7 @@ export function App() {
     setReportCharts((cur) =>
       exists ? cur.filter((c) => c.id !== chart.id) : [...cur, chart],
     );
-    setNotice(
-      exists ? `«${chart.title}» убрана из отчёта` : `«${chart.title}» добавлена в отчёт`,
-    );
+    setNotice(reportChartNotice(chart, exists));
   }
 
   async function openReport() {
@@ -424,6 +543,7 @@ export function App() {
     setReport(null);
     setReportCharts([]);
     setChartEditor(null);
+    setSpecBackup(null);
     setView("dash");
   }
 
@@ -432,7 +552,7 @@ export function App() {
   const meta = dashboard?.metadata;
 
   return (
-    <div className="flex h-full w-full overflow-hidden">
+    <div className="relative flex h-full w-full overflow-hidden">
       <nav className="flex w-16 shrink-0 flex-col items-center gap-2 border-r border-line bg-panel py-4">
         <div className="mb-4 h-8 w-8 rounded-lg bg-accent-dim text-center text-sm leading-8 text-accent">
           1C
@@ -482,7 +602,7 @@ export function App() {
               {filename ?? "Файл не выбран"}
             </div>
             <div className="text-xs text-zinc-500">
-              {busy ?? (fileId ? typeName(dashboard?.report_type) : "Excel Agent")}
+              {busyLabel ?? (fileId ? typeName(dashboard?.report_type) : "Excel Agent")}
             </div>
           </div>
           {fileId && (
@@ -526,7 +646,7 @@ export function App() {
             onRemoveChart={(id) => {
               const item = reportCharts.find((c) => c.id === id);
               setReportCharts((cur) => cur.filter((c) => c.id !== id));
-              if (item) setNotice(`«${item.title}» убрана из отчёта`);
+              if (item) setNotice(reportChartNotice(item, true));
             }}
             onBack={() => setView("dash")}
             onPdf={() => void onPdf()}
@@ -593,6 +713,16 @@ export function App() {
                   >
                     Правка
                   </button>
+                  {specBackup && (
+                    <button
+                      type="button"
+                      className="rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent disabled:opacity-40"
+                      disabled={!!busy}
+                      onClick={() => void onRestoreSpec()}
+                    >
+                      Вернуть прежний дашборд
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="rounded-lg border border-line px-3 py-2 text-sm"
@@ -651,7 +781,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${tile.table ? "xl:col-span-2" : ""}`}
+                          } ${tile.table || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex items-start justify-between gap-2">
                             <div className="text-sm font-medium">{tile.title}</div>
@@ -665,7 +795,7 @@ export function App() {
                                   Настроить
                                 </button>
                               )}
-                              {tile.plotly_json && (
+                              {(tile.plotly_json || tile.table) && (
                                 <button
                                   type="button"
                                   className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
@@ -673,7 +803,8 @@ export function App() {
                                     toggleReportChart({
                                       id,
                                       title: tile.title,
-                                      plotly_json: tile.plotly_json!,
+                                      plotly_json: tile.plotly_json,
+                                      table: tile.table,
                                     })
                                   }
                                 >
@@ -778,14 +909,14 @@ export function App() {
       <ChatPanel
         className={
           chatOpen
-            ? "flex h-full w-[400px] shrink-0 flex-col border-l border-line bg-panel"
+            ? "flex h-full w-[400px] shrink-0 flex-col border-l border-line bg-panel max-[900px]:absolute max-[900px]:top-0 max-[900px]:right-0 max-[900px]:z-30 max-[900px]:h-full max-[900px]:w-[min(22rem,calc(100%-4rem))] max-[900px]:shadow-2xl"
             : "hidden"
         }
         disabled={!fileId}
         reportType={dashboard?.report_type}
         ideas={ctx?.dashboard_ideas}
         messages={messages}
-        busy={!!busy}
+        busy={busy === "Отвечаю…"}
         canPin={!!tabs.length}
         reportChartIds={reportCharts.map((c) => c.id)}
         onSend={(q) => void onSend(q)}
@@ -886,10 +1017,10 @@ function ReportPane({
         {meta?.filename} · {meta?.period ?? "—"} · {meta?.rows ?? 0} строк
       </p>
       <label className="mb-1 block text-xs text-zinc-500">Резюме</label>
-      <textarea
+      <GrowingTextarea
         value={narrative}
-        onChange={(e) => onNarrative(e.target.value)}
-        className="mb-4 h-48 w-full rounded-xl border border-line bg-card p-3 text-sm outline-none focus:border-accent/60"
+        onChange={onNarrative}
+        className="mb-4 w-full rounded-xl border border-line bg-card p-3 text-sm outline-none focus:border-accent/60"
       />
       <label className="mb-1 block text-xs text-zinc-500">Выводы (по строке)</label>
       <textarea
@@ -919,7 +1050,11 @@ function ReportPane({
                     Убрать
                   </button>
                 </div>
-                <PlotChart json={chart.plotly_json} />
+                {chart.table ? (
+                  <PivotTableView table={chart.table} />
+                ) : chart.plotly_json ? (
+                  <PlotChart json={chart.plotly_json} />
+                ) : null}
               </div>
             ))}
           </div>

@@ -51,12 +51,17 @@ def build_sales_dashboard_spec(df):
         ],
     )
 
+    mgr_col = resolve_semantic_column(df, "", semantic="manager", dtype="categorical")
+    mean_line = None
+    if mgr_col and sum_col:
+        mean_line = float(df.groupby(mgr_col)[sum_col].sum().mean())
+
     managers_tab = Tab(
         title="Менеджеры",
         tiles=[
             Tile(
                 title="Средний чек по менеджерам",
-                chart_type="bar",
+                chart_type="hbar",
                 source=TileSource(
                     kind="group", group_semantic="manager", value_semantic="revenue"
                 ),
@@ -66,18 +71,18 @@ def build_sales_dashboard_spec(df):
             ),
             Tile(
                 title="Сумма по менеджерам",
-                chart_type="bar",
+                chart_type="hbar",
                 source=TileSource(
                     kind="group", group_semantic="manager", value_semantic="revenue"
                 ),
                 agg="sum",
                 top_n=15,
                 unit="auto",
-                target_line=total,
+                target_line=mean_line,
             ),
             Tile(
                 title="Продажи по менеджерам",
-                chart_type="bar",
+                chart_type="hbar",
                 source=TileSource(kind="group", group_semantic="manager"),
                 agg="count",
                 top_n=15,

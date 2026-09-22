@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from services.chat_answers import format_chat_number, is_money_column
 from services.chat_lookup import (
     _WORD_RE,
     _norm,
@@ -22,7 +23,6 @@ from services.chat_lookup import (
     match_entity_slice,
     wants_entity_metrics,
 )
-from services.insights_service import _format_number
 from services.report_profiles.deficit_profile import (
     _col_sum,
     deficit_kpis,
@@ -1186,7 +1186,7 @@ def _entity_metric_lines(frame: pd.DataFrame, layout) -> list[str]:
     for label, col in pairs:
         if not col:
             continue
-        lines.append(f"{label} («{col}»): {_format_number(_col_sum(frame, col))}")
+        lines.append(f"{label} («{col}»): {format_chat_number(_col_sum(frame, col), money=True)}")
     return lines
 
 
@@ -1205,6 +1205,7 @@ def exec_named_compare(df: pd.DataFrame, question: str) -> dict:
 
     layout = detect_deficit_money_layout(df)
     from services.chat_answers import (
+        format_chat_number,
         format_metric_line,
         layout_values,
         money_gap_note,
@@ -1214,6 +1215,7 @@ def exec_named_compare(df: pd.DataFrame, question: str) -> dict:
     blocks: list[str] = ["**Сравнение**"]
     unpaid_best: tuple[str, float] | None = None
     order_best: tuple[str, float] | None = None
+    metric_best: tuple[str, str, float] | None = None
     for item in slices[:4]:
         frame = item["frame"]
         name = item["name"]
@@ -1238,6 +1240,24 @@ def exec_named_compare(df: pd.DataFrame, question: str) -> dict:
             if kind == "order":
                 if order_best is None or value > order_best[1]:
                     order_best = (name, value)
+        if not used_cols:
+            from services.chat_answers import (
+                count_breakdown_answer,
+                format_chat_number,
+                is_money_column,
+                slice_metric,
+            )
+
+            metric = slice_metric(df, frame, question)
+            if metric:
+                col, value = metric
+                blocks.append(
+                    f"• {col}: **{format_chat_number(value, money=is_money_column(col))}**"
+                )
+                if metric_best is None or value > metric_best[2]:
+                    metric_best = (name, col, value)
+            else:
+                blocks.append(count_breakdown_answer(frame, f"«{name}»"))
         gap = money_gap_note(frame, used_cols)
         if gap:
             blocks.append(gap)
@@ -1245,13 +1265,18 @@ def exec_named_compare(df: pd.DataFrame, question: str) -> dict:
     if unpaid_best:
         notes.append(
             f"Больше неоплаченный остаток у «{unpaid_best[0]}» "
-            f"({_format_number(unpaid_best[1])} руб.)."
+            f"({format_chat_number(unpaid_best[1], money=True)})."
         )
     if order_best:
         title = money_title("order", layout.order_sum or "")
         notes.append(
             f"Больше {title.lower()} у «{order_best[0]}» "
-            f"({_format_number(order_best[1])} руб.)."
+            f"({format_chat_number(order_best[1], money=True)})."
+        )
+    if metric_best:
+        notes.append(
+            f"Больше «{metric_best[1]}» у «{metric_best[0]}» "
+            f"({format_chat_number(metric_best[2], money=is_money_column(metric_best[1]))})."
         )
     if notes:
         blocks.append("")
@@ -1269,7 +1294,7 @@ def _top_lines(df: pd.DataFrame, group_col: str, value_col: str, n: int = 5) -> 
 
     items = _top_sums(df, group_col, value_col, n=n)
     return [
-        f"{i}. {name} — {_format_number(value)}"
+        f"{i}. {name} — {format_chat_number(value, money=True)}"
         for i, (name, value) in enumerate(items, 1)
     ]
 
@@ -1353,7 +1378,7 @@ def _period_slice(df: pd.DataFrame, question: str) -> str:
     col = data.get("value_column") or ""
     lines = [f"Срезы по {label}" + (f" («{col}»)" if col else "") + ":"]
     for name, value in items:
-        lines.append(f"- {name}: {_format_number(value)}")
+        lines.append(f"- {name}: {format_chat_number(value, money=True)}")
     return "\n".join(lines)
 
 

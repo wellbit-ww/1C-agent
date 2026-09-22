@@ -54,7 +54,19 @@ class ReportRequest(BaseModel):
 
 class ReportChartIn(BaseModel):
     title: str = Field(default="", max_length=200)
-    plotly_json: str = Field(min_length=2, max_length=150_000)
+    plotly_json: str | None = Field(default=None, max_length=150_000)
+    table: dict | None = None
+
+    @model_validator(mode="after")
+    def _need_chart_or_table(self):
+        json_text = (self.plotly_json or "").strip()
+        if json_text:
+            self.plotly_json = json_text
+            return self
+        self.plotly_json = None
+        if isinstance(self.table, dict) and (self.table.get("columns") or self.table.get("rows")):
+            return self
+        raise ValueError("Нужен график или таблица")
 
 
 class ReportPdfRequest(BaseModel):

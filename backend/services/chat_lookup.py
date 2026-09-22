@@ -10,7 +10,7 @@ from datetime import datetime, date
 
 import pandas as pd
 
-from services.insights_service import _format_number
+from services.chat_answers import format_chat_number
 
 _ORDER_WORD = re.compile(r"\bзаказ(?:а|у|ом|е|ы|ов)?\b", re.I)
 _CODE_RE = re.compile(
@@ -592,11 +592,15 @@ def exec_entity_metrics(df: pd.DataFrame, question: str) -> dict:
 
         result = data_tools.get_sum(frame, question)
         if "error" in result:
-            return {"answer": f"Не удалось посчитать: {result['error']}"}
+            from services.chat_answers import count_breakdown_answer
+
+            return {"answer": count_breakdown_answer(frame, who)}
+        from services.chat_answers import format_chat_number
+
         return {
             "answer": (
                 f"Сумма «{result['column']}» у {who} "
-                f"({len(frame)} строк): **{_format_number(result['value'])}**"
+                f"({len(frame)} строк): **{format_chat_number(result['value'], money=True)}**"
             )
         }
 
@@ -800,11 +804,17 @@ def _fmt_cell(value) -> str:
     if isinstance(value, bool):
         return "да" if value else "нет"
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return _format_number(float(value))
+        from services.chat_answers import format_chat_number
+
+        return format_chat_number(float(value))
     text = str(value).strip()
     if re.fullmatch(r"-?\d+(?:[.,]\d+)?", text.replace(" ", "").replace("\xa0", "")):
         try:
-            return _format_number(float(text.replace(" ", "").replace("\xa0", "").replace(",", ".")))
+            from services.chat_answers import format_chat_number
+
+            return format_chat_number(
+                float(text.replace(" ", "").replace("\xa0", "").replace(",", "."))
+            )
         except ValueError:
             return text
     return text

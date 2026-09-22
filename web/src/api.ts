@@ -131,7 +131,8 @@ export async function downloadPdf(
       comment: extras.comment,
       report_charts: extras.report_charts?.map((c) => ({
         title: c.title,
-        plotly_json: c.plotly_json,
+        plotly_json: c.plotly_json || undefined,
+        table: c.table || undefined,
       })),
     }),
   });

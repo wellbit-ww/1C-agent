@@ -126,19 +126,36 @@ def detect_deficit_money_layout(df: pd.DataFrame) -> DeficitMoneyLayout:
             continue
         if "валют" in name:
             continue
-        if any(x in name for x in ("оплач", "долг", "к оплате", "остаток", "дефицит")):
+        if any(
+            x in name
+            for x in (
+                "оплач",
+                "долг",
+                "к оплате",
+                "остаток",
+                "дефицит",
+                "очередн",
+                "платеж",
+                "этап",
+                "предоплат",
+            )
+        ):
             continue
         if "сумма" not in name and "стоим" not in name:
             continue
+        if "заказчик" in name:
+            continue
         score = 0
-        if "руб" in name or "₽" in name:
-            score += 4
         if "заказ" in name:
-            score += 3
+            score += 6
         if "всего" in name:
-            score += 2
+            score += 6
+        if "руб" in name or "₽" in name:
+            score += 1
+        if name in {"сумма", "сумма (руб)", "сумма руб"}:
+            score -= 4
         if name.endswith("_1") or name.endswith("_2"):
-            score -= 3
+            score -= 8
         order_ranked.append((score, col))
     if order_ranked:
         order_ranked.sort(key=lambda item: (-item[0], list(df.columns).index(item[1])))
@@ -196,6 +213,17 @@ def deficit_kpis(df: pd.DataFrame) -> list[dict]:
             }
         )
     return kpis
+
+
+def _money_group_title(layout: DeficitMoneyLayout, money: str, unpaid_title: str, group_ru: str) -> str:
+    if money == layout.unpaid:
+        return unpaid_title
+    name = _norm(money)
+    if "очередн" in name or "платеж" in name:
+        return f"Очередной платёж по {group_ru}"
+    if money == layout.order_sum:
+        return f"Сумма заказов по {group_ru}"
+    return f"{money} по {group_ru}"
 
 
 def _named_tile(title: str, columns: list[str], chart_type: str = "bar") -> Tile:
@@ -267,7 +295,9 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
     if money and client_col:
         payments.append(
             _group_tile(
-                "Неоплаченный остаток по заказчикам",
+                _money_group_title(
+                    layout, money, "Неоплаченный остаток по заказчикам", "заказчикам"
+                ),
                 "client",
                 client_col,
                 money,
@@ -275,10 +305,13 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
                 top_n=12,
             )
         )
-    if money and dept_col:
+    dept_varied = bool(dept_col) and int(df[dept_col].dropna().astype(str).nunique()) >= 2
+    if money and dept_varied:
         payments.append(
             _group_tile(
-                "Остаток по подразделениям",
+                _money_group_title(
+                    layout, money, "Остаток по подразделениям", "подразделениям"
+                ),
                 "department",
                 dept_col,
                 money,
@@ -291,7 +324,9 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
     if money and mgr_col:
         structure.append(
             _group_tile(
-                "Остаток по ответственным",
+                _money_group_title(
+                    layout, money, "Остаток по ответственным", "ответственным"
+                ),
                 "manager",
                 mgr_col,
                 money,
@@ -310,7 +345,7 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
                 top_n=12,
             )
         )
-    if dept_col:
+    if dept_varied:
         structure.append(
             Tile(
                 title="Количество заказов по подразделениям",

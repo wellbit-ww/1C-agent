@@ -101,17 +101,11 @@ class TestFunnel:
         result = render_spec(sales_df, DashboardSpec(tabs=[Tab(title="T", tiles=[tile])]))
         tile_out = result["tabs"][0]["tiles"][0]
         attributed = tile_out["stats"]["total"]
-        sum_cols = [c for c in sales_df.columns if str(c).endswith("(сумма)")]
-        has_stage = (
-            sales_df[sum_cols]
-            .apply(pd.to_numeric, errors="coerce")
-            .fillna(0)
-            .ne(0)
-            .any(axis=1)
-        )
-        expected = float(sales_df.loc[has_stage, "сумма по сделке"].sum())
+        fig = json.loads(tile_out["plotly_json"])
+        labels = list(fig["data"][0]["y"])
+        assert "Не распределено" in labels
+        expected = float(pd.to_numeric(sales_df["сумма по сделке"], errors="coerce").sum())
         assert attributed == pytest.approx(expected, rel=0.001)
-        assert expected < float(sales_df["сумма по сделке"].sum())
 
     def test_current_stage_not_equal_to_column_sum_when_cumulative(self):
         df = pd.DataFrame(

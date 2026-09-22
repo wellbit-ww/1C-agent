@@ -1,7 +1,10 @@
+import datetime
 import re
+import warnings
 import zipfile
 from xml.etree import ElementTree as ET
 
+import numpy as np
 import openpyxl
 import pandas as pd
 
@@ -101,9 +104,74 @@ _AMOUNT_NAME_MARKERS = (
 )
 
 
+_DATE_NAME_MARKERS = ("дата", "срок")
+
+
+def _is_date_name(name) -> bool:
+    lower = str(name).lower()
+    return any(marker in lower for marker in _DATE_NAME_MARKERS)
+
+
+def _is_datetime_value(value) -> bool:
+    return isinstance(
+        value, (datetime.datetime, datetime.date, pd.Timestamp, np.datetime64)
+    )
+
+
+def _to_datetime_series(series: pd.Series) -> pd.Series:
+    """datetime / Excel serial / timestamp-int → pandas datetime, NaT без int64.min."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return pd.to_datetime(series, errors="coerce")
+
+    sample = series.dropna().head(30)
+    if not sample.empty and all(_is_datetime_value(v) for v in sample):
+        return pd.to_datetime(series, errors="coerce")
+
+    numeric = pd.to_numeric(series, errors="coerce")
+    numeric = numeric.mask(numeric <= -1e18)
+    known = numeric.dropna()
+    if known.empty:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return pd.to_datetime(series, errors="coerce", dayfirst=True)
+
+    ns_ratio = float((known.abs() >= 1e17).mean())
+    us_ratio = float(((known.abs() >= 1e14) & (known.abs() < 1e17)).mean())
+    serial_ratio = float(((known >= 20000) & (known < 100000)).mean())
+    if ns_ratio >= 0.5:
+        return pd.to_datetime(numeric, unit="ns", errors="coerce")
+    if us_ratio >= 0.5:
+        return pd.to_datetime(numeric, unit="us", errors="coerce")
+    if serial_ratio >= 0.5:
+        return pd.to_datetime(numeric, unit="D", origin="1899-12-30", errors="coerce")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return pd.to_datetime(series, errors="coerce", dayfirst=True)
+
+
+def _coerce_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for col in list(df.columns):
+        if not (
+            _is_date_name(col)
+            or pd.api.types.is_datetime64_any_dtype(df[col])
+        ):
+            sample = df[col].dropna().head(20)
+            if sample.empty or not all(_is_datetime_value(v) for v in sample):
+                continue
+        converted = _to_datetime_series(df[col])
+        if int(converted.notna().sum()) >= 1:
+            df[col] = converted
+    return df
+
+
 def _force_numeric_amounts(df: pd.DataFrame) -> pd.DataFrame:
-    """Денежные колонки и почти-числовые object → float."""
+    """Денежные колонки и почти-числовые object → float. Даты не трогаем."""
     for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]) or _is_date_name(col):
+            continue
+        sample = df[col].dropna().head(20)
+        if not sample.empty and all(_is_datetime_value(v) for v in sample):
+            continue
         if pd.api.types.is_numeric_dtype(df[col]):
             continue
         name = str(col).lower()
@@ -115,7 +183,7 @@ def _force_numeric_amounts(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = numeric
         elif ratio >= 0.6:
             df[col] = numeric
-    return df
+    return _coerce_date_columns(df)
 
 
 def _parse_grouped_rows(rows: list[tuple[tuple, int]]) -> pd.DataFrame | None:

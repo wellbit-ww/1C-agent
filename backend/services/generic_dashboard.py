@@ -19,6 +19,8 @@ _AMOUNT_MARKERS = (
     "поступлен",
     "задолжен",
     "проект",
+    "издел",
+    "гарант",
 )
 _PREFERRED_GROUPERS = (
     ("заказчик", "клиент", "контрагент", "отправитель", "компания"),
@@ -104,21 +106,22 @@ def pick_groupers(df: pd.DataFrame) -> list[str]:
 
 
 def generic_kpis(df: pd.DataFrame) -> list[dict]:
-    kpis = [{"label": "Строк", "value": len(df)}]
     metrics = pick_metrics(df)
-    if metrics:
-        total = pd.to_numeric(df[metrics[0]], errors="coerce").sum()
-        kpis.append({"label": f"Итого «{metrics[0]}»", "value": _fmt(total)})
     groupers = pick_groupers(df)
-    if groupers:
+    kpis: list[dict] = []
+    for col in metrics[:2]:
+        total = pd.to_numeric(df[col], errors="coerce").sum()
+        kpis.append({"label": str(col), "value": _fmt(total)})
+    for col in groupers[:2]:
         kpis.append(
             {
-                "label": f"Уникальных «{groupers[0]}»",
-                "value": int(df[groupers[0]].nunique()),
+                "label": f"Уникальных «{col}»",
+                "value": int(df[col].nunique()),
             }
         )
-    kpis.append({"label": "Колонок", "value": len(df.columns)})
-    return kpis
+    if not kpis:
+        kpis.append({"label": "Записей", "value": len(df)})
+    return kpis[:4]
 
 
 def _fmt(value: float) -> str:
@@ -164,7 +167,7 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
     )
 
 
-def build_generic_spec(df: pd.DataFrame) -> DashboardSpec | None:
+def build_generic_spec(df: pd.DataFrame, kind: str | None = None) -> DashboardSpec | None:
     metrics = pick_metrics(df)
     groupers = pick_groupers(df)
     tiles: list[Tile] = []
@@ -254,7 +257,15 @@ def build_generic_spec(df: pd.DataFrame) -> DashboardSpec | None:
         tabs.append(deals)
 
     if tiles:
-        tabs.append(Tab(title="Обзор", tiles=tiles[:4]))
+        family_title = {
+            "pdo_report": "Производство",
+            "warranty": "Сервис",
+            "sales_forecast": "Прогноз",
+            "supplier_orders": "Поставщики",
+            "planned_receipts": "Поступления",
+            "incoming_requests": "Запросы",
+        }.get(kind or "", "Обзор")
+        tabs.append(Tab(title=family_title, tiles=tiles[:4]))
     elif not tabs:
         return None
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from services.insights_service import _format_number
 from services.report_profiles.deficit_profile import detect_deficit_money_layout
 
 
@@ -23,8 +22,32 @@ def money_title(kind: str, col: str) -> str:
     return "Сумма заказов"
 
 
+def is_money_column(col: str) -> bool:
+    name = str(col).lower()
+    if any(s in name for s in ("издел", "час", "штук", "кол-во", "количеств")) and not any(
+        s in name for s in ("сумм", "руб", "стоим")
+    ):
+        return False
+    return any(
+        s in name
+        for s in ("сумм", "руб", "оплат", "остат", "долг", "выручк", "стоим", "цена", "дефицит", "задолжен")
+    )
+
+
+def format_chat_number(value: float, money: bool = False) -> str:
+    """Пробелы в разрядах, запятая в дробной части; для денег — «руб.»."""
+    number = float(value)
+    if abs(number - round(number)) < 1e-9:
+        text = f"{int(round(number)):,}".replace(",", " ")
+    else:
+        text = f"{number:,.2f}".replace(",", " ").replace(".", ",")
+    if money:
+        return f"{text} руб."
+    return text
+
+
 def rub(value: float) -> str:
-    return f"{_format_number(value)} руб."
+    return format_chat_number(value, money=True)
 
 
 def money_gap_note(frame: pd.DataFrame, columns: list[str]) -> str:
@@ -104,6 +127,61 @@ def format_entity_answer(
     if gap:
         lines.append(gap)
     return "\n".join(lines)
+
+
+def count_breakdown_answer(frame: pd.DataFrame, who: str) -> str:
+    """Нет числовой метрики → счёт записей и разрез. Без служебных ошибок."""
+    from services.generic_dashboard import pick_groupers
+
+    n = len(frame)
+    lines = [f"{who} — **{n}** записей."]
+    groupers = pick_groupers(frame)
+    if groupers:
+        col = groupers[0]
+        counts = frame[col].dropna().astype(str).value_counts().head(8)
+        if not counts.empty and (len(counts) > 1 or str(counts.index[0]).strip() not in {"", "nan"}):
+            lines.append(f"По «{col}»:")
+            for name, count in counts.items():
+                lines.append(f"• {name}: {int(count)}")
+    return "\n".join(lines)
+
+
+def slice_metric(df: pd.DataFrame, frame: pd.DataFrame, question: str):
+    """Та же резолюция метрики, что у одиночного среза. None — считать записи."""
+    from services import data_tools
+    from services.generic_dashboard import pick_metrics
+
+    skip = ("час", "готовн", "процент", "приоритет")
+    prefer = ("издел", "количеств", "сумм", "выручк", "оплат", "остат", "долг", "гарант")
+
+    def score(col: str) -> int:
+        name = str(col).lower()
+        if any(s in name for s in skip) and "издел" not in name:
+            return -10
+        points = 0
+        for i, stem in enumerate(prefer):
+            if stem in name:
+                points += 30 - i
+        return points
+
+    q = (question or "").lower()
+    asked_hours = any(s in q for s in ("час", "готов", "процент"))
+    candidates = [c for c in pick_metrics(df) if c in frame.columns]
+    result = data_tools.get_sum(frame, question)
+    if "error" not in result:
+        col = str(result["column"])
+        if asked_hours or score(col) >= 0:
+            if not candidates or score(col) >= max(score(c) for c in candidates):
+                return col, float(result["value"])
+    ranked = sorted(candidates, key=score, reverse=True)
+    for col in ranked:
+        if not asked_hours and score(col) < 0:
+            continue
+        total = pd.to_numeric(frame[col], errors="coerce").sum()
+        if pd.isna(total):
+            continue
+        return str(col), float(total)
+    return None
 
 
 def report_kind_hint(file_context=None, df: pd.DataFrame | None = None) -> str:

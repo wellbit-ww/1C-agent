@@ -244,6 +244,102 @@ def chart_to_png(item: dict) -> bytes | None:
         return _mpl_png(str(plotly_json))
 
 
+def _format_pdf_number(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if abs(number - round(number)) < 1e-9:
+        return f"{int(round(number)):,}".replace(",", " ")
+    return f"{number:,.1f}".replace(",", "X").replace(".", ",").replace("X", " ")
+
+
+def _clip_pdf_cell(text: str, width_mm: float, size: float) -> str:
+    raw = str(text or "")
+    max_chars = max(4, int(width_mm / max(size * 0.32, 1.2)))
+    if len(raw) <= max_chars:
+        return raw
+    return raw[: max_chars - 1] + "…"
+
+
+def _draw_pivot_chunk(
+    pdf: _ReportPdf,
+    index_label: str,
+    columns: list[str],
+    rows: list[dict],
+    totals: list,
+    value_offset: int,
+) -> None:
+    usable = pdf.epw
+    label_w = min(46.0, max(28.0, usable * 0.22))
+    rest = max(usable - label_w, 20.0)
+    col_w = rest / max(len(columns), 1)
+    size = 7 if col_w >= 12 else 6
+    row_h = 4.8
+    header_h = 6.2
+
+    def _cell(width: float, height: float, text: str, *, align: str = "L", bold: bool = False, fill: bool = False):
+        pdf.set_font("Report", style="B" if bold else "", size=size)
+        pdf.cell(
+            width,
+            height,
+            _clip_pdf_cell(text, width, size),
+            border=1,
+            align=align,
+            fill=fill,
+        )
+
+    _need_page(pdf, header_h + row_h * 2)
+    pdf.set_fill_color(235, 240, 246)
+    pdf.set_text_color(20, 55, 110)
+    _cell(label_w, header_h, index_label or " ", bold=True, fill=True)
+    for name in columns:
+        _cell(col_w, header_h, name, align="R", bold=True, fill=True)
+    pdf.ln(header_h)
+    pdf.set_text_color(0, 0, 0)
+
+    for row in rows:
+        _need_page(pdf, row_h + 1)
+        values = list(row.get("values") or [])
+        _cell(label_w, row_h, str(row.get("label") or ""), bold=True)
+        for i, _name in enumerate(columns):
+            idx = value_offset + i
+            _cell(col_w, row_h, _format_pdf_number(values[idx] if idx < len(values) else None), align="R")
+        pdf.ln(row_h)
+
+    if totals:
+        _need_page(pdf, row_h + 2)
+        pdf.set_fill_color(232, 246, 239)
+        pdf.set_text_color(20, 55, 110)
+        _cell(label_w, row_h, "Итого", bold=True, fill=True)
+        for value in totals:
+            _cell(col_w, row_h, _format_pdf_number(value), align="R", bold=True, fill=True)
+        pdf.ln(row_h)
+        pdf.set_text_color(0, 0, 0)
+    pdf.ln(2)
+
+
+def _embed_pivot_table(pdf: _ReportPdf, table: dict) -> None:
+    columns = [str(col) for col in (table.get("columns") or [])]
+    rows = [row for row in (table.get("rows") or []) if isinstance(row, dict)]
+    totals = list(table.get("totals") or [])
+    index_label = str(table.get("index_label") or "")
+    if not columns and not rows:
+        pdf.set_font("Report", size=9)
+        pdf.multi_cell(pdf.epw, 4.5, "Таблица пуста.")
+        return
+    chunk = 10
+    span = max(len(columns), 1)
+    for start in range(0, span, chunk):
+        part = columns[start : start + chunk] or [""]
+        part_totals = totals[start : start + len(part)]
+        if start:
+            pdf.ln(1)
+        _draw_pivot_chunk(pdf, index_label, part, rows, part_totals, start)
+
+
 def _tile_caption(item: dict) -> str:
     stats = item.get("stats") or {}
     top = stats.get("top") or []
@@ -262,8 +358,12 @@ def _embed_tiles(pdf: _ReportPdf, tiles: list[dict]) -> None:
     ready = [t for t in tiles if isinstance(t, dict)][:8]
     usable = pdf.epw
     for tile in ready:
-        png = chart_to_png(tile)
-        if png:
+        table = tile.get("table")
+        has_table = isinstance(table, dict) and (table.get("columns") or table.get("rows"))
+        png = None if has_table else chart_to_png(tile)
+        if has_table:
+            h_mm = 28
+        elif png:
             _, h_mm = _png_size_mm(png, usable)
             h_mm = min(h_mm, 105)
         else:
@@ -275,6 +375,9 @@ def _embed_tiles(pdf: _ReportPdf, tiles: list[dict]) -> None:
         pdf.multi_cell(usable, 6, _soft_wrap(str(tile.get("title") or "График"), 64))
         pdf.set_text_color(0, 0, 0)
         y_img = pdf.get_y() + 1
+        if has_table:
+            _embed_pivot_table(pdf, table)
+            continue
         if tile.get("error") and not png:
             pdf.set_font("Report", size=9)
             pdf.multi_cell(usable, 4.5, _soft_wrap(f"Не построен: {tile['error']}", 72))
@@ -304,7 +407,7 @@ def _tabs_from_report(report: dict, dashboard_tabs: list | None) -> list[dict]:
     charts = [
         c
         for c in (report.get("charts") or [])
-        if isinstance(c, dict) and (c.get("plotly_json") or c.get("png"))
+        if isinstance(c, dict) and (c.get("plotly_json") or c.get("png") or c.get("table"))
     ]
     if charts:
         return [{"title": "Графики", "tiles": charts}]
@@ -510,7 +613,7 @@ def cached_report_pdf(
     spec = db_service.get_dashboard_spec(file_id) or ""
     extra = report_charts or []
     extra_key = "|".join(
-        f"{c.get('title', '')}:{hashlib.sha256(str(c.get('plotly_json') or '').encode('utf-8', 'replace')).hexdigest()[:16]}"
+        f"{c.get('title', '')}:{hashlib.sha256(str(c.get('plotly_json') or c.get('table') or '').encode('utf-8', 'replace')).hexdigest()[:16]}"
         for c in extra
     )
     key_src = "\0".join(
@@ -523,7 +626,7 @@ def cached_report_pdf(
             insights or "",
             comment or "",
             extra_key,
-            "charts-stack-v1",
+            "charts-stack-v2-tables",
         ]
     )
     key = hashlib.sha256(key_src.encode("utf-8", "replace")).hexdigest()

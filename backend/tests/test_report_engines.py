@@ -1,5 +1,6 @@
 """Прямые тесты kpi_engine, report_engine и summary_service."""
 import pandas as pd
+import pytest
 
 from services.kpi_engine import run_kpis
 from services.profile_registry import get_profile
@@ -56,6 +57,27 @@ class TestReportEngine:
         assert any("Альфа" in text or "Иванов" in text for text in insights)
         spec = engine.get_dashboard_spec(df)
         assert spec.tabs
+
+    def test_sales_won_kpi_when_status_present(self):
+        config = get_profile("sales_pipeline")
+        engine = ReportEngine(config)
+        df = pd.DataFrame(
+            {
+                "компания": ["Альфа", "Бета", "Альфа"],
+                "ответственный": ["Иванов", "Петров", "Иванов"],
+                "сумма по сделке": [100.0, 50.0, 25.0],
+                "статус": ["Выиграна", "Отменена", "В работе"],
+                "дата начала сделки": ["2024-01-01", "2024-02-01", "2024-03-01"],
+            }
+        )
+        kpis = {item["label"]: item["raw_value"] for item in engine.get_kpis(df)}
+        assert kpis["Сумма сделок в воронке"] == pytest.approx(175.0)
+        assert kpis["Выиграно"] == pytest.approx(100.0)
+        assert kpis["Доля отменённых"] == pytest.approx(100.0 / 3)
+        assert "Общая выручка" not in kpis
+        text = engine.get_summary(df)
+        assert "Сумма сделок в воронке" in text
+        assert "Выиграно" in text
 
     def test_deficit_top_department(self):
         config = get_profile("deficit_report")

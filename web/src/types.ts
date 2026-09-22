@@ -123,5 +123,6 @@ export type Report = {
 export type ReportChart = {
   id: string;
   title: string;
-  plotly_json: string;
+  plotly_json?: string;
+  table?: PivotTable;
 };

@@ -69,6 +69,52 @@ class TestDeficitKpis:
         assert kpis["Сумма заказов, руб."] == pytest.approx(350.0)
 
 
+def test_contract_deficit_uses_summa_vsego_not_stage_rub():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "examples" / (
+        "2024.03.12 Состояние дел по договорам ОАПЛИС_дефицит.xlsx"
+    )
+    if not path.exists():
+        pytest.skip("нет файла в examples/")
+    df = read_excel(str(path))
+    layout = detect_deficit_money_layout(df)
+    assert layout.order_sum == "сумма всего"
+    assert layout.unpaid == "сумма долга"
+    kpis = {item["label"]: item["raw_value"] for item in deficit_kpis(df)}
+    assert kpis["Сумма заказов, руб."] == pytest.approx(35_363_915.0)
+    assert kpis["Неоплаченный остаток"] == pytest.approx(17_495_275.0)
+    from services.report_engine import ReportEngine
+    from services.profile_registry import get_profile
+
+    summary = ReportEngine(get_profile("deficit_report")).get_summary(df)
+    assert "общий дефицит на сумму 17 495 275" in summary
+
+
+def test_sook_xls_order_sum_is_summa_zakaza_not_next_payment():
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "examples" / "Дефицит СООК_2 декабря.xls"
+    if not path.exists():
+        pytest.skip("нет файла в examples/")
+    df = read_excel(str(path))
+    layout = detect_deficit_money_layout(df)
+    assert layout.order_sum == "сумма заказа"
+    kpis = {item["label"]: item["raw_value"] for item in deficit_kpis(df)}
+    assert kpis["Сумма заказов, руб."] == pytest.approx(10_674_920.0)
+    spec = build_deficit_dashboard_spec(df)
+    titles = [tile.title for tab in spec.tabs for tile in tab.tiles]
+    assert all("Неоплаченный остаток" not in title for title in titles)
+    from services.report_engine import ReportEngine
+    from services.profile_registry import get_profile
+
+    summary = ReportEngine(get_profile("deficit_report")).get_summary(df)
+    assert "10 674 920" in summary
+    assert "общий дефицит на сумму 0" not in summary
+    insights = "\n".join(ReportEngine(get_profile("deficit_report")).get_insights(df))
+    assert "неоплаченному остатку" not in insights
+
+
 class TestDeficitDashboard:
     def test_spec_has_payment_charts(self):
         spec = build_deficit_dashboard_spec(_ks_df())

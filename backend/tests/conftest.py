@@ -11,6 +11,9 @@ if str(BACKEND_DIR) not in sys.path:
 DATA_DIR = Path(__file__).resolve().parent / "data"
 SALES_FILE = DATA_DIR / "sales.xlsx"
 DEFICIT_FILE = DATA_DIR / "deficit.xlsx"
+EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "examples"
+PDO_FILE = EXAMPLES_DIR / "Отчет ПДО 01.07.2024 к понедельнику в работе.xlsx"
+WARRANTY_FILE = EXAMPLES_DIR / "Гарантия 2026.xlsx"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -61,54 +64,20 @@ def sales_workbook():
 
 @pytest.fixture(scope="session")
 def pdo_df():
-    import pandas as pd
+    from services.excel_service import read_excel
 
-    return pd.DataFrame(
-        {
-            "наименование работ": ["Шкаф А", "Шкаф Б", "Пульт", "Рама"],
-            "статус/ приоритет": ["Завершено", "В работе", "В работе", "Завершено"],
-            "количество изделий": [2, 1, 3, 1],
-            "чел.час по плану, ссму": [5.0, 8.0, 12.0, 3.0],
-            "% готовности": [1.0, 0.4, 0.2, 1.0],
-            "ответственное подразделение": ["ССМУ", "ССМУ", "УПМ", "ПУ"],
-            "дата готовности": pd.to_datetime(
-                ["2024-06-28", "2024-07-10", "2024-07-15", "2024-06-01"]
-            ),
-            "возможен срыв сроков": ["Нет", "Да", "Нет", "Нет"],
-        }
-    )
+    if not PDO_FILE.exists():
+        pytest.skip("нет файла ПДО в examples/")
+    return read_excel(str(PDO_FILE))
 
 
 @pytest.fixture(scope="session")
 def warranty_df():
-    import pandas as pd
+    from services.excel_service import read_excel
 
-    return pd.DataFrame(
-        {
-            "№ п/п": [1, 2, 3, 4],
-            "номенклатура": ["Питатель", "Шкаф", "Двигатель", "Датчик"],
-            "срок гарантии": ["06.07.2025", "01.01.2026", "15.03.2026", "20.04.2026"],
-            "сервисный инженер": [
-                "Иванов Сергей",
-                "Иванов Сергей",
-                "Петров Иван",
-                "Петров Иван",
-            ],
-            "подразделение (продажа)": ["СТО", "СТО", "СМЭ", "СМЭ"],
-            "контрагент": [
-                "АЛАБУГА МАШИНЕРИ ООО",
-                "АЛАБУГА МАШИНЕРИ ООО",
-                "РОБЕЛ ООО",
-                "КЭАЗ АО",
-            ],
-            "заказ клиента.номер": [
-                "САУП-000111",
-                "САУП-000112",
-                "САУП-000220",
-                "САУП-000330",
-            ],
-        }
-    )
+    if not WARRANTY_FILE.exists():
+        pytest.skip("нет файла гарантии в examples/")
+    return read_excel(str(WARRANTY_FILE))
 
 
 def ollama_available() -> bool:

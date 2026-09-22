@@ -421,8 +421,30 @@ _FOLLOWUP_METRIC = (
 )
 
 
+def _strip_period_phrases(text: str) -> str:
+    from services.chat_question_pack import _MONTH_ALT
+
+    q = text or ""
+    q = re.sub(
+        rf"\b(?:в|за|с)\s+\d{{1,2}}\s+(?:{_MONTH_ALT})(?:\s+20\d{{2}})?",
+        " ",
+        q,
+        flags=re.IGNORECASE,
+    )
+    q = re.sub(
+        rf"\b(?:в|за)\s+(?:{_MONTH_ALT})(?:\s+20\d{{2}})?",
+        " ",
+        q,
+        flags=re.IGNORECASE,
+    )
+    q = re.sub(r"\b\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?", " ", q)
+    q = re.sub(r"\b20\d{2}\b", " ", q)
+    q = re.sub(r"\s+", " ", q).strip(" ?!.")
+    return q
+
+
 def _rewrite_followup(question: str, history: list[dict] | None) -> str:
-    """«А по остатку?» после вопроса про КЭАЗ → тот же срез, без роутера."""
+    """«А по остатку?» / «а за 10 июня 2025?» — то же намерение, новый уточняющий кусок."""
     if not history:
         return question
     q = (question or "").strip()
@@ -431,14 +453,28 @@ def _rewrite_followup(question: str, history: list[dict] | None) -> str:
     low = q.lower().replace("ё", "е")
     if not (low.startswith("а ") or low.startswith("а?")):
         return question
-    if not any(marker in low for marker in _FOLLOWUP_METRIC):
-        return question
     last = ""
     for message in reversed(history):
         if message.get("role") == "user":
             last = str(message.get("content") or "").strip()
             break
     if not last or last.lower().replace("ё", "е") == low:
+        return question
+    from services.chat_question_pack import _extract_period_request
+
+    follow_period = _extract_period_request(q)
+    last_is_deals = (
+        wants_period_deals(last)
+        or wants_department_deals(last)
+        or wants_quarter_deals(last)
+        or "сделк" in last.lower()
+    )
+    if follow_period is not None and last_is_deals:
+        stripped = _strip_period_phrases(last)
+        extra = re.sub(r"^а\s+", "", q, flags=re.IGNORECASE).strip(" ?!.")
+        if stripped and extra:
+            return f"{stripped} {extra}"
+    if not any(marker in low for marker in _FOLLOWUP_METRIC):
         return question
     return f"{last.rstrip(' ?!.')} {q}"
 

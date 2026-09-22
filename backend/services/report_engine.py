@@ -40,9 +40,12 @@ class ReportEngine(ReportProfile):
     def __init__(self, config: ReportConfig):
         self.config = config
 
-    def _translate_kpis(self, kpis: list[dict]) -> list[dict]:
+    def _translate_kpis(self, kpis: list[dict], df: pd.DataFrame | None = None) -> list[dict]:
+        has_won = any(k.get("name") == "won_revenue" for k in kpis)
         translations = {
-            "total_revenue": "Общая выручка",
+            "total_revenue": "Сумма сделок в воронке" if has_won else "Общая выручка",
+            "won_revenue": "Выиграно",
+            "cancelled_share": "Доля отменённых",
             "average_check": "Средний чек",
             "total_deficit": "Общий дефицит",
             "unique_customers": "Уникальные клиенты",
@@ -65,7 +68,7 @@ class ReportEngine(ReportProfile):
             from services.report_profiles.deficit_profile import deficit_kpis
 
             return deficit_kpis(df)
-        return self._translate_kpis(run_kpis(df, self.config.kpis))
+        return self._translate_kpis(run_kpis(df, self.config.kpis), df)
 
     def get_charts(self, df: pd.DataFrame) -> list[dict[str, Any]]:
         charts = []
@@ -102,7 +105,7 @@ class ReportEngine(ReportProfile):
             from services.report_profiles.deficit_profile import detect_deficit_money_layout
 
             layout = detect_deficit_money_layout(df)
-            unpaid_col = layout.unpaid or _deficit_column(df)
+            unpaid_col = layout.unpaid
             order_col = layout.order_sum
             if unpaid_col and "дефицит" in str(unpaid_col).lower() and "остаток" not in str(unpaid_col).lower():
                 unpaid_phrase = "дефициту"
@@ -170,17 +173,23 @@ class ReportEngine(ReportProfile):
                     ),
                     None,
                 )
+                money_col = unpaid_col or (order_col if deficit else None)
+                phrase = (
+                    unpaid_phrase
+                    if unpaid_col
+                    else ("сумме заказов" if order_col else "дефициту")
+                )
                 line = _line(
                     "Топ подразделение",
-                    unpaid_phrase if deficit else "дефициту",
-                    _top_group(df, dept_col, unpaid_col),
+                    phrase if deficit else "дефициту",
+                    _top_group(df, dept_col, money_col),
                 )
                 if line:
                     insights.append(line)
         return insights
 
     def get_summary(self, df: pd.DataFrame) -> str:
-        kpis = run_kpis(df, self.config.kpis)
+        kpis = self.get_kpis(df)
         return generate_summary(self.config.name, kpis, self.get_insights(df))
 
     def get_dashboard_spec(self, df: pd.DataFrame):

@@ -201,13 +201,25 @@ export function ChatPanel({
           submit(text);
         }}
       >
-        <input
-          value={text}
-          disabled={disabled || busy}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="Задайте вопрос по файлу"
-          className="w-full rounded-xl border border-line bg-bg px-3 py-2 text-sm outline-none placeholder:text-zinc-600 focus:border-accent/60"
-        />
+        <div className="flex items-center gap-2">
+          <input
+            value={text}
+            disabled={disabled || busy}
+            onChange={(e) => setText(e.target.value)}
+            placeholder="Задайте вопрос по файлу"
+            className="min-w-0 flex-1 rounded-xl border border-line bg-bg px-3 py-2 text-sm outline-none placeholder:text-zinc-600 focus:border-accent/60"
+          />
+          <button
+            type="submit"
+            disabled={disabled || busy || !text.trim()}
+            aria-label="Отправить"
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent text-zinc-950 disabled:opacity-40"
+          >
+            <svg viewBox="0 0 20 20" className="h-4 w-4" fill="currentColor" aria-hidden="true">
+              <path d="M2.3 2.2a.75.75 0 0 1 .82-.16l14 6a.75.75 0 0 1 0 1.38l-14 6A.75.75 0 0 1 2 14.75V11.4l8.2-1.4L2 8.6V5.25a.75.75 0 0 1 .3-.55Z" />
+            </svg>
+          </button>
+        </div>
       </form>
     </aside>
   );

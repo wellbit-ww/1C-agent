@@ -38,8 +38,9 @@ def _auto_scale(max_value: float) -> tuple[float, str]:
 
 
 def _resolve_scale(unit: str, values: list[float]) -> tuple[float, str]:
-    if unit == "auto":
-        return _auto_scale(max(values) if values else 0.0)
+    peak = max((abs(v) for v in values), default=0.0)
+    if unit in ("auto", "") or (unit == "rub" and peak >= 1_000_000):
+        return _auto_scale(peak)
     return _UNIT_SCALES.get(unit, (1.0, ""))
 
 
@@ -80,6 +81,31 @@ def _resolve_value_column(df: pd.DataFrame, tile: Tile) -> str | None:
     return data_tools._resolve_numeric_column(df, tile.title)
 
 
+_JUNK_LABELS = {"", "nan", "none", "-", "не указан", "не указано", "без названия", "null"}
+_YES_NO = {"да", "нет", "yes", "no"}
+
+
+def _drop_yes_no_junk(grouped: pd.Series) -> pd.Series:
+    """В колонке да/нет единичные ФИО и заголовки не становятся категориями."""
+    labels = {str(key).strip().lower() for key in grouped.index}
+    if not ({"да", "нет"} <= labels or {"yes", "no"} <= labels):
+        return grouped
+    keep = [key for key in grouped.index if str(key).strip().lower() in _YES_NO]
+    return grouped.loc[keep]
+
+
+def _clean_groups(grouped: pd.Series) -> dict[str, float]:
+    cleaned: dict[str, float] = {}
+    for key, value in grouped.items():
+        label = str(key).strip()
+        if label.lower() in _JUNK_LABELS:
+            continue
+        if pd.isna(value):
+            continue
+        cleaned[label] = float(value)
+    return cleaned
+
+
 def _group_data(df: pd.DataFrame, tile: Tile) -> dict:
     group_col = _resolve_group_column(df, tile)
     if not group_col:
@@ -95,17 +121,19 @@ def _group_data(df: pd.DataFrame, tile: Tile) -> dict:
         series = df.groupby(group_col)[value_col]
         grouped = series.mean() if tile.agg == "mean" else series.sum()
 
+    grouped = _drop_yes_no_junk(grouped)
     if tile.sort == "desc":
         grouped = grouped.sort_values(ascending=False)
     elif tile.sort == "asc":
         grouped = grouped.sort_values(ascending=True)
 
     grouped = grouped.head(tile.top_n)
-    if grouped.empty:
-        return {"error": "Нет данных для тайла"}
+    groups = _clean_groups(grouped)
+    if len(groups) < 2:
+        return {"error": "Слишком мало категорий для графика"}
 
     return {
-        "groups": {str(k): float(v) for k, v in grouped.to_dict().items()},
+        "groups": groups,
         "group_column": group_col,
         "value_column": value_col,
     }
@@ -241,6 +269,15 @@ def _current_stage_data(df: pd.DataFrame, tile: Tile) -> dict:
         items.sort(key=lambda x: -x[1])
     elif tile.sort == "asc":
         items.sort(key=lambda x: x[1])
+
+    leftover_n = int((~valid).sum())
+    if leftover_n:
+        if tile.agg == "count":
+            items.append(("Не распределено", float(leftover_n)))
+        elif value_col:
+            leftover_val = pd.to_numeric(df.loc[~valid, value_col], errors="coerce").sum()
+            if pd.notna(leftover_val) and float(leftover_val):
+                items.append(("Не распределено", float(leftover_val)))
 
     return {
         "groups": dict(items),
@@ -447,7 +484,8 @@ def _render_figure(tile: Tile, data: dict) -> go.Figure:
                 y=labels if horizontal else scaled,
                 orientation="h" if horizontal else "v",
                 text=texts,
-                textposition="outside" if horizontal else "auto",
+                textposition="outside",
+                textangle=0,
                 cliponaxis=False,
             )
         )
@@ -470,11 +508,26 @@ def _render_figure(tile: Tile, data: dict) -> go.Figure:
 
     axis_title = suffix or None
     fig.update_layout(**_LAYOUT)
+    if tile.chart_type == "bar":
+        fig.update_layout(margin=dict(l=8, r=16, t=48, b=8))
+    if tile.chart_type in ("line", "area"):
+        fig.update_xaxes(type="category")
+    if tile.chart_type == "pie":
+        fig.update_layout(
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.22, font=dict(size=11)),
+            margin=dict(l=8, r=16, t=8, b=88),
+            height=420,
+        )
+        fig.update_traces(textinfo="percent", textposition="inside")
     if tile.chart_type == "hbar":
+        fig.update_layout(height=max(360, 22 * len(labels) + 48))
         fig.update_xaxes(title_text=axis_title)
         fig.update_yaxes(automargin=True)
     elif tile.chart_type != "pie":
         fig.update_yaxes(title_text=axis_title)
+        if tile.chart_type in ("line", "area"):
+            fig.update_xaxes(type="category", automargin=True)
 
     return fig
 

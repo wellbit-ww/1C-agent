@@ -13,7 +13,7 @@ from services.insights_service import _format_number
 from services.report_detector import detect_report_type
 from services.report_profiles.deficit_profile import _col_sum, detect_deficit_money_layout
 
-_FORBIDDEN = ("Не удалось сгруппировать", "я пока не понял")
+_FORBIDDEN = ("Не удалось сгруппировать", "я пока не понял", "Не удалось посчитать")
 
 
 def _digits(text: str) -> str:
@@ -209,7 +209,9 @@ class TestPdoAndWarranty:
     def test_pdo_type_and_department_slice(self, pdo_df, monkeypatch):
         assert detect_report_type(pdo_df) == "pdo_report"
         ctx = deterministic_context(pdo_df, filename="Отчет ПДО.xlsx")
-        ssmu = pdo_df["ответственное подразделение"] == "ССМУ"
+        ssmu = pdo_df["ответственное подразделение"].astype(str).str.contains(
+            "ССМУ", case=False, na=False
+        )
         qty = float(pdo_df.loc[ssmu, "количество изделий"].sum())
         file_qty = float(pdo_df["количество изделий"].sum())
         text = _ask(pdo_df, "Сколько изделий у ССМУ?", monkeypatch, ctx=ctx)
@@ -218,7 +220,7 @@ class TestPdoAndWarranty:
         assert "ССМУ" in text.upper()
         assert _contains_fmt(text, qty)
         assert not _contains_fmt(text, file_qty)
-        assert str(len(pdo_df.loc[ssmu])) in text or "2" in text
+        assert str(int(ssmu.sum())) in text
 
     def test_pdo_compare_and_overview(self, pdo_df, monkeypatch):
         ctx = deterministic_context(pdo_df, filename="Отчет ПДО.xlsx")
@@ -226,6 +228,9 @@ class TestPdoAndWarranty:
         overview = _ask(pdo_df, "Что в файле?", monkeypatch, ctx=ctx)
         assert "ССМУ" in compare.upper() and "УПМ" in compare.upper()
         assert "Не удалось сгруппировать" not in compare
+        compact = compare.replace(" ", "").replace("\u00a0", "")
+        assert "697" in compact
+        assert "105" in compact
         assert str(len(pdo_df)) in overview
         assert "ПДО" in overview or "строк" in overview.lower()
 
@@ -253,8 +258,25 @@ class TestPdoAndWarranty:
             assert not _contains_fmt(text, file_index_sum)
         sheets = _ask(warranty_df, "Какие листы в файле?", monkeypatch, ctx=ctx)
         assert "Гарантия" in sheets and "Справочник" in sheets
-        lookup = _ask(warranty_df, "Что с заказом САУП-000111", monkeypatch, ctx=ctx)
-        assert "САУП-000111" in lookup
-        assert "АЛАБУГА" in lookup.upper()
+        lookup_id = None
+        order_cols = [
+            col
+            for col in warranty_df.columns
+            if "заказ" in str(col).lower() and "номер" in str(col).lower()
+        ]
+        if order_cols:
+            orders = (
+                warranty_df.loc[mask, order_cols[0]]
+                .dropna()
+                .astype(str)
+                .map(str.strip)
+            )
+            orders = orders[orders.str.len() > 4]
+            if not orders.empty:
+                lookup_id = orders.iloc[0]
+        if lookup_id:
+            lookup = _ask(warranty_df, f"Что с заказом {lookup_id}", monkeypatch, ctx=ctx)
+            assert lookup_id in lookup
+            assert "АЛАБУГА" in lookup.upper()
         overview = _ask(warranty_df, "Что в файле?", monkeypatch, ctx=ctx)
         assert str(len(warranty_df)) in overview

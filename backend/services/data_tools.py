@@ -375,10 +375,37 @@ def _group_by_period(df, question: str | None, period: str):
         "value_column": value_col,
         "period": period,
         "groups": {
-            str(key): float(value)
-            for key, value in grouped.to_dict().items()
+            _period_axis_label(key, period): float(value)
+            for key, value in grouped.items()
         },
     }
+
+
+_MONTHS_RU = (
+    "янв",
+    "фев",
+    "мар",
+    "апр",
+    "май",
+    "июн",
+    "июл",
+    "авг",
+    "сен",
+    "окт",
+    "ноя",
+    "дек",
+)
+
+
+def _period_axis_label(key, period: str) -> str:
+    """Подпись оси без английской локали Plotly: «янв 2025», не «2025-01»."""
+    if period == "month" and hasattr(key, "month"):
+        return f"{_MONTHS_RU[int(key.month) - 1]} {int(key.year)}"
+    if period == "quarter" and hasattr(key, "quarter"):
+        return f"{int(key.quarter)} кв. {int(key.year)}"
+    if hasattr(key, "year"):
+        return str(int(key.year))
+    return str(key)
 
 
 def group_by_month(df, question: str | None = None):
