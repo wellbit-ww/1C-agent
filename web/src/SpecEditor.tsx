@@ -60,6 +60,16 @@ const INTENTS: { id: string; label: string; hint: string }[] = [
     label: "Сделки по кварталам",
     hint: "Таблица: подразделения × кварталы",
   },
+  {
+    id: "outcome",
+    label: "Проигранные и отменённые",
+    hint: "По кварталам: все сделки, проиграны, отменены и доля",
+  },
+  {
+    id: "halfyear",
+    label: "Сделки и ЗК по полугодиям",
+    hint: "Компания и каждая служба: количество, сумма, конверсия",
+  },
 ];
 
 const MAX_TILES = 8;
@@ -114,6 +124,28 @@ function blankTile(intent: string, columns: string[]): TileSpec {
       unit: "auto",
       sort: "none",
       source: { kind: "current_stage" },
+    };
+  }
+  if (intent === "halfyear") {
+    return {
+      title: "Сделки и ЗК по полугодиям",
+      chart_type: "table",
+      agg: "sum",
+      top_n: 50,
+      unit: "auto",
+      sort: "none",
+      source: { kind: "halfyear", group_semantic: "department" },
+    };
+  }
+  if (intent === "outcome") {
+    return {
+      title: "Проигранные и отменённые сделки",
+      chart_type: "table",
+      agg: "count",
+      top_n: 50,
+      unit: "auto",
+      sort: "none",
+      source: { kind: "outcome", group_semantic: "department", period: "quarter" },
     };
   }
   if (intent === "pivot") {
@@ -268,6 +300,14 @@ export function ChartEditor({ spec, columns, busy, mode, onClose, onSave }: Prop
                 className={selectClass}
               />
             </Field>
+            {(intent === "outcome" || intent === "halfyear") && (
+              <p className="text-xs text-zinc-500">
+                {intent === "halfyear"
+                  ? "1 полугодие — с 1 января по 30 июня, 2 полугодие — с 1 июля по 31 декабря. Службы показаны раздельно."
+                  : "Кварталы берутся из даты начала сделки. В строке «Совтест» — сумма по всем подразделениям."}
+              </p>
+            )}
+            {intent !== "outcome" && intent !== "halfyear" && (
             <div>
               <div className="mb-1 text-xs text-zinc-400">Как показать</div>
               <div className="grid grid-cols-2 gap-1.5">
@@ -287,6 +327,7 @@ export function ChartEditor({ spec, columns, busy, mode, onClose, onSave }: Prop
                 ))}
               </div>
             </div>
+            )}
             {intent === "group" && (
               <>
                 <Field label="Разбить по">

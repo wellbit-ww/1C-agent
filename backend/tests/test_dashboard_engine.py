@@ -256,3 +256,104 @@ class TestDealsPivot:
         assert "1 кв" in " ".join(deals[0]["table"]["columns"])
         assert deals[1]["chart_type"] == "pie"
         assert "plotly_json" in deals[1]
+        assert deals[2]["title"] == "Проигранные и отменённые сделки"
+        assert deals[2]["table"]["totals_label"] == "Совтест"
+
+
+def test_department_short_names():
+    from services.dashboard_engine import department_short
+
+    assert department_short("Служба испытательного оборудования") == "СИО"
+    assert department_short("Служба технологического оборудования") == "СТО"
+    assert department_short("Служба оборудования обработки кабеля") == "СООК"
+    assert department_short("Служба микроэлектроники") == "СМЭ"
+    assert department_short("Отдел АПЛиС") == "ОАПЛиС"
+    assert department_short("СИО") == "СИО"
+
+
+def test_halfyear_splits_company_and_departments():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба испытательного оборудования",
+                "Отдел АПЛиС",
+                "Служба микроэлектроники",
+            ],
+            "дата начала сделки": pd.to_datetime(["2026-02-01", "2026-03-01", "2026-08-01"]),
+            "количество сделок": [2, 1, 4],
+            "сумма по сделке": [100.0, 50.0, 80.0],
+            "количество зк": [1, 0, 2],
+            "сумма зк": [40.0, 0.0, 10.0],
+        }
+    )
+    spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="Сделки",
+                tiles=[
+                    Tile(
+                        title="Сделки и ЗК по полугодиям",
+                        chart_type="table",
+                        source={"kind": "halfyear", "group_semantic": "department"},
+                        agg="sum",
+                        top_n=50,
+                        sort="none",
+                    )
+                ],
+            )
+        ]
+    )
+    sections = render_spec(df, spec)["tabs"][0]["tiles"][0]["sections"]
+    assert [block["title"] for block in sections] == ["1 полуг. 2026", "2 полуг. 2026"]
+    first = sections[0]["tables"]
+    assert [item["title"] for item in first] == ["Совтест", "СИО", "ОАПЛиС"]
+    company = first[0]["rows"]
+    assert company[0]["values"][:2] == [3, 150]
+    assert company[1]["values"] == [1, 40, 33, 26.7]
+    second = sections[1]["tables"]
+    assert [item["title"] for item in second] == ["Совтест", "СМЭ"]
+    assert second[1]["rows"][1]["values"][3] == 12.5
+
+
+def test_outcome_table_counts_lost_and_cancelled():
+    df = pd.DataFrame(
+        {
+            "подразделение": ["СИО", "СИО", "СТО", "СТО"],
+            "статус": ["Проиграна", "Отменена", "Выиграна", "Отменена"],
+            "дата начала сделки": pd.to_datetime(
+                ["2025-01-10", "2025-02-10", "2025-04-01", "2025-01-20"]
+            ),
+        }
+    )
+    spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="Сделки",
+                tiles=[
+                    Tile(
+                        title="Проигранные и отменённые сделки",
+                        chart_type="table",
+                        source={
+                            "kind": "outcome",
+                            "group_semantic": "department",
+                            "period": "quarter",
+                        },
+                        agg="count",
+                        top_n=50,
+                        sort="none",
+                    )
+                ],
+            )
+        ]
+    )
+    table = render_spec(df, spec)["tabs"][0]["tiles"][0]["table"]
+    assert table["year_spans"] == [
+        {"label": "1 кв 2025", "count": 5},
+        {"label": "2 кв 2025", "count": 5},
+    ]
+    assert table["columns"][:5] == ["Все сделки", "Проиграны", "Отменены", "Всего (П+О)", "%"]
+    by_name = {row["label"]: row["values"] for row in table["rows"]}
+    assert by_name["СИО"] == [2, 1, 1, 2, 100, 0, 0, 0, 0, 0]
+    assert by_name["СТО"] == [1, 0, 1, 1, 100, 1, 0, 0, 0, 0]
+    assert table["totals_label"] == "Совтест"
+    assert table["totals"] == [3, 1, 2, 3, 100, 1, 0, 0, 0, 0]

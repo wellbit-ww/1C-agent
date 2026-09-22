@@ -244,7 +244,7 @@ def chart_to_png(item: dict) -> bytes | None:
         return _mpl_png(str(plotly_json))
 
 
-def _format_pdf_number(value) -> str:
+def _format_pdf_number(value, kind: str | None = None) -> str:
     if value is None:
         return "—"
     try:
@@ -252,8 +252,12 @@ def _format_pdf_number(value) -> str:
     except (TypeError, ValueError):
         return str(value)
     if abs(number - round(number)) < 1e-9:
-        return f"{int(round(number)):,}".replace(",", " ")
-    return f"{number:,.1f}".replace(",", "X").replace(".", ",").replace("X", " ")
+        text = f"{int(round(number)):,}".replace(",", " ")
+    else:
+        text = f"{number:,.1f}".replace(",", "X").replace(".", ",").replace("X", " ")
+    if kind == "percent":
+        return f"{text}%"
+    return text
 
 
 def _clip_pdf_cell(text: str, width_mm: float, size: float) -> str:
@@ -271,6 +275,8 @@ def _draw_pivot_chunk(
     rows: list[dict],
     totals: list,
     value_offset: int,
+    kinds: list[str] | None = None,
+    totals_label: str = "Итого",
 ) -> None:
     usable = pdf.epw
     label_w = min(46.0, max(28.0, usable * 0.22))
@@ -306,16 +312,23 @@ def _draw_pivot_chunk(
         _cell(label_w, row_h, str(row.get("label") or ""), bold=True)
         for i, _name in enumerate(columns):
             idx = value_offset + i
-            _cell(col_w, row_h, _format_pdf_number(values[idx] if idx < len(values) else None), align="R")
+            kind = (kinds or [None])[i] if kinds and i < len(kinds) else None
+            _cell(
+                col_w,
+                row_h,
+                _format_pdf_number(values[idx] if idx < len(values) else None, kind),
+                align="R",
+            )
         pdf.ln(row_h)
 
     if totals:
         _need_page(pdf, row_h + 2)
         pdf.set_fill_color(232, 246, 239)
         pdf.set_text_color(20, 55, 110)
-        _cell(label_w, row_h, "Итого", bold=True, fill=True)
-        for value in totals:
-            _cell(col_w, row_h, _format_pdf_number(value), align="R", bold=True, fill=True)
+        _cell(label_w, row_h, totals_label or "Итого", bold=True, fill=True)
+        for i, value in enumerate(totals):
+            kind = (kinds or [None])[i] if kinds and i < len(kinds) else None
+            _cell(col_w, row_h, _format_pdf_number(value, kind), align="R", bold=True, fill=True)
         pdf.ln(row_h)
         pdf.set_text_color(0, 0, 0)
     pdf.ln(2)
@@ -325,19 +338,39 @@ def _embed_pivot_table(pdf: _ReportPdf, table: dict) -> None:
     columns = [str(col) for col in (table.get("columns") or [])]
     rows = [row for row in (table.get("rows") or []) if isinstance(row, dict)]
     totals = list(table.get("totals") or [])
+    kinds = [str(kind) for kind in (table.get("column_kinds") or [])]
     index_label = str(table.get("index_label") or "")
+    totals_label = str(table.get("totals_label") or "Итого")
     if not columns and not rows:
         pdf.set_font("Report", size=9)
         pdf.multi_cell(pdf.epw, 4.5, "Таблица пуста.")
         return
-    chunk = 10
-    span = max(len(columns), 1)
-    for start in range(0, span, chunk):
-        part = columns[start : start + chunk] or [""]
-        part_totals = totals[start : start + len(part)]
+    spans = table.get("year_spans") or []
+    if spans and sum(int(span.get("count") or 0) for span in spans) == len(columns):
+        chunks = []
+        cursor = 0
+        for span in spans:
+            count = int(span.get("count") or 0)
+            chunks.append((cursor, cursor + count))
+            cursor += count
+    else:
+        chunks = [(start, min(start + 10, len(columns) or 1)) for start in range(0, max(len(columns), 1), 10)]
+    for start, end in chunks:
+        part = columns[start:end] or [""]
+        part_totals = totals[start:end]
+        part_kinds = kinds[start:end] if kinds else None
         if start:
             pdf.ln(1)
-        _draw_pivot_chunk(pdf, index_label, part, rows, part_totals, start)
+        _draw_pivot_chunk(
+            pdf,
+            index_label,
+            part,
+            rows,
+            part_totals,
+            start,
+            part_kinds,
+            totals_label,
+        )
 
 
 def _tile_caption(item: dict) -> str:

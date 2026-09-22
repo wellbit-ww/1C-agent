@@ -17,6 +17,25 @@ export type PivotTable = {
   year_spans?: { label: string; count: number }[];
   rows: { label: string; values: number[]; total?: number }[];
   totals?: number[];
+  totals_label?: string;
+  column_kinds?: ("count" | "percent")[];
+};
+
+export type SectionRow = {
+  label: string;
+  values: (number | null)[];
+  kinds?: string[];
+};
+
+export type SectionTable = {
+  title: string;
+  columns: string[];
+  rows: SectionRow[];
+};
+
+export type SectionBlock = {
+  title: string;
+  tables: SectionTable[];
 };
 
 export type Tile = {
@@ -24,6 +43,7 @@ export type Tile = {
   plotly_json?: string;
   chart_type?: string;
   table?: PivotTable;
+  sections?: SectionBlock[];
   error?: string;
 };
 

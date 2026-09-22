@@ -144,6 +144,14 @@ class ExcelAgent:
         spec = dashboard_service.get_current_spec(file_id, df)
         if spec is not None:
             from services.dashboard_engine import render_spec
+
+            if report_type == "sales_pipeline":
+                from services.report_profiles.sales_profile import (
+                    ensure_halfyear_tile,
+                    ensure_outcome_tile,
+                )
+
+                spec = ensure_halfyear_tile(ensure_outcome_tile(spec))
             result["tabs"] = render_spec(df, spec)["tabs"]
             result["spec"] = spec.model_dump()
         else:

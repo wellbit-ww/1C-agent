@@ -26,7 +26,16 @@ class TileSource(BaseModel):
     pivot — таблица: категория × период (кварталы по подразделениям).
     """
 
-    kind: Literal["group", "columns_pattern", "named_columns", "period", "current_stage", "pivot"]
+    kind: Literal[
+        "group",
+        "columns_pattern",
+        "named_columns",
+        "period",
+        "current_stage",
+        "pivot",
+        "outcome",
+        "halfyear",
+    ]
     group_semantic: str | None = None
     group_column: str | None = None
     value_semantic: str | None = None

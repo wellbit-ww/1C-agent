@@ -5,7 +5,7 @@ import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
-import type { ChatMessage, Dashboard, DashSpec, FileContext, PivotTable, Report, ReportChart } from "./types";
+import type { ChatMessage, Dashboard, DashSpec, FileContext, PivotTable, Report, ReportChart, SectionBlock } from "./types";
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -22,20 +22,90 @@ function typeName(t?: string) {
   return TYPE_NAMES[t ?? ""] ?? "Отчёт";
 }
 
-function formatPivotNumber(value: number | null | undefined) {
+function formatPivotNumber(value: number | null | undefined, kind?: string) {
   if (value == null || Number.isNaN(Number(value))) return "—";
   const n = Number(value);
-  if (Number.isInteger(n)) return n.toLocaleString("ru-RU");
-  return n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+  const text = Number.isInteger(n)
+    ? n.toLocaleString("ru-RU")
+    : n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+  return kind === "percent" ? `${text}%` : text;
 }
 
 function isYearTotalColumn(name: string) {
   return /^\d{4}$/.test(String(name).trim());
 }
 
+function quarterStarts(spans: { count: number }[]) {
+  const starts = new Set<number>();
+  let cursor = 0;
+  for (const span of spans) {
+    if (cursor > 0) starts.add(cursor);
+    cursor += span.count;
+  }
+  return starts;
+}
+
+function formatSectionCell(value: number | null | undefined, kind?: string) {
+  if (value == null || kind === "empty" || Number.isNaN(Number(value))) return "";
+  const n = Number(value);
+  if (kind === "percent") return `${Math.round(n)}%`;
+  if (kind === "percent1") {
+    return `${n.toLocaleString("ru-RU", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+  }
+  const digits = kind === "count" || Number.isInteger(n) ? 0 : 2;
+  return n.toLocaleString("ru-RU", { maximumFractionDigits: digits });
+}
+
+function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
+  return (
+    <div className="space-y-6">
+      {sections.map((block) => (
+        <section key={block.title}>
+          <h3 className="mb-3 text-sm font-semibold text-zinc-100">{block.title}</h3>
+          <div className="grid gap-3 md:grid-cols-2">
+            {block.tables.map((item) => (
+              <div key={`${block.title}-${item.title}`} className="overflow-hidden rounded-lg border border-line">
+                <div className="border-b border-line bg-panel px-3 py-1.5 text-sm font-medium text-zinc-100">
+                  {item.title}
+                </div>
+                <table className="w-full border-collapse text-right text-xs">
+                  <thead>
+                    <tr className="text-zinc-500">
+                      <th className="border-b border-line px-2 py-1.5 text-left font-medium" />
+                      {item.columns.map((col) => (
+                        <th key={col} className="border-b border-line px-2 py-1.5 font-medium whitespace-nowrap">
+                          {col}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {item.rows.map((row) => (
+                      <tr key={row.label} className="border-t border-line">
+                        <th className="px-2 py-1.5 text-left font-medium text-zinc-200">{row.label}</th>
+                        {item.columns.map((col, i) => (
+                          <td key={col} className="px-2 py-1.5 tabular-nums text-zinc-100">
+                            {formatSectionCell(row.values[i], row.kinds?.[i])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function PivotTableView({ table }: { table: PivotTable }) {
   const spans = table.year_spans ?? [];
   const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
+  const breaks = quarterStarts(spans);
+  const quarterEdge = "border-l border-zinc-400";
   return (
     <div className="max-h-[28rem] overflow-auto rounded-lg border border-line">
       <table className="min-w-full border-collapse text-right text-xs">
@@ -48,11 +118,13 @@ function PivotTableView({ table }: { table: PivotTable }) {
               >
                 {table.index_label || "Подразделение"}
               </th>
-              {spans.map((span) => (
+              {spans.map((span, spanI) => (
                 <th
                   key={span.label}
                   colSpan={span.count}
-                  className="border-b border-line px-2 py-1.5 text-center font-semibold text-zinc-200"
+                  className={`border-b border-line px-2 py-1.5 text-center font-semibold text-zinc-200 ${
+                    spanI > 0 ? quarterEdge : ""
+                  }`}
                 >
                   {span.label}
                 </th>
@@ -65,12 +137,12 @@ function PivotTableView({ table }: { table: PivotTable }) {
                 {table.index_label || "Подразделение"}
               </th>
             )}
-            {table.columns.map((col) => (
+            {table.columns.map((col, i) => (
               <th
-                key={col}
+                key={`${i}-${col}`}
                 className={`border-b border-line px-2 py-1.5 font-medium whitespace-nowrap ${
                   isYearTotalColumn(col) ? "text-zinc-200" : ""
-                }`}
+                } ${breaks.has(i) ? quarterEdge : ""}`}
               >
                 {hasYears && isYearTotalColumn(col) ? col : hasYears ? col.replace(/\s+\d{4}$/, "") : col}
               </th>
@@ -85,12 +157,14 @@ function PivotTableView({ table }: { table: PivotTable }) {
               </th>
               {table.columns.map((col, i) => (
                 <td
-                  key={`${row.label}-${col}`}
+                  key={`${row.label}-${i}`}
                   className={`px-2 py-1.5 tabular-nums ${
-                    isYearTotalColumn(col) ? "font-medium text-zinc-100" : "text-zinc-300"
-                  }`}
+                    isYearTotalColumn(col) || table.column_kinds?.[i] === "percent"
+                      ? "font-medium text-zinc-100"
+                      : "text-zinc-300"
+                  } ${breaks.has(i) ? quarterEdge : ""}`}
                 >
-                  {formatPivotNumber(row.values[i])}
+                  {formatPivotNumber(row.values[i], table.column_kinds?.[i])}
                 </td>
               ))}
             </tr>
@@ -99,13 +173,15 @@ function PivotTableView({ table }: { table: PivotTable }) {
         {table.totals && table.totals.length > 0 && (
           <tfoot>
             <tr className="border-t border-line bg-panel font-medium">
-              <th className="sticky left-0 bg-panel px-3 py-1.5 text-left text-zinc-100">Итого</th>
+              <th className="sticky left-0 bg-panel px-3 py-1.5 text-left text-zinc-100">
+                {table.totals_label || "Итого"}
+              </th>
               {table.totals.map((value, i) => (
                 <td
-                  key={`total-${table.columns[i] ?? i}`}
-                  className="px-2 py-1.5 tabular-nums text-accent"
+                  key={`total-${i}`}
+                  className={`px-2 py-1.5 tabular-nums text-accent ${breaks.has(i) ? quarterEdge : ""}`}
                 >
-                  {formatPivotNumber(value)}
+                  {formatPivotNumber(value, table.column_kinds?.[i])}
                 </td>
               ))}
             </tr>
@@ -781,7 +857,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${tile.table || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${tile.table || tile.sections || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex items-start justify-between gap-2">
                             <div className="text-sm font-medium">{tile.title}</div>
@@ -815,6 +891,8 @@ export function App() {
                           </div>
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
+                          ) : tile.sections ? (
+                            <HalfYearTables sections={tile.sections} />
                           ) : tile.table ? (
                             <PivotTableView table={tile.table} />
                           ) : tile.plotly_json ? (

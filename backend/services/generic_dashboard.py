@@ -163,6 +163,29 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
                 agg="count",
                 top_n=12,
             ),
+            Tile(
+                title="Проигранные и отменённые сделки",
+                chart_type="table",
+                source=TileSource(
+                    kind="outcome",
+                    group_semantic="department",
+                    period="quarter",
+                ),
+                agg="count",
+                top_n=50,
+                sort="none",
+            ),
+            Tile(
+                title="Сделки и ЗК по полугодиям",
+                chart_type="table",
+                source=TileSource(
+                    kind="halfyear",
+                    group_semantic="department",
+                ),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
         ],
     )
 

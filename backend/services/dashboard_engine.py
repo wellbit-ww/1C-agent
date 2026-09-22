@@ -436,6 +436,247 @@ def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
+_OUTCOME_HEADERS = ("Все сделки", "Проиграны", "Отменены", "Всего (П+О)", "%")
+_OUTCOME_KINDS = ("count", "count", "count", "count", "percent")
+_DEPT_SHORT = {
+    "служба испытательного оборудования": "СИО",
+    "служба технологического оборудования": "СТО",
+    "служба оборудования обработки кабеля": "СООК",
+    "служба микроэлектроники": "СМЭ",
+    "отдел аплис": "ОАПЛиС",
+    "сервисная служба": "СС",
+    "отдел функционального контроля": "ОФК",
+    "отдел неразрушающего контроля": "ОНК",
+    "отдел внутрисхемного контроля": "ОВК",
+}
+
+
+def department_short(name: str) -> str:
+    """«Служба испытательного оборудования» → «СИО», «Отдел АПЛиС» → «ОАПЛиС»."""
+    text = str(name or "").strip()
+    key = text.lower().replace("ё", "е")
+    if key in _DEPT_SHORT:
+        return _DEPT_SHORT[key]
+    if len(text) <= 8 and " " not in text:
+        return text
+    prefix = ""
+    rest = text
+    for head, letter in (("Отдел ", "О"), ("Служба ", "С"), ("Департамент ", "Д")):
+        if text.lower().replace("ё", "е").startswith(head.lower()):
+            prefix = letter
+            rest = text[len(head) :].strip()
+            break
+    if rest and " " not in rest and len(rest) <= 12:
+        if prefix and not rest.upper().startswith(prefix):
+            return prefix + rest
+        return rest
+    words = [word for word in rest.replace("-", " ").split() if word]
+    letters = "".join(word[0].upper() for word in words if word[0].isalpha())
+    if prefix and letters and not letters.startswith(prefix):
+        letters = prefix + letters
+    return letters or text
+
+
+def _status_column(df: pd.DataFrame) -> str | None:
+    for col in df.columns:
+        name = str(col).lower().strip()
+        if name == "статус" or name.startswith("статус"):
+            return str(col)
+    return None
+
+
+def _outcome_percent(part: int, whole: int) -> int:
+    if whole <= 0:
+        return 0
+    return int(round(100.0 * part / whole))
+
+
+def _outcome_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Подразделения × кварталы: все сделки, проигранные, отменённые и их доля."""
+    group_col = _resolve_group_column(df, tile)
+    date_col = _pivot_date_column(df)
+    status_col = _status_column(df)
+    if not group_col:
+        return {"error": "Не нашёл колонку подразделения"}
+    if not date_col:
+        return {"error": "Не нашёл дату начала сделки"}
+    if not status_col:
+        return {"error": "Не нашёл колонку статуса"}
+
+    work = df[[group_col, date_col, status_col]].copy()
+    names = work[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    work = work.loc[~blank].copy()
+    work[group_col] = names.loc[~blank]
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+    work = work.dropna(subset=[date_col, group_col])
+    if work.empty:
+        return {"error": "Нет сделок с датой начала и подразделением"}
+
+    status = work[status_col].astype(str).str.lower()
+    lost = status.str.contains("проигран", na=False)
+    cancelled = status.str.contains("отмен", na=False) & ~lost
+    work["_quarter"] = work[date_col].dt.to_period("Q")
+    quarters = list(pd.period_range(work["_quarter"].min(), work["_quarter"].max(), freq="Q"))
+
+    order: list[str] = []
+    for name in work[group_col]:
+        text = str(name).strip()
+        if text and text not in order:
+            order.append(text)
+
+    def _counts(frame: pd.DataFrame) -> list[int]:
+        cells: list[int] = []
+        for quarter in quarters:
+            part = frame.loc[frame["_quarter"] == quarter]
+            all_n = int(len(part))
+            lost_n = int(lost.loc[part.index].sum()) if all_n else 0
+            cancel_n = int(cancelled.loc[part.index].sum()) if all_n else 0
+            both = lost_n + cancel_n
+            cells.extend([all_n, lost_n, cancel_n, both, _outcome_percent(both, all_n)])
+        return cells
+
+    labels = []
+    used: set[str] = set()
+    for name in order:
+        short = department_short(name)
+        if short in used:
+            short = name
+        used.add(short)
+        labels.append(short)
+    rows = [
+        {"label": label, "values": _counts(work.loc[work[group_col] == name])}
+        for label, name in zip(labels, order)
+    ]
+    totals = _counts(work)
+    columns: list[str] = []
+    kinds: list[str] = []
+    spans: list[dict] = []
+    for quarter in quarters:
+        columns.extend(_OUTCOME_HEADERS)
+        kinds.extend(_OUTCOME_KINDS)
+        spans.append({"label": _period_label(quarter, "Q"), "count": len(_OUTCOME_HEADERS)})
+
+    step = len(_OUTCOME_HEADERS)
+    groups = {
+        row["label"]: float(sum(row["values"][i] for i in range(0, len(row["values"]), step)))
+        for row in rows
+    }
+
+    return {
+        "groups": groups,
+        "group_column": group_col,
+        "table": {
+            "index_label": "Подразделение",
+            "columns": columns,
+            "column_kinds": kinds,
+            "year_spans": spans,
+            "rows": rows,
+            "totals": totals,
+            "totals_label": "Совтест",
+        },
+    }
+
+
+def _named_column(df: pd.DataFrame, name: str) -> str | None:
+    target = name.lower().replace("ё", "е").strip()
+    for col in df.columns:
+        if str(col).lower().replace("ё", "е").strip() == target:
+            return str(col)
+    return None
+
+
+def _half_percent(part: float, whole: float, digits: int) -> float | None:
+    if whole <= 0:
+        return None
+    scale = 10 ** digits
+    return int(100 * part / whole * scale + 0.5) / scale
+
+
+def _halfyear_metrics(frame: pd.DataFrame, deal_n, deal_s, zk_n, zk_s) -> dict:
+    deals_count = float(pd.to_numeric(frame[deal_n], errors="coerce").sum())
+    deals_sum = float(pd.to_numeric(frame[deal_s], errors="coerce").sum())
+    zk_count = float(pd.to_numeric(frame[zk_n], errors="coerce").sum())
+    zk_sum = float(pd.to_numeric(frame[zk_s], errors="coerce").sum())
+    return {
+        "title": "",
+        "columns": ["Кол-во", "Сумма", "Конверсия", "Доля продаж в потенциале сделок"],
+        "rows": [
+            {
+                "label": "Сделки",
+                "values": [deals_count, deals_sum, None, None],
+                "kinds": ["count", "money", "empty", "empty"],
+            },
+            {
+                "label": "ЗК",
+                "values": [
+                    zk_count,
+                    zk_sum,
+                    _half_percent(zk_count, deals_count, 0),
+                    _half_percent(zk_sum, deals_sum, 1),
+                ],
+                "kinds": ["count", "money", "percent", "percent1"],
+            },
+        ],
+    }
+
+
+def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Сделки и ЗК по полугодиям: компания и каждое подразделение отдельно."""
+    group_col = _resolve_group_column(df, tile)
+    date_col = _pivot_date_column(df)
+    deal_n = _named_column(df, "количество сделок")
+    deal_s = _named_column(df, "сумма по сделке")
+    zk_n = _named_column(df, "количество зк")
+    zk_s = _named_column(df, "сумма зк")
+    if not date_col:
+        return {"error": "Не нашёл дату начала сделки"}
+    if not all([deal_n, deal_s, zk_n, zk_s]):
+        return {"error": "Нет колонок количества и суммы сделок или ЗК"}
+
+    work = df.copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+    work = work.dropna(subset=[date_col])
+    if work.empty:
+        return {"error": "Нет сделок с датой начала"}
+    work["_half"] = work[date_col].map(lambda ts: (int(ts.year), 1 if int(ts.month) <= 6 else 2))
+
+    sections = []
+    groups: dict[str, float] = {}
+    for year, half in sorted(work["_half"].unique()):
+        part = work.loc[work["_half"] == (year, half)]
+        company = _halfyear_metrics(part, deal_n, deal_s, zk_n, zk_s)
+        company["title"] = "Совтест"
+        tables = [company]
+        if group_col and group_col in part.columns:
+            names = part[group_col].astype(str).str.strip()
+            blank = names.str.lower().isin({"", "nan", "-", "none"})
+            ranked = (
+                part.loc[~blank]
+                .assign(_dept=names.loc[~blank])
+                .groupby("_dept", sort=False)[deal_n]
+                .apply(lambda s: float(pd.to_numeric(s, errors="coerce").sum()))
+                .sort_values(ascending=False)
+            )
+            used: set[str] = set()
+            for dept in ranked.index:
+                short = department_short(str(dept))
+                if short in used:
+                    short = str(dept)
+                used.add(short)
+                block = _halfyear_metrics(
+                    part.loc[names == dept], deal_n, deal_s, zk_n, zk_s
+                )
+                block["title"] = short
+                tables.append(block)
+                groups[f"{year}-{half}:{short}"] = float(block["rows"][0]["values"][0] or 0)
+        sections.append({"title": f"{half} полуг. {year}", "tables": tables})
+
+    if not sections:
+        return {"error": "Нет сделок в полугодиях"}
+    return {"groups": groups or {"Совтест": float(sections[-1]["tables"][0]["rows"][0]["values"][0] or 0)}, "sections": sections}
+
+
 def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
     kind = tile.source.kind
     if kind == "columns_pattern":
@@ -446,6 +687,10 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _current_stage_data(df, tile)
     if kind == "period":
         return _period_data(df, tile)
+    if kind == "outcome":
+        return _outcome_data(df, tile)
+    if kind == "halfyear":
+        return _halfyear_data(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)
@@ -562,6 +807,16 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
 
             if "error" in data:
                 tiles.append({"title": tile.title, "error": data["error"]})
+                continue
+
+            if data.get("sections"):
+                tiles.append(
+                    {
+                        "title": tile.title,
+                        "chart_type": "sections",
+                        "sections": data["sections"],
+                    }
+                )
                 continue
 
             if tile.chart_type == "table" or data.get("table"):
