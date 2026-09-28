@@ -621,14 +621,145 @@ def _halfyear_metrics(frame: pd.DataFrame, deal_n, deal_s, zk_n, zk_s) -> dict:
     }
 
 
+_STATUS_SUMMARY_ORDER = ("В работе", "Выиграна", "Проиграна", "Отменена")
+_STATUS_SUMMARY_COLUMNS = ("Кол-во", "Сумма", "ЗК", "Сумма")
+_STATUS_SUMMARY_KINDS = ("count", "money", "count", "money")
+
+
+def _normalize_deal_status(value) -> str:
+    text = str(value or "").strip().lower().replace("ё", "е")
+    if "проигран" in text:
+        return "Проиграна"
+    if "отмен" in text:
+        return "Отменена"
+    if "выигран" in text:
+        return "Выиграна"
+    if "работ" in text:
+        return "В работе"
+    for label in _STATUS_SUMMARY_ORDER:
+        if text == label.lower().replace("ё", "е"):
+            return label
+    return "В работе"
+
+
+def _sum_numeric(frame: pd.DataFrame, col: str) -> float:
+    return float(pd.to_numeric(frame[col], errors="coerce").fillna(0).sum())
+
+
+def _json_number(value: float | int | None) -> int | float | None:
+    if value is None:
+        return None
+    number = float(value)
+    if number != number:  # NaN
+        return None
+    if abs(number - round(number)) < 1e-9:
+        return int(round(number))
+    return number
+
+
+def _zk_display(value: float) -> float | None:
+    return None if value == 0 else value
+
+
+def _status_summary_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Сделки и ЗК по статусам: количество и суммы в разрезе статуса."""
+    status_col = _status_column(df)
+    deal_n = _named_column(df, "количество сделок")
+    deal_s = _named_column(df, "сумма по сделке")
+    zk_n = _named_column(df, "количество зк")
+    zk_s = _named_column(df, "сумма зк")
+    if not status_col:
+        return {"error": "Не нашёл колонку статуса"}
+    if not all([deal_n, deal_s, zk_n, zk_s]):
+        return {"error": "Нет колонок количества и суммы сделок или ЗК"}
+
+    work = df.copy()
+    work["_status"] = work[status_col].map(_normalize_deal_status)
+    rows = []
+    totals = [0.0, 0.0, 0.0, 0.0]
+    for label in _STATUS_SUMMARY_ORDER:
+        part = work.loc[work["_status"] == label]
+        if part.empty:
+            continue
+        deals_count = _sum_numeric(part, deal_n)
+        deals_sum = _sum_numeric(part, deal_s)
+        zk_count = _sum_numeric(part, zk_n)
+        zk_sum = _sum_numeric(part, zk_s)
+        rows.append(
+            {
+                "label": label,
+                "values": [
+                    _json_number(deals_count),
+                    _json_number(deals_sum),
+                    _json_number(_zk_display(zk_count)),
+                    _json_number(_zk_display(zk_sum)),
+                ],
+            }
+        )
+        totals[0] += deals_count
+        totals[1] += deals_sum
+        totals[2] += zk_count
+        totals[3] += zk_sum
+
+    if not rows:
+        return {"error": "Нет сделок со статусом"}
+    return {
+        "groups": {row["label"]: float(row["values"][0] or 0) for row in rows},
+        "table": {
+            "index_label": "Статус",
+            "columns": list(_STATUS_SUMMARY_COLUMNS),
+            "column_kinds": list(_STATUS_SUMMARY_KINDS),
+            "rows": rows,
+            "totals": [_json_number(v) for v in totals],
+            "totals_label": "Всего",
+        },
+    }
+
+
+def _deals_zk_bucket_mode(tile: Tile) -> str:
+    mode = tile.source.period or "half"
+    if mode in ("month", "quarter", "half"):
+        return mode
+    return "half"
+
+
+def _deals_zk_bucket_key(date_col: pd.Series, mode: str) -> pd.Series:
+    if mode == "month":
+        return date_col.dt.to_period("M")
+    if mode == "quarter":
+        return date_col.dt.to_period("Q")
+    return date_col.map(lambda ts: (int(ts.year), 1 if int(ts.month) <= 6 else 2))
+
+
+def _deals_zk_section_title(bucket, mode: str) -> str:
+    if mode == "half":
+        year, half = bucket
+        return f"{half} полуг. {year}"
+    if mode == "month":
+        from services.data_tools import _period_axis_label
+
+        return _period_axis_label(bucket, "month")
+    from services.data_tools import _period_axis_label
+
+    return _period_axis_label(bucket, "quarter")
+
+
+def _deals_zk_group_suffix(bucket, mode: str) -> str:
+    if mode == "half":
+        year, half = bucket
+        return f"{year}-{half}"
+    return str(bucket)
+
+
 def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
-    """Сделки и ЗК по полугодиям: компания и каждое подразделение отдельно."""
+    """Сделки и ЗК по периодам (полугодие / квартал / месяц): компания и каждое подразделение."""
     group_col = _resolve_group_column(df, tile)
     date_col = _pivot_date_column(df)
     deal_n = _named_column(df, "количество сделок")
     deal_s = _named_column(df, "сумма по сделке")
     zk_n = _named_column(df, "количество зк")
     zk_s = _named_column(df, "сумма зк")
+    bucket_mode = _deals_zk_bucket_mode(tile)
     if not date_col:
         return {"error": "Не нашёл дату начала сделки"}
     if not all([deal_n, deal_s, zk_n, zk_s]):
@@ -639,15 +770,16 @@ def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
     work = work.dropna(subset=[date_col])
     if work.empty:
         return {"error": "Нет сделок с датой начала"}
-    work["_half"] = work[date_col].map(lambda ts: (int(ts.year), 1 if int(ts.month) <= 6 else 2))
+    work["_bucket"] = _deals_zk_bucket_key(work[date_col], bucket_mode)
 
     sections = []
     groups: dict[str, float] = {}
-    for year, half in sorted(work["_half"].unique()):
-        part = work.loc[work["_half"] == (year, half)]
+    for bucket in sorted(work["_bucket"].unique(), key=str):
+        part = work.loc[work["_bucket"] == bucket]
         company = _halfyear_metrics(part, deal_n, deal_s, zk_n, zk_s)
         company["title"] = "Совтест"
         tables = [company]
+        suffix = _deals_zk_group_suffix(bucket, bucket_mode)
         if group_col and group_col in part.columns:
             names = part[group_col].astype(str).str.strip()
             blank = names.str.lower().isin({"", "nan", "-", "none"})
@@ -669,12 +801,17 @@ def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
                 )
                 block["title"] = short
                 tables.append(block)
-                groups[f"{year}-{half}:{short}"] = float(block["rows"][0]["values"][0] or 0)
-        sections.append({"title": f"{half} полуг. {year}", "tables": tables})
+                groups[f"{suffix}:{short}"] = float(block["rows"][0]["values"][0] or 0)
+        sections.append({"title": _deals_zk_section_title(bucket, bucket_mode), "tables": tables})
 
     if not sections:
-        return {"error": "Нет сделок в полугодиях"}
-    return {"groups": groups or {"Совтест": float(sections[-1]["tables"][0]["rows"][0]["values"][0] or 0)}, "sections": sections}
+        return {"error": "Нет сделок в выбранных периодах"}
+    return {
+        "groups": groups
+        or {"Совтест": float(sections[-1]["tables"][0]["rows"][0]["values"][0] or 0)},
+        "sections": sections,
+        "bucket_period": bucket_mode,
+    }
 
 
 def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
@@ -691,6 +828,8 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _outcome_data(df, tile)
     if kind == "halfyear":
         return _halfyear_data(df, tile)
+    if kind == "status_summary":
+        return _status_summary_data(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)
@@ -810,13 +949,14 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 continue
 
             if data.get("sections"):
-                tiles.append(
-                    {
-                        "title": tile.title,
-                        "chart_type": "sections",
-                        "sections": data["sections"],
-                    }
-                )
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "sections",
+                    "sections": data["sections"],
+                }
+                if data.get("bucket_period"):
+                    payload["bucket_period"] = data["bucket_period"]
+                tiles.append(payload)
                 continue
 
             if tile.chart_type == "table" or data.get("table"):

@@ -66,9 +66,9 @@ class TestSpecPersistence:
         fid = f"test-{uuid.uuid4()}"
         spec = dashboard_service.get_current_spec(fid, sales_df)
         assert spec is not None  # дефолт sales_pipeline v2
-        assert [t.title for t in spec.tabs] == ["Сделки", "Воронка", "Менеджеры", "Клиенты"]
+        assert [t.title for t in spec.tabs] == ["Данные"]
         assert spec.tabs[0].tiles[0].chart_type == "table"
-        assert spec.tabs[0].tiles[1].chart_type == "pie"
+        assert spec.tabs[0].tiles[1].source.kind == "outcome"
 
     def test_get_current_spec_prefers_saved(self, sales_df):
         fid = f"test-{uuid.uuid4()}"
@@ -82,7 +82,7 @@ class TestSpecPersistence:
         fid = f"test-{uuid.uuid4()}"
         db_service.save_dashboard_spec(fid, "{not valid json")
         spec = dashboard_service.get_current_spec(fid, sales_df)
-        assert [t.title for t in spec.tabs] == ["Сделки", "Воронка", "Менеджеры", "Клиенты"]
+        assert [t.title for t in spec.tabs] == ["Данные"]
         assert db_service.get_dashboard_spec(fid) is None  # мусор вычищен
 
 
@@ -256,7 +256,7 @@ class TestEndpoints:
             json={"file_id": sales_file_id, "spec": _spec().model_dump()},
         )
         assert response.status_code == 200, response.text
-        assert response.json()["tabs"][0]["tiles"][0]["title"] == "Тестовый тайл"
+        assert response.json()["tabs"][0]["title"] == "Данные"
         db_service.delete_dashboard_spec(sales_file_id)
 
     def test_spec_save_rejects_invalid(self, client, sales_file_id):
@@ -277,7 +277,7 @@ class TestEndpoints:
         dashboard_service.save_spec(sales_file_id, _spec(title="Сохранённый"))
         response = client.post("/dashboard", json={"file_id": sales_file_id})
         assert response.status_code == 200
-        assert response.json()["tabs"][0]["title"] == "Вкладка"
+        assert response.json()["tabs"][0]["title"] == "Данные"
         assert "spec" in response.json()
         db_service.delete_dashboard_spec(sales_file_id)
 
@@ -291,7 +291,7 @@ class TestEndpoints:
             json={"file_id": sales_file_id, "request": "собери дашборд по менеджерам"},
         )
         assert response.status_code == 200, response.text
-        assert response.json()["tabs"][0]["tiles"][0]["title"] == "NL-дашборд"
+        assert response.json()["tabs"][0]["title"] == "Данные"
         db_service.delete_dashboard_spec(sales_file_id)
 
     def test_generate_falls_back_when_llm_fails(self, client, sales_file_id, monkeypatch):
@@ -320,12 +320,10 @@ class TestEndpoints:
             },
         )
         assert response.status_code == 200, response.text
-        kinds = [
-            tile["source"]["kind"]
-            for tab in response.json()["spec"]["tabs"]
-            for tile in tab["tiles"]
-        ]
-        assert "current_stage" in kinds
+        payload = response.json()
+        assert [tab["title"] for tab in payload["spec"]["tabs"]] == ["Данные"]
+        kinds = [tile["source"]["kind"] for tab in payload["spec"]["tabs"] for tile in tab["tiles"]]
+        assert "pivot" in kinds
         db_service.delete_dashboard_spec(sales_file_id)
 
     def test_generate_conflict_returns_409(self, client, sales_file_id, monkeypatch):

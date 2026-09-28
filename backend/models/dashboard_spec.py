@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 ChartType = Literal["bar", "hbar", "pie", "line", "area", "table"]
 AggType = Literal["sum", "mean", "count"]
-PeriodType = Literal["month", "quarter", "year"]
+PeriodType = Literal["month", "quarter", "year", "half"]
 UnitType = Literal["auto", "rub", "k", "mln", "mlrd"]
 
 
@@ -23,7 +23,9 @@ class TileSource(BaseModel):
     current_stage — воронка «как в 1С»: сделка целиком на ПОСЛЕДНЕМ
     заполненном этапе (сумма сделки или число сделок);
     period — динамика по дате;
-    pivot — таблица: категория × период (кварталы по подразделениям).
+    pivot — таблица: категория × период (кварталы по подразделениям);
+    halfyear — блоки «Сделки и ЗК» по полугодиям/кварталам/месяцам (period: half | quarter | month);
+    status_summary — сводка сделок и ЗК по статусам (в работе, выиграна, …).
     """
 
     kind: Literal[
@@ -35,6 +37,7 @@ class TileSource(BaseModel):
         "pivot",
         "outcome",
         "halfyear",
+        "status_summary",
     ]
     group_semantic: str | None = None
     group_column: str | None = None

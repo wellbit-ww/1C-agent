@@ -78,10 +78,8 @@ def test_sales_pipeline_unchanged(sales_df):
     assert detect_report_type(sales_df, filename="Этапы продаж.xlsx") == "sales_pipeline"
     _, profile = get_profile_for_df(sales_df, filename="Этапы продаж.xlsx")
     spec = profile.get_dashboard_spec(sales_df)
-    assert [t.title for t in spec.tabs] == ["Сделки", "Воронка", "Менеджеры", "Клиенты"]
+    assert [t.title for t in spec.tabs] == ["Данные"]
     assert spec.tabs[0].tiles[0].chart_type == "table"
-    managers = next(t for t in spec.tabs if t.title == "Менеджеры")
-    assert all(tile.chart_type == "hbar" for tile in managers.tiles)
     rendered = render_spec(sales_df, spec)
     table_tile = rendered["tabs"][0]["tiles"][0]
     assert table_tile["chart_type"] == "table"

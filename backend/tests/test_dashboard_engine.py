@@ -249,15 +249,51 @@ class TestDealsPivot:
         from services.report_profiles.sales_profile import build_sales_dashboard_spec
 
         spec = build_sales_dashboard_spec(sales_df)
-        assert spec.tabs[0].title == "Сделки"
+        assert spec.tabs[0].title == "Данные"
+        assert [t.title for t in spec.tabs] == ["Данные"]
         rendered = render_spec(sales_df, spec)
         deals = rendered["tabs"][0]["tiles"]
         assert deals[0]["chart_type"] == "table"
         assert "1 кв" in " ".join(deals[0]["table"]["columns"])
-        assert deals[1]["chart_type"] == "pie"
-        assert "plotly_json" in deals[1]
-        assert deals[2]["title"] == "Проигранные и отменённые сделки"
-        assert deals[2]["table"]["totals_label"] == "Совтест"
+        assert deals[1]["title"] == "Проигранные и отменённые сделки"
+        assert deals[1]["table"]["totals_label"] == "Совтест"
+        assert deals[-1]["title"] == "Сделки и ЗК по статусам"
+        assert deals[-1]["table"]["index_label"] == "Статус"
+
+
+def test_status_summary_by_deal_status():
+    df = pd.DataFrame(
+        {
+            "статус": ["В работе", "В работе", "Выиграна", "Проиграна", "Отменена"],
+            "количество сделок": [10, 5, 3, 1, 2],
+            "сумма по сделке": [100.0, 50.0, 30.0, 10.0, 20.0],
+            "количество зк": [2, 0, 1, 0, 0],
+            "сумма зк": [40.0, 0.0, 5.0, 0.0, 0.0],
+        }
+    )
+    spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="Сделки",
+                tiles=[
+                    Tile(
+                        title="Сделки и ЗК по статусам",
+                        chart_type="table",
+                        source={"kind": "status_summary"},
+                        agg="sum",
+                        top_n=50,
+                        sort="none",
+                    )
+                ],
+            )
+        ]
+    )
+    table = render_spec(df, spec)["tabs"][0]["tiles"][0]["table"]
+    by_status = {row["label"]: row["values"] for row in table["rows"]}
+    assert by_status["В работе"][:2] == [15, 150]
+    assert by_status["В работе"][2:] == [2, 40]
+    assert by_status["Проиграна"][2:] == [None, None]
+    assert table["totals"][:2] == [21, 210]
 
 
 def test_department_short_names():
@@ -313,6 +349,69 @@ def test_halfyear_splits_company_and_departments():
     second = sections[1]["tables"]
     assert [item["title"] for item in second] == ["Совтест", "СМЭ"]
     assert second[1]["rows"][1]["values"][3] == 12.5
+
+
+def test_halfyear_respects_quarter_and_month_buckets():
+    df = pd.DataFrame(
+        {
+            "подразделение": ["СИО", "СИО", "СТО"],
+            "дата начала сделки": pd.to_datetime(["2026-01-15", "2026-04-10", "2026-02-01"]),
+            "количество сделок": [1, 2, 3],
+            "сумма по сделке": [10.0, 20.0, 30.0],
+            "количество зк": [0, 1, 1],
+            "сумма зк": [0.0, 5.0, 3.0],
+        }
+    )
+    quarter_spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="Сделки",
+                tiles=[
+                    Tile(
+                        title="Сделки и ЗК",
+                        chart_type="table",
+                        source={
+                            "kind": "halfyear",
+                            "group_semantic": "department",
+                            "period": "quarter",
+                        },
+                        agg="sum",
+                        top_n=50,
+                        sort="none",
+                    )
+                ],
+            )
+        ]
+    )
+    q_sections = render_spec(df, quarter_spec)["tabs"][0]["tiles"][0]["sections"]
+    assert [b["title"] for b in q_sections] == ["1 кв. 2026", "2 кв. 2026"]
+    assert q_sections[0]["tables"][0]["rows"][0]["values"][0] == 4
+
+    month_spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="Сделки",
+                tiles=[
+                    Tile(
+                        title="Сделки и ЗК",
+                        chart_type="table",
+                        source={
+                            "kind": "halfyear",
+                            "group_semantic": "department",
+                            "period": "month",
+                        },
+                        agg="sum",
+                        top_n=50,
+                        sort="none",
+                    )
+                ],
+            )
+        ]
+    )
+    m_sections = render_spec(df, month_spec)["tabs"][0]["tiles"][0]["sections"]
+    assert [b["title"] for b in m_sections] == ["янв 2026", "фев 2026", "апр 2026"]
+    assert m_sections[0]["tables"][0]["rows"][0]["values"][0] == 1
+    assert m_sections[1]["tables"][0]["rows"][0]["values"][0] == 3
 
 
 def test_outcome_table_counts_lost_and_cancelled():

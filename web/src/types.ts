@@ -44,6 +44,7 @@ export type Tile = {
   chart_type?: string;
   table?: PivotTable;
   sections?: SectionBlock[];
+  bucket_period?: string;
   error?: string;
 };
 

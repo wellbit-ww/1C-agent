@@ -132,8 +132,11 @@ def _fmt(value: float) -> str:
     return f"{float(value):,.2f}".replace(",", " ")
 
 
+SALES_DATA_TAB_TITLE = "Данные"
+
+
 def build_deals_tab(df: pd.DataFrame) -> Tab | None:
-    """Первая вкладка «Сделки»: сводная квартал×подразделение и круговая."""
+    """Вкладка «Данные» (этапы продаж): сводные таблицы по кварталам, статусам и ЗК."""
     from services.chat_question_pack import _start_date_column
     from services.column_resolver import resolve_semantic_column
 
@@ -142,7 +145,7 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
     if not dept or not start:
         return None
     return Tab(
-        title="Сделки",
+        title=SALES_DATA_TAB_TITLE,
         tiles=[
             Tile(
                 title="Сделки по кварталам и подразделениям",
@@ -155,13 +158,6 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
                 agg="count",
                 top_n=30,
                 sort="none",
-            ),
-            Tile(
-                title="Распределение сделок по подразделениям",
-                chart_type="pie",
-                source=TileSource(kind="group", group_semantic="department"),
-                agg="count",
-                top_n=12,
             ),
             Tile(
                 title="Проигранные и отменённые сделки",
@@ -181,7 +177,16 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
                 source=TileSource(
                     kind="halfyear",
                     group_semantic="department",
+                    period="half",
                 ),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
+            Tile(
+                title="Сделки и ЗК по статусам",
+                chart_type="table",
+                source=TileSource(kind="status_summary"),
                 agg="sum",
                 top_n=50,
                 sort="none",

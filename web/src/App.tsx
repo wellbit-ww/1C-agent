@@ -5,7 +5,7 @@ import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
-import type { ChatMessage, Dashboard, DashSpec, FileContext, PivotTable, Report, ReportChart, SectionBlock } from "./types";
+import type { ChatMessage, Dashboard, DashSpec, FileContext, PivotTable, Report, ReportChart, SectionBlock, Tile } from "./types";
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -21,6 +21,12 @@ const TYPE_NAMES: Record<string, string> = {
 function typeName(t?: string) {
   return TYPE_NAMES[t ?? ""] ?? "Отчёт";
 }
+
+const DEALS_ZK_BUCKETS: { id: string; label: string }[] = [
+  { id: "half", label: "Полугодие" },
+  { id: "quarter", label: "Квартал" },
+  { id: "month", label: "Месяц" },
+];
 
 function formatPivotNumber(value: number | null | undefined, kind?: string) {
   if (value == null || Number.isNaN(Number(value))) return "—";
@@ -54,6 +60,222 @@ function formatSectionCell(value: number | null | undefined, kind?: string) {
   }
   const digits = kind === "count" || Number.isInteger(n) ? 0 : 2;
   return n.toLocaleString("ru-RU", { maximumFractionDigits: digits });
+}
+
+/** Число без экспоненты: «909030644.37», не «9.09e+8». */
+function excelLiteral(value: number, digits: number) {
+  return value.toFixed(digits);
+}
+
+function tsvEscape(cell: string) {
+  if (/[\t\n\r"]/.test(cell)) return `"${cell.replaceAll('"', '""')}"`;
+  return cell;
+}
+
+function htmlEscape(text: string) {
+  return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+type HtmlCell = { text: string; colspan?: number; rowspan?: number; num?: string; format?: string };
+
+function gridToTsv(rows: string[][]) {
+  return rows.map((row) => row.map(tsvEscape).join("\t")).join("\r\n");
+}
+
+function gridWidth(rows: HtmlCell[][]) {
+  return rows.reduce((max, row) => {
+    const span = row.reduce((sum, cell) => sum + (cell.colspan ?? 1), 0);
+    return Math.max(max, span);
+  }, 1);
+}
+
+function displayedChars(cell: HtmlCell) {
+  if (cell.format === "#,##0.00" && cell.num != null) {
+    const formatted = Number(cell.num).toLocaleString("ru-RU", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    return formatted.replace(/\s/g, " ").length;
+  }
+  return cell.text.length;
+}
+
+/** Ширина колонки в пикселях, чтобы Excel показал число целиком, а не ######. */
+function columnPixelWidths(rows: HtmlCell[][]) {
+  const width = gridWidth(rows);
+  const chars = Array.from({ length: width }, () => 0);
+  for (const row of rows) {
+    let col = 0;
+    for (const cell of row) {
+      const span = cell.colspan ?? 1;
+      if (span === 1 && col < width) chars[col] = Math.max(chars[col], displayedChars(cell));
+      col += span;
+    }
+  }
+  return chars.map((count) => Math.max(72, Math.round(count * 9 + 28)));
+}
+
+function gridToHtml(rows: HtmlCell[][]) {
+  const widths = columnPixelWidths(rows);
+  const totalPx = widths.reduce((sum, px) => sum + px, 0);
+  const totalPt = ((totalPx * 72) / 96).toFixed(2);
+  const cols = widths
+    .map((px) => {
+      const pt = ((px * 72) / 96).toFixed(2);
+      return `<col width="${px}" style="mso-width-source:userset;width:${pt}pt">`;
+    })
+    .join("");
+  const body = rows
+    .map((row) => {
+      let col = 0;
+      const cells = row
+        .map((cell) => {
+          const span = cell.colspan ?? 1;
+          const px = widths.slice(col, col + span).reduce((sum, item) => sum + item, 0);
+          const pt = ((px * 72) / 96).toFixed(2);
+          col += span;
+          const colspan = span > 1 ? ` colspan="${span}"` : "";
+          const rowspan = cell.rowspan && cell.rowspan > 1 ? ` rowspan="${cell.rowspan}"` : "";
+          const numeric = cell.num != null ? ` x:num="${cell.num}"` : "";
+          const format = cell.format ? `mso-number-format:'${cell.format}';` : "";
+          return `<td${colspan}${rowspan}${numeric} width="${px}" style="${format}white-space:nowrap;mso-text-control:shrinktofit;width:${pt}pt">${htmlEscape(cell.text)}</td>`;
+        })
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+  return `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"><meta name="ProgId" content="Excel.Sheet"><style><!--
+td{white-space:nowrap;mso-text-control:shrinktofit;}
+--></style></head><body><table border="0" cellpadding="0" cellspacing="0" width="${totalPx}" style="border-collapse:collapse;table-layout:fixed;width:${totalPt}pt"><!--StartFragment-->${cols}${body}<!--EndFragment--></table></body></html>`;
+}
+
+function padRow(cells: string[], width: number) {
+  const row = cells.slice();
+  while (row.length < width) row.push("");
+  return row;
+}
+
+function pushExcelLine(
+  plain: string[][],
+  html: HtmlCell[][],
+  label: string,
+  values: (number | null | undefined)[],
+  kinds?: string[],
+) {
+  const plainCells: string[] = [];
+  const htmlCells: HtmlCell[] = [{ text: label }];
+  values.forEach((value, i) => {
+    const kind = kinds?.[i];
+    if (value == null || kind === "empty" || Number.isNaN(Number(value))) {
+      plainCells.push("");
+      htmlCells.push({ text: "" });
+      return;
+    }
+    const n = Number(value);
+    if (kind === "percent") {
+      const text = `${Math.round(n)}%`;
+      plainCells.push(text);
+      htmlCells.push({ text });
+      return;
+    }
+    if (kind === "percent1") {
+      const text = `${n.toFixed(1).replace(".", ",")}%`;
+      plainCells.push(text);
+      htmlCells.push({ text });
+      return;
+    }
+    const money = kind === "money" || (kind !== "count" && !Number.isInteger(n));
+    const literal = money ? excelLiteral(n, 2) : excelLiteral(n, 0);
+    const text = literal.replace(".", ",");
+    plainCells.push(text);
+    htmlCells.push({
+      text,
+      num: literal,
+      format: money ? "#,##0.00" : "0",
+    });
+  });
+  plain.push([label, ...plainCells]);
+  html.push(htmlCells);
+}
+
+function pivotColumnLabel(col: string, hasYears: boolean) {
+  if (!hasYears) return col;
+  if (isYearTotalColumn(col)) return col;
+  return col.replace(/\s+\d{4}$/, "");
+}
+
+function pivotToGrid(table: PivotTable): { plain: string[][]; html: HtmlCell[][] } {
+  const spans = table.year_spans ?? [];
+  const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
+  const index = table.index_label || "Подразделение";
+  const width = 1 + table.columns.length;
+  const plain: string[][] = [];
+  const html: HtmlCell[][] = [];
+
+  if (hasYears) {
+    const spanPlain = [index];
+    const spanHtml: HtmlCell[] = [{ text: index, rowspan: 2 }];
+    for (const span of spans) {
+      spanPlain.push(span.label);
+      for (let i = 1; i < span.count; i += 1) spanPlain.push("");
+      spanHtml.push({ text: span.label, colspan: span.count });
+    }
+    plain.push(padRow(spanPlain, width));
+    html.push(spanHtml);
+  }
+
+  const labels = table.columns.map((col) => pivotColumnLabel(col, hasYears));
+  const header = [hasYears ? "" : index, ...labels];
+  plain.push(header);
+  html.push((hasYears ? labels : header).map((text) => ({ text })));
+
+  for (const row of table.rows) {
+    pushExcelLine(plain, html, row.label, row.values, table.column_kinds);
+  }
+  if (table.totals && table.totals.length > 0) {
+    pushExcelLine(plain, html, table.totals_label || "Итого", table.totals, table.column_kinds);
+  }
+  return { plain, html };
+}
+
+function sectionsToGrid(sections: SectionBlock[]): { plain: string[][]; html: HtmlCell[][] } {
+  const plain: string[][] = [];
+  const html: HtmlCell[][] = [];
+  sections.forEach((block, blockI) => {
+    const width = 1 + Math.max(0, ...block.tables.map((item) => item.columns.length));
+    if (blockI > 0) {
+      plain.push(padRow([], width));
+      html.push([{ text: "" }]);
+    }
+    plain.push(padRow([block.title], width));
+    html.push([{ text: block.title, colspan: width }]);
+    for (const item of block.tables) {
+      plain.push(padRow([item.title], width));
+      html.push([{ text: item.title, colspan: width }]);
+      const header = ["", ...item.columns];
+      plain.push(padRow(header, width));
+      html.push(header.map((text) => ({ text })));
+      for (const row of item.rows) {
+        const before = plain.length;
+        pushExcelLine(plain, html, row.label, row.values, row.kinds);
+        plain[before] = padRow(plain[before], width);
+      }
+    }
+  });
+  return { plain, html };
+}
+
+async function writeExcelTable(plain: string[][], html: HtmlCell[][]) {
+  const markup = gridToHtml(html);
+  if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([markup], { type: "text/html" }),
+      }),
+    ]);
+    return;
+  }
+  await navigator.clipboard.writeText(gridToTsv(plain));
 }
 
 function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
@@ -524,20 +746,79 @@ export function App() {
     }
   }
 
+  async function applyDashboardPatch(
+    patch: Dashboard,
+    specFallback: DashSpec,
+    noticeText?: string,
+  ) {
+    let tabs = patch.tabs;
+    let spec = patch.spec ?? specFallback;
+    if ((!tabs || !tabs.length) && fileId) {
+      const fresh = await api.getDashboard(fileId);
+      tabs = fresh.tabs ?? tabs;
+      spec = fresh.spec ?? spec;
+    }
+    setDashboard((cur) => ({
+      ...(cur ?? {}),
+      ...patch,
+      tabs: tabs ?? cur?.tabs,
+      spec,
+    }));
+    if (noticeText) setNotice(noticeText);
+  }
+
+  async function onHalfyearBucket(tabI: number, tileI: number, period: string) {
+    const spec = dashboard?.spec;
+    if (!spec || !fileId) return;
+    const next: DashSpec = {
+      tabs: spec.tabs.map((t, ti) =>
+        ti !== tabI
+          ? t
+          : {
+              ...t,
+              tiles: t.tiles.map((item, ij) =>
+                ij !== tileI
+                  ? item
+                  : {
+                      ...item,
+                      source: { ...item.source, kind: "halfyear", period },
+                    },
+              ),
+            },
+      ),
+    };
+    setBusy("Обновляю таблицу…");
+    setError(null);
+    try {
+      const patch = await api.dashboardSaveSpec(fileId, next);
+      await applyDashboardPatch(patch, next);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onCopyTable(tile: Tile) {
+    const grid = tile.sections ? sectionsToGrid(tile.sections) : tile.table ? pivotToGrid(tile.table) : null;
+    if (!grid) return;
+    setError(null);
+    try {
+      await writeExcelTable(grid.plain, grid.html);
+      setNotice("Таблица скопирована. Вставьте её в Excel — каждая ячейка ляжет в свою.");
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "Не удалось скопировать таблицу");
+    }
+  }
+
   async function onSaveSpec(spec: DashSpec) {
     if (!fileId) return;
     setBusy("Сохраняю дашборд…");
     setError(null);
     try {
       const patch = await api.dashboardSaveSpec(fileId, spec);
-      setDashboard((cur) => ({
-        ...(cur ?? {}),
-        ...patch,
-        tabs: patch.tabs ?? cur?.tabs,
-        spec: patch.spec ?? spec,
-      }));
+      await applyDashboardPatch(patch, spec, "Дашборд сохранён");
       setChartEditor(null);
-      setNotice("Дашборд сохранён");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -852,6 +1133,8 @@ export function App() {
                           chartEditor?.mode === "edit" &&
                           chartEditor.tabI === tab &&
                           chartEditor.tileI === tileI;
+                        const specTile = dashboard?.spec?.tabs[tab]?.tiles[tileI];
+                        const halfyearTile = specTile?.source?.kind === "halfyear";
                         return (
                         <div
                           key={`${tile.title}-${tileI}`}
@@ -859,8 +1142,25 @@ export function App() {
                             editing ? "border-accent/60" : "border-line"
                           } ${tile.table || tile.sections || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
-                          <div className="mb-2 flex items-start justify-between gap-2">
-                            <div className="text-sm font-medium">{tile.title}</div>
+                          <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <div className="text-sm font-medium">{tile.title}</div>
+                              {halfyearTile && dashboard?.spec && (
+                                <select
+                                  value={specTile?.source?.period || "half"}
+                                  disabled={!!busy}
+                                  onChange={(e) => void onHalfyearBucket(tab, tileI, e.target.value)}
+                                  className="rounded-md border border-line bg-bg px-2 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-accent/60"
+                                  aria-label="Группировка по периоду"
+                                >
+                                  {DEALS_ZK_BUCKETS.map((item) => (
+                                    <option key={item.id} value={item.id}>
+                                      {item.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
                             <div className="flex shrink-0 gap-1">
                               {dashboard?.spec && (
                                 <button
@@ -869,6 +1169,15 @@ export function App() {
                                   onClick={() => setChartEditor({ mode: "edit", tabI: tab, tileI })}
                                 >
                                   Настроить
+                                </button>
+                              )}
+                              {(tile.table || tile.sections) && (
+                                <button
+                                  type="button"
+                                  className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+                                  onClick={() => void onCopyTable(tile)}
+                                >
+                                  Скопировать
                                 </button>
                               )}
                               {(tile.plotly_json || tile.table) && (
@@ -892,7 +1201,10 @@ export function App() {
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
                           ) : tile.sections ? (
-                            <HalfYearTables sections={tile.sections} />
+                            <HalfYearTables
+                              key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "half"}`}
+                              sections={tile.sections}
+                            />
                           ) : tile.table ? (
                             <PivotTableView table={tile.table} />
                           ) : tile.plotly_json ? (

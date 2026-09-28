@@ -186,8 +186,18 @@ _AGG_ALIASES = {
 
 _VALID_CHARTS = {"bar", "hbar", "pie", "line", "area", "table"}
 _VALID_AGGS = {"sum", "mean", "count"}
-_VALID_KINDS = {"group", "columns_pattern", "named_columns", "period", "current_stage", "pivot"}
-_VALID_PERIODS = {"month", "quarter", "year"}
+_VALID_KINDS = {
+    "group",
+    "columns_pattern",
+    "named_columns",
+    "period",
+    "current_stage",
+    "pivot",
+    "halfyear",
+    "outcome",
+    "status_summary",
+}
+_VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
 _VALID_SORTS = {"desc", "asc", "none"}
 
@@ -291,7 +301,7 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             kind = "period"
         else:
             kind = "group"
-    if chart == "table":
+    if chart == "table" and kind not in ("halfyear", "outcome", "status_summary"):
         kind = "pivot"
 
     src: dict = {"kind": kind}
@@ -325,6 +335,21 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         if len(resolved) < 2:
             return None
         src["column_names"] = resolved[:12]
+    elif kind == "status_summary":
+        src["kind"] = "status_summary"
+        chart = "table"
+    elif kind in ("halfyear", "outcome"):
+        group_column = _best_column(df, source.get("group_column"))
+        if group_column:
+            src["group_column"] = group_column
+        elif source.get("group_semantic"):
+            src["group_semantic"] = source["group_semantic"]
+        else:
+            src["group_semantic"] = "department"
+        default_period = "half" if kind == "halfyear" else "quarter"
+        period = str(source.get("period") or default_period).lower()
+        src["period"] = period if period in _VALID_PERIODS else default_period
+        chart = "table"
     elif kind == "pivot":
         group_column = _best_column(df, source.get("group_column"))
         if group_column:

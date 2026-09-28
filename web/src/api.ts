@@ -20,7 +20,11 @@ async function readError(res: Response): Promise<string> {
       return detail;
     }
     if (Array.isArray(detail)) return detail.map((d) => d.msg ?? d).join("; ");
-    if (res.status >= 500) return "Сервер не смог обработать запрос. Попробуйте ещё раз.";
+    if (res.status >= 500) {
+      return typeof detail === "string" && detail && detail !== "Internal Server Error"
+        ? detail
+        : "Сервер не смог обработать запрос. Перезапустите backend (stop.bat → start.bat) и попробуйте снова.";
+    }
     return res.statusText;
   } catch {
     return res.statusText || `HTTP ${res.status}`;

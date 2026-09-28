@@ -146,14 +146,20 @@ class ExcelAgent:
             from services.dashboard_engine import render_spec
 
             if report_type == "sales_pipeline":
-                from services.report_profiles.sales_profile import (
-                    ensure_halfyear_tile,
-                    ensure_outcome_tile,
-                )
+                from services.report_profiles.sales_profile import enrich_deals_tab
 
-                spec = ensure_halfyear_tile(ensure_outcome_tile(spec))
-            result["tabs"] = render_spec(df, spec)["tabs"]
-            result["spec"] = spec.model_dump()
+                spec = enrich_deals_tab(spec, df)
+            try:
+                result["tabs"] = render_spec(df, spec)["tabs"]
+                result["spec"] = spec.model_dump(mode="json")
+            except Exception as exc:
+                import logging
+
+                logging.getLogger("excel_agent").exception(
+                    "Не удалось отрисовать дашборд для %s", file_id
+                )
+                result["warning"] = f"Дашборд не собран: {exc}"
+                result["charts"] = profile.get_charts(df)
         else:
             result["charts"] = profile.get_charts(df)
 

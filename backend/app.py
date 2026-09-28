@@ -145,10 +145,16 @@ def _get_file_path_or_404(file_id: str) -> str:
 def _handle_service_errors(func, *args, **kwargs):
     try:
         return func(*args, **kwargs)
+    except HTTPException:
+        raise
     except (InvalidFileError, EmptyDataFrameError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except OllamaUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Ошибка в %s", getattr(func, "__name__", func))
+        detail = str(exc).strip() or "Внутренняя ошибка сервера"
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @app.get("/")
@@ -189,8 +195,16 @@ def _finish_upload(file_id: str, file_path: str) -> dict:
     try:
         df, workbook = read_workbook(file_path)
         set_dataframe(file_id, df)
+    except HTTPException:
+        raise
     except (InvalidFileError, EmptyDataFrameError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Ошибка чтения файла после загрузки %s", file_id)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Не удалось обработать файл: {exc}",
+        ) from exc
 
     try:
         from services.file_context_service import ensure_context
@@ -371,11 +385,24 @@ def file_context(request: FileContextRequest):
 # Дашборды v2: NL-генерация/редактирование, пин из чата, комментарии
 # ---------------------------------------------------------------------------
 
-def _render_and_respond(df, spec) -> dict:
+def _prepare_dashboard_spec(df, file_id: str, spec):
+    from services.report_service import get_profile_for_df
+    from services.storage_service import get_original_name
+
+    report_type, _ = get_profile_for_df(df, filename=get_original_name(file_id))
+    if report_type == "sales_pipeline":
+        from services.report_profiles.sales_profile import enrich_deals_tab
+
+        spec = enrich_deals_tab(spec, df)
+    return spec
+
+
+def _render_and_respond(df, file_id: str, spec) -> dict:
     from services.dashboard_engine import render_spec
 
+    spec = _prepare_dashboard_spec(df, file_id, spec)
     rendered = render_spec(df, spec)
-    return {"tabs": rendered["tabs"], "spec": spec.model_dump()}
+    return {"tabs": rendered["tabs"], "spec": spec.model_dump(mode="json")}
 
 
 def _load_df(file_id: str, file_path: str):
@@ -411,7 +438,7 @@ def dashboard_generate(request: DashboardGenerateRequest):
             status_code=409,
             detail="Дашборд изменился, пока собирался новый. Повторите запрос.",
         )
-    payload = _render_and_respond(df, spec)
+    payload = _render_and_respond(df, request.file_id, spec)
     if warning:
         payload["warning"] = warning
     return payload
@@ -448,7 +475,7 @@ def dashboard_edit(request: DashboardGenerateRequest):
             status_code=409,
             detail="Дашборд изменился, пока применялась правка. Повторите запрос.",
         )
-    payload = _render_and_respond(df, spec)
+    payload = _render_and_respond(df, request.file_id, spec)
     if warning:
         payload["warning"] = warning
     return payload
@@ -483,7 +510,7 @@ def dashboard_spec_save(request: DashboardSpecSaveRequest):
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=f"Невалидная спека: {exc.errors()[0]['msg']}")
     dashboard_service.save_spec(request.file_id, spec)
-    return _render_and_respond(df, spec)
+    return _render_and_respond(df, request.file_id, spec)
 
 
 @app.post("/dashboard/comments")

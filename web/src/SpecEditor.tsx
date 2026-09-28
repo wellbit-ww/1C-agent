@@ -34,6 +34,12 @@ const PERIODS: { id: string; label: string }[] = [
   { id: "year", label: "По годам" },
 ];
 
+const DEALS_ZK_BUCKETS: { id: string; label: string }[] = [
+  { id: "half", label: "По полугодиям" },
+  { id: "quarter", label: "По кварталам" },
+  { id: "month", label: "По месяцам" },
+];
+
 const INTENTS: { id: string; label: string; hint: string }[] = [
   {
     id: "group",
@@ -69,6 +75,11 @@ const INTENTS: { id: string; label: string; hint: string }[] = [
     id: "halfyear",
     label: "Сделки и ЗК по полугодиям",
     hint: "Компания и каждая служба: количество, сумма, конверсия",
+  },
+  {
+    id: "status_summary",
+    label: "Сделки и ЗК по статусам",
+    hint: "В работе, выиграна, проиграна, отменена — количество и суммы",
   },
 ];
 
@@ -134,7 +145,18 @@ function blankTile(intent: string, columns: string[]): TileSpec {
       top_n: 50,
       unit: "auto",
       sort: "none",
-      source: { kind: "halfyear", group_semantic: "department" },
+      source: { kind: "halfyear", group_semantic: "department", period: "half" },
+    };
+  }
+  if (intent === "status_summary") {
+    return {
+      title: "Сделки и ЗК по статусам",
+      chart_type: "table",
+      agg: "sum",
+      top_n: 50,
+      unit: "auto",
+      sort: "none",
+      source: { kind: "status_summary" },
     };
   }
   if (intent === "outcome") {
@@ -300,14 +322,41 @@ export function ChartEditor({ spec, columns, busy, mode, onClose, onSave }: Prop
                 className={selectClass}
               />
             </Field>
-            {(intent === "outcome" || intent === "halfyear") && (
+            {intent === "halfyear" && (
+              <>
+                <Field label="Группировать">
+                  <select
+                    value={tile.source.period || "half"}
+                    onChange={(e) =>
+                      patch({}, { ...tile.source, kind: "halfyear", period: e.target.value })
+                    }
+                    className={selectClass}
+                  >
+                    {DEALS_ZK_BUCKETS.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <p className="text-xs text-zinc-500">
+                  Период берётся из даты начала сделки (и тех же строк для ЗК). Полугодие: 1 янв–30 июн
+                  и 1 июл–31 дек. Службы показаны раздельно.
+                </p>
+              </>
+            )}
+            {intent === "outcome" && (
               <p className="text-xs text-zinc-500">
-                {intent === "halfyear"
-                  ? "1 полугодие — с 1 января по 30 июня, 2 полугодие — с 1 июля по 31 декабря. Службы показаны раздельно."
-                  : "Кварталы берутся из даты начала сделки. В строке «Совтест» — сумма по всем подразделениям."}
+                Кварталы берутся из даты начала сделки. В строке «Совтест» — сумма по всем подразделениям.
               </p>
             )}
-            {intent !== "outcome" && intent !== "halfyear" && (
+            {intent === "status_summary" && (
+              <p className="text-xs text-zinc-500">
+                Суммируются колонки «количество сделок», «сумма по сделке», «количество ЗК» и «сумма ЗК» по
+                колонке статуса.
+              </p>
+            )}
+            {intent !== "outcome" && intent !== "halfyear" && intent !== "status_summary" && (
             <div>
               <div className="mb-1 text-xs text-zinc-400">Как показать</div>
               <div className="grid grid-cols-2 gap-1.5">

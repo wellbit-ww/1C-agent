@@ -1,19 +1,58 @@
-from services.column_resolver import resolve_semantic_column
+import pandas as pd
+
 from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
+from services.generic_dashboard import SALES_DATA_TAB_TITLE
 from services.report_profiles.base_profile import ReportProfile
+
+_LEGACY_SALES_DATA_TAB_TITLE = "Сделки"
+
+
+def _is_sales_data_tab(tab: Tab) -> bool:
+    return tab.title in (SALES_DATA_TAB_TITLE, _LEGACY_SALES_DATA_TAB_TITLE)
+
+
+def _sales_data_tab_only(spec: DashboardSpec, df: pd.DataFrame | None = None) -> DashboardSpec:
+    """Одна вкладка «Данные»: убрать Воронку/Менеджеры/Клиенты, переименовать «Сделки»."""
+    data_tab: Tab | None = None
+    for tab in spec.tabs:
+        if _is_sales_data_tab(tab):
+            tab.title = SALES_DATA_TAB_TITLE
+            data_tab = tab
+            break
+    if data_tab is None and df is not None:
+        from services.generic_dashboard import build_deals_tab
+
+        data_tab = build_deals_tab(df)
+    if data_tab is not None:
+        spec.tabs = [data_tab]
+    return spec
+
+
+def _drop_legacy_deals_pie(spec: DashboardSpec) -> DashboardSpec:
+    """Убрать устаревшую круговую по подразделениям (больше не в дефолтной спеке)."""
+    for tab in spec.tabs:
+        if not _is_sales_data_tab(tab):
+            continue
+        tab.tiles = [
+            tile
+            for tile in tab.tiles
+            if tile.title != "Распределение сделок по подразделениям"
+        ]
+    return spec
 
 
 def ensure_outcome_tile(spec: DashboardSpec) -> DashboardSpec:
-    """На вкладке «Сделки» таблица проигранных и отменённых стоит после сводки и круговой."""
+    """На вкладке «Сделки» таблица проигранных и отменённых — после сводной по кварталам."""
     for tab in spec.tabs:
-        if tab.title != "Сделки":
+        if not _is_sales_data_tab(tab):
             continue
+        tab.title = SALES_DATA_TAB_TITLE
         if any(tile.source.kind == "outcome" for tile in tab.tiles):
             return spec
         if len(tab.tiles) >= 8:
             return spec
         tab.tiles.insert(
-            min(2, len(tab.tiles)),
+            min(1, len(tab.tiles)),
             Tile(
                 title="Проигранные и отменённые сделки",
                 chart_type="table",
@@ -31,11 +70,43 @@ def ensure_outcome_tile(spec: DashboardSpec) -> DashboardSpec:
     return spec
 
 
+def enrich_deals_tab(spec: DashboardSpec, df: pd.DataFrame | None = None) -> DashboardSpec:
+    """Вкладка «Данные»: таблицы сделок/ЗК без лишних вкладок дашборда."""
+    spec = _sales_data_tab_only(spec, df)
+    spec = _drop_legacy_deals_pie(spec)
+    return ensure_status_summary_tile(ensure_halfyear_tile(ensure_outcome_tile(spec)))
+
+
+def ensure_status_summary_tile(spec: DashboardSpec) -> DashboardSpec:
+    """Последняя таблица вкладки «Сделки»: сделки и ЗК по статусам."""
+    for tab in spec.tabs:
+        if not _is_sales_data_tab(tab):
+            continue
+        tab.title = SALES_DATA_TAB_TITLE
+        if any(tile.source.kind == "status_summary" for tile in tab.tiles):
+            return spec
+        if len(tab.tiles) >= 8:
+            return spec
+        tab.tiles.append(
+            Tile(
+                title="Сделки и ЗК по статусам",
+                chart_type="table",
+                source=TileSource(kind="status_summary"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            )
+        )
+        return spec
+    return spec
+
+
 def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
     """Третья таблица вкладки «Сделки»: сделки и ЗК по полугодиям."""
     for tab in spec.tabs:
-        if tab.title != "Сделки":
+        if not _is_sales_data_tab(tab):
             continue
+        tab.title = SALES_DATA_TAB_TITLE
         if any(tile.source.kind == "halfyear" for tile in tab.tiles):
             return spec
         if len(tab.tiles) >= 8:
@@ -43,7 +114,11 @@ def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
         tile = Tile(
             title="Сделки и ЗК по полугодиям",
             chart_type="table",
-            source=TileSource(kind="halfyear", group_semantic="department"),
+            source=TileSource(
+                kind="halfyear",
+                group_semantic="department",
+                period="half",
+            ),
             agg="sum",
             top_n=50,
             sort="none",
@@ -55,7 +130,7 @@ def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
 
 
 def build_sales_dashboard_spec(df):
-    """Вкладочный дашборд «Воронка / Менеджеры / Клиенты» (эталон 1С)."""
+    """Дашборд этапов продаж: одна вкладка «Данные» с таблицами."""
     from services.generic_dashboard import build_deals_tab, build_generic_spec
 
     has_funnel = any(str(c).endswith("(сумма)") for c in df.columns)
@@ -63,125 +138,9 @@ def build_sales_dashboard_spec(df):
         return build_generic_spec(df)
 
     deals = build_deals_tab(df)
-
-    sum_col = resolve_semantic_column(df, "", semantic="sales", dtype="numeric")
-    total = float(df[sum_col].sum()) if sum_col else None
-
-    funnel_tab = Tab(
-        title="Воронка",
-        tiles=[
-            Tile(
-                title="Сделки на текущем этапе (сумма)",
-                chart_type="hbar",
-                source=TileSource(
-                    kind="current_stage",
-                    columns_pattern="(сумма)",
-                    value_semantic="revenue",
-                ),
-                unit="auto",
-                sort="none",
-            ),
-            Tile(
-                title="Сделки на текущем этапе (количество)",
-                chart_type="hbar",
-                source=TileSource(
-                    kind="current_stage",
-                    columns_pattern="(сумма)",
-                ),
-                agg="count",
-                unit="auto",
-                sort="none",
-            ),
-            Tile(
-                title="Динамика продаж по месяцам",
-                chart_type="area",
-                source=TileSource(kind="period", period="month", value_semantic="revenue"),
-                unit="auto",
-                sort="none",
-            ),
-        ],
-    )
-
-    mgr_col = resolve_semantic_column(df, "", semantic="manager", dtype="categorical")
-    mean_line = None
-    if mgr_col and sum_col:
-        mean_line = float(df.groupby(mgr_col)[sum_col].sum().mean())
-
-    managers_tab = Tab(
-        title="Менеджеры",
-        tiles=[
-            Tile(
-                title="Средний чек по менеджерам",
-                chart_type="hbar",
-                source=TileSource(
-                    kind="group", group_semantic="manager", value_semantic="revenue"
-                ),
-                agg="mean",
-                top_n=15,
-                unit="auto",
-            ),
-            Tile(
-                title="Сумма по менеджерам",
-                chart_type="hbar",
-                source=TileSource(
-                    kind="group", group_semantic="manager", value_semantic="revenue"
-                ),
-                agg="sum",
-                top_n=15,
-                unit="auto",
-                target_line=mean_line,
-            ),
-            Tile(
-                title="Продажи по менеджерам",
-                chart_type="hbar",
-                source=TileSource(kind="group", group_semantic="manager"),
-                agg="count",
-                top_n=15,
-                unit="auto",
-            ),
-        ],
-    )
-
-    clients_tab = Tab(
-        title="Клиенты",
-        tiles=[
-            Tile(
-                title="Сумма по клиентам",
-                chart_type="hbar",
-                source=TileSource(
-                    kind="group", group_semantic="client", value_semantic="revenue"
-                ),
-                agg="sum",
-                top_n=10,
-                unit="auto",
-            ),
-            Tile(
-                title="Средний чек по клиентам",
-                chart_type="hbar",
-                source=TileSource(
-                    kind="group", group_semantic="client", value_semantic="revenue"
-                ),
-                agg="mean",
-                top_n=10,
-                unit="auto",
-            ),
-            Tile(
-                title="Продажи по клиентам",
-                chart_type="hbar",
-                source=TileSource(kind="group", group_semantic="client"),
-                agg="count",
-                top_n=10,
-                unit="auto",
-            ),
-        ],
-    )
-
-    tabs = [deals, funnel_tab, managers_tab, clients_tab] if deals else [
-        funnel_tab,
-        managers_tab,
-        clients_tab,
-    ]
-    return DashboardSpec(tabs=tabs)
+    if not deals:
+        return build_generic_spec(df)
+    return DashboardSpec(tabs=[deals])
 
 
 class SalesProfile(ReportProfile):
