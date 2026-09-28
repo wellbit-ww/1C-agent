@@ -22,6 +22,12 @@ function typeName(t?: string) {
   return TYPE_NAMES[t ?? ""] ?? "Отчёт";
 }
 
+const DYNAMICS_PERIOD_KINDS = [
+  "deals_dynamics",
+  "deals_dynamics_departments",
+  "deals_dynamics_outcome_share",
+] as const;
+
 const DEALS_ZK_BUCKETS: { id: string; label: string }[] = [
   { id: "half", label: "Полугодие" },
   { id: "quarter", label: "Квартал" },
@@ -767,23 +773,41 @@ export function App() {
     if (noticeText) setNotice(noticeText);
   }
 
-  async function onHalfyearBucket(tabI: number, tileI: number, period: string) {
+  async function onTilePeriodBucket(
+    tabI: number,
+    tileI: number,
+    period: string,
+    kind:
+      | "halfyear"
+      | "deals_dynamics"
+      | "deals_dynamics_departments"
+      | "deals_dynamics_outcome_share",
+  ) {
     const spec = dashboard?.spec;
     if (!spec || !fileId) return;
+    const syncDynamics = DYNAMICS_PERIOD_KINDS.includes(
+      kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
+    );
     const next: DashSpec = {
       tabs: spec.tabs.map((t, ti) =>
         ti !== tabI
           ? t
           : {
               ...t,
-              tiles: t.tiles.map((item, ij) =>
-                ij !== tileI
-                  ? item
-                  : {
-                      ...item,
-                      source: { ...item.source, kind: "halfyear", period },
-                    },
-              ),
+              tiles: t.tiles.map((item, ij) => {
+                const itemKind = item.source?.kind;
+                if (
+                  syncDynamics &&
+                  itemKind &&
+                  DYNAMICS_PERIOD_KINDS.includes(
+                    itemKind as (typeof DYNAMICS_PERIOD_KINDS)[number],
+                  )
+                ) {
+                  return { ...item, source: { ...item.source, period } };
+                }
+                if (ij !== tileI) return item;
+                return { ...item, source: { ...item.source, kind, period } };
+              }),
             },
       ),
     };
@@ -1134,22 +1158,42 @@ export function App() {
                           chartEditor.tabI === tab &&
                           chartEditor.tileI === tileI;
                         const specTile = dashboard?.spec?.tabs[tab]?.tiles[tileI];
-                        const halfyearTile = specTile?.source?.kind === "halfyear";
+                        const periodBucketTile =
+                          specTile?.source?.kind === "halfyear" ||
+                          DYNAMICS_PERIOD_KINDS.includes(
+                            specTile?.source?.kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
+                          );
+                        const periodBucketDefault =
+                          specTile?.source?.kind === "halfyear" ? "half" : "quarter";
+                        const dynamicsTile = DYNAMICS_PERIOD_KINDS.includes(
+                          tile.chart_type as (typeof DYNAMICS_PERIOD_KINDS)[number],
+                        );
                         return (
                         <div
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${tile.table || tile.sections || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${tile.table || tile.sections || dynamicsTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
                               <div className="text-sm font-medium">{tile.title}</div>
-                              {halfyearTile && dashboard?.spec && (
+                              {periodBucketTile && dashboard?.spec && specTile?.source?.kind && (
                                 <select
-                                  value={specTile?.source?.period || "half"}
+                                  value={specTile?.source?.period || periodBucketDefault}
                                   disabled={!!busy}
-                                  onChange={(e) => void onHalfyearBucket(tab, tileI, e.target.value)}
+                                  onChange={(e) =>
+                                    void onTilePeriodBucket(
+                                      tab,
+                                      tileI,
+                                      e.target.value,
+                                      specTile.source.kind as
+                                        | "halfyear"
+                                        | "deals_dynamics"
+                                        | "deals_dynamics_departments"
+                                        | "deals_dynamics_outcome_share",
+                                    )
+                                  }
                                   className="rounded-md border border-line bg-bg px-2 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-accent/60"
                                   aria-label="Группировка по периоду"
                                 >
@@ -1205,6 +1249,21 @@ export function App() {
                               key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "half"}`}
                               sections={tile.sections}
                             />
+                          ) : dynamicsTile && tile.table ? (
+                            <div
+                              key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "quarter"}`}
+                              className="space-y-4"
+                            >
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <div className="flex justify-center overflow-x-auto">
+                                  <PlotChart
+                                    json={tile.plotly_json}
+                                    className="h-[32rem] w-auto min-w-[min(100%,400px)]"
+                                  />
+                                </div>
+                              ) : null}
+                            </div>
                           ) : tile.table ? (
                             <PivotTableView table={tile.table} />
                           ) : tile.plotly_json ? (

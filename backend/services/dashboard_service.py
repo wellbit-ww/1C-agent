@@ -196,6 +196,9 @@ _VALID_KINDS = {
     "halfyear",
     "outcome",
     "status_summary",
+    "deals_dynamics",
+    "deals_dynamics_departments",
+    "deals_dynamics_outcome_share",
 }
 _VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
@@ -301,7 +304,14 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             kind = "period"
         else:
             kind = "group"
-    if chart == "table" and kind not in ("halfyear", "outcome", "status_summary"):
+    if chart == "table" and kind not in (
+        "halfyear",
+        "outcome",
+        "status_summary",
+        "deals_dynamics",
+        "deals_dynamics_departments",
+        "deals_dynamics_outcome_share",
+    ):
         kind = "pivot"
 
     src: dict = {"kind": kind}
@@ -338,7 +348,13 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
     elif kind == "status_summary":
         src["kind"] = "status_summary"
         chart = "table"
-    elif kind in ("halfyear", "outcome"):
+    elif kind in (
+        "halfyear",
+        "outcome",
+        "deals_dynamics",
+        "deals_dynamics_departments",
+        "deals_dynamics_outcome_share",
+    ):
         group_column = _best_column(df, source.get("group_column"))
         if group_column:
             src["group_column"] = group_column
@@ -346,7 +362,18 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             src["group_semantic"] = source["group_semantic"]
         else:
             src["group_semantic"] = "department"
-        default_period = "half" if kind == "halfyear" else "quarter"
+        default_period = (
+            "half"
+            if kind == "halfyear"
+            else "quarter"
+            if kind
+            in (
+                "deals_dynamics",
+                "deals_dynamics_departments",
+                "deals_dynamics_outcome_share",
+            )
+            else "quarter"
+        )
         period = str(source.get("period") or default_period).lower()
         src["period"] = period if period in _VALID_PERIODS else default_period
         chart = "table"

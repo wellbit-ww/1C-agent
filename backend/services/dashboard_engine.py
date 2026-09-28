@@ -814,6 +814,506 @@ def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
+_COMPANY_ROW_LABEL = "Совтест"
+
+
+def _bucket_column_label(bucket, mode: str) -> str:
+    if mode == "half":
+        year, half = bucket
+        return f"{half} пг {year}"
+    if mode == "month":
+        return _period_label(bucket, "M")
+    return _period_label(bucket, "Q")
+
+
+def _sort_time_buckets(buckets: list, mode: str) -> list:
+    if mode == "half":
+        return sorted(buckets, key=lambda item: (int(item[0]), int(item[1])))
+    return sorted(buckets, key=str)
+
+
+def _deal_count_in_frame(frame: pd.DataFrame, deal_n: str | None) -> float:
+    if deal_n and deal_n in frame.columns:
+        return float(pd.to_numeric(frame[deal_n], errors="coerce").fillna(0).sum())
+    return float(len(frame))
+
+
+def _deals_dynamics_prepare(df: pd.DataFrame, tile: Tile) -> dict:
+    """Общая подготовка: сделки с датой, бакеты периодов и подписи колонок."""
+    date_col = _pivot_date_column(df)
+    deal_n = _named_column(df, "количество сделок")
+    bucket_mode = _deals_zk_bucket_mode(tile)
+    if not date_col:
+        return {"error": "Не нашёл дату начала сделки"}
+
+    work = df.copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+    work = work.dropna(subset=[date_col])
+    if work.empty:
+        return {"error": "Нет сделок с датой начала"}
+    work["_bucket"] = _deals_zk_bucket_key(work[date_col], bucket_mode)
+
+    buckets = _sort_time_buckets(list(work["_bucket"].unique()), bucket_mode)
+    columns = [_bucket_column_label(bucket, bucket_mode) for bucket in buckets]
+    return {
+        "work": work,
+        "buckets": buckets,
+        "columns": columns,
+        "deal_n": deal_n,
+        "bucket_mode": bucket_mode,
+    }
+
+
+def _department_rows_for_dynamics(
+    work: pd.DataFrame,
+    group_col: str,
+    buckets: list,
+    deal_n: str | None,
+    top_n: int,
+    sort: str,
+) -> list[dict]:
+    names = work[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    ranked = (
+        work.loc[~blank]
+        .assign(_dept=names.loc[~blank])
+        .groupby("_dept", sort=False)
+        .apply(lambda part: _deal_count_in_frame(part, deal_n))
+        .sort_values(ascending=False)
+    )
+    dept_rows: list[dict] = []
+    used: set[str] = set()
+    for dept in ranked.index:
+        short = department_short(str(dept))
+        if short in used:
+            short = str(dept)
+        used.add(short)
+        dept_mask = work[group_col].astype(str).str.strip() == str(dept).strip()
+        values = []
+        row_total = 0.0
+        for bucket in buckets:
+            part = work.loc[(work["_bucket"] == bucket) & dept_mask]
+            value = _pivot_cell(_deal_count_in_frame(part, deal_n))
+            values.append(value)
+            row_total += value
+        dept_rows.append(
+            {
+                "label": short,
+                "values": values,
+                "total": _pivot_cell(row_total),
+            }
+        )
+
+    if sort == "desc":
+        dept_rows.sort(key=lambda row: -float(row["total"]))
+    elif sort == "asc":
+        dept_rows.sort(key=lambda row: float(row["total"]))
+    return dept_rows[:top_n]
+
+
+def _deals_dynamics_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Широкая таблица: число сделок по периодам (только строка «Совтест»)."""
+    prep = _deals_dynamics_prepare(df, tile)
+    if prep.get("error"):
+        return prep
+    work = prep["work"]
+    buckets = prep["buckets"]
+    columns = prep["columns"]
+    deal_n = prep["deal_n"]
+    bucket_mode = prep["bucket_mode"]
+
+    company_values: list[float] = []
+    for bucket in buckets:
+        part = work.loc[work["_bucket"] == bucket]
+        company_values.append(_pivot_cell(_deal_count_in_frame(part, deal_n)))
+
+    total = _pivot_cell(sum(company_values))
+    rows = [
+        {
+            "label": _COMPANY_ROW_LABEL,
+            "values": company_values,
+            "total": total,
+        }
+    ]
+
+    groups = {_COMPANY_ROW_LABEL: float(total)}
+    return {
+        "groups": groups,
+        "bucket_period": bucket_mode,
+        "chart_series": {
+            "label": _COMPANY_ROW_LABEL,
+            "categories": columns,
+            "values": company_values,
+        },
+        "table": {
+            "index_label": "",
+            "columns": columns,
+            "column_kinds": ["count"] * len(columns),
+            "rows": rows,
+        },
+    }
+
+
+_DEPT_DYNAMICS_COLORS = (
+    "#1F4E79",
+    "#ED7D31",
+    "#A5A5A5",
+    "#FFC000",
+    "#5B9BD5",
+    "#70AD47",
+    "#264478",
+    "#9E480E",
+    "#636363",
+    "#997300",
+)
+
+
+def _deals_dynamics_departments_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Таблица и серии для группового графика по подразделениям."""
+    prep = _deals_dynamics_prepare(df, tile)
+    if prep.get("error"):
+        return prep
+    work = prep["work"]
+    buckets = prep["buckets"]
+    columns = prep["columns"]
+    deal_n = prep["deal_n"]
+    bucket_mode = prep["bucket_mode"]
+
+    group_col = _resolve_group_column(df, tile)
+    if not group_col or group_col not in work.columns:
+        return {"error": "Не нашёл колонку подразделения"}
+
+    rows = _department_rows_for_dynamics(
+        work, group_col, buckets, deal_n, tile.top_n, tile.sort
+    )
+    if not rows:
+        return {"error": "Нет сделок с подразделением"}
+
+    dept_labels = [row["label"] for row in rows]
+    series = []
+    for col_i, (bucket, col_label) in enumerate(zip(buckets, columns)):
+        values = []
+        for row in rows:
+            values.append(float(row["values"][col_i]))
+        series.append({"label": col_label, "values": values})
+
+    groups = {row["label"]: float(row["total"]) for row in rows}
+    return {
+        "groups": groups,
+        "bucket_period": bucket_mode,
+        "chart_series": {
+            "categories": dept_labels,
+            "series": series,
+        },
+        "table": {
+            "index_label": "Подразделение",
+            "columns": columns,
+            "column_kinds": ["count"] * len(columns),
+            "rows": rows,
+        },
+    }
+
+
+def _outcome_share_percent(
+    frame: pd.DataFrame, deal_n: str | None, status_col: str
+) -> float:
+    if frame.empty:
+        return 0.0
+    total = _deal_count_in_frame(frame, deal_n)
+    if total <= 0:
+        return 0.0
+    status = frame[status_col].astype(str).str.lower()
+    lost = status.str.contains("проигран", na=False)
+    cancelled = status.str.contains("отмен", na=False) & ~lost
+    bad = _deal_count_in_frame(frame.loc[lost | cancelled], deal_n)
+    return float(_outcome_percent(int(round(bad)), int(round(total))))
+
+
+def _department_outcome_share_rows(
+    work: pd.DataFrame,
+    group_col: str,
+    status_col: str,
+    buckets: list,
+    deal_n: str | None,
+    top_n: int,
+    sort: str,
+) -> list[dict]:
+    names = work[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    ranked = (
+        work.loc[~blank]
+        .assign(_dept=names.loc[~blank])
+        .groupby("_dept", sort=False)
+        .apply(lambda part: _deal_count_in_frame(part, deal_n))
+        .sort_values(ascending=False)
+    )
+    dept_rows: list[dict] = []
+    used: set[str] = set()
+    for dept in ranked.index:
+        short = department_short(str(dept))
+        if short in used:
+            short = str(dept)
+        used.add(short)
+        dept_mask = work[group_col].astype(str).str.strip() == str(dept).strip()
+        values = []
+        volume = 0.0
+        for bucket in buckets:
+            part = work.loc[(work["_bucket"] == bucket) & dept_mask]
+            values.append(_outcome_share_percent(part, deal_n, status_col))
+            volume += _deal_count_in_frame(part, deal_n)
+        dept_rows.append(
+            {
+                "label": short,
+                "values": values,
+                "total": volume,
+            }
+        )
+
+    if sort == "desc":
+        dept_rows.sort(key=lambda row: -float(row["total"]))
+    elif sort == "asc":
+        dept_rows.sort(key=lambda row: float(row["total"]))
+    trimmed = dept_rows[:top_n]
+    for row in trimmed:
+        row["total"] = _pivot_cell(
+            sum(float(v) for v in row["values"]) / max(len(row["values"]), 1)
+        )
+    return trimmed
+
+
+def _deals_dynamics_outcome_share_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Доля (отмена + проигрыш) / все сделки, % — Совтест и подразделения."""
+    prep = _deals_dynamics_prepare(df, tile)
+    if prep.get("error"):
+        return prep
+    work = prep["work"]
+    buckets = prep["buckets"]
+    columns = prep["columns"]
+    deal_n = prep["deal_n"]
+    bucket_mode = prep["bucket_mode"]
+
+    status_col = _status_column(df)
+    group_col = _resolve_group_column(df, tile)
+    if not status_col:
+        return {"error": "Не нашёл колонку статуса"}
+    if not group_col:
+        return {"error": "Не нашёл колонку подразделения"}
+
+    work = work.copy()
+    work[status_col] = df.loc[work.index, status_col]
+    work[group_col] = df.loc[work.index, group_col]
+
+    company_values: list[float] = []
+    for bucket in buckets:
+        part = work.loc[work["_bucket"] == bucket]
+        company_values.append(_outcome_share_percent(part, deal_n, status_col))
+
+    rows = [
+        {
+            "label": _COMPANY_ROW_LABEL,
+            "values": company_values,
+            "total": _pivot_cell(
+                sum(company_values) / max(len(company_values), 1)
+            ),
+        }
+    ]
+    rows.extend(
+        _department_outcome_share_rows(
+            work, group_col, status_col, buckets, deal_n, tile.top_n, tile.sort
+        )
+    )
+
+    categories = [row["label"] for row in rows]
+    series = []
+    for col_i, col_label in enumerate(columns):
+        values = [float(row["values"][col_i]) for row in rows]
+        series.append({"label": col_label, "values": values})
+
+    groups = {row["label"]: float(row["total"]) for row in rows}
+    return {
+        "groups": groups,
+        "bucket_period": bucket_mode,
+        "chart_series": {
+            "categories": categories,
+            "series": series,
+        },
+        "table": {
+            "index_label": "Подразделение",
+            "columns": columns,
+            "column_kinds": ["percent"] * len(columns),
+            "rows": rows,
+        },
+    }
+
+
+def _render_deals_dynamics_chart(series: dict, tile: Tile) -> go.Figure:
+    labels = list(series["categories"])
+    values = [float(v) for v in series["values"]]
+    n = len(labels)
+    show_bar_text = n <= 14
+    texts = (
+        [str(int(v)) if abs(v - round(v)) < 1e-9 else f"{v:.1f}" for v in values]
+        if show_bar_text
+        else None
+    )
+    tick_angle = -90 if n > 5 else 0
+    fig_width = max(400, min(56 * n, 1100))
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=values,
+            name="Сделки",
+            marker_color="#4472C4",
+            text=texts,
+            textposition="outside" if show_bar_text else None,
+            textangle=-90 if show_bar_text else 0,
+            cliponaxis=False,
+            width=0.62,
+        )
+    )
+    subtitle = str(series.get("label") or _COMPANY_ROW_LABEL)
+    fig.update_layout(
+        title=dict(
+            text=f"ДИНАМИКА СДЕЛОВ. {subtitle.upper()}",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=13),
+        ),
+        width=fig_width,
+        height=520,
+        autosize=False,
+        margin=dict(l=16, r=16, t=72, b=96 if tick_angle else 56),
+        showlegend=False,
+        template="plotly_white",
+        bargap=0.28,
+    )
+    fig.update_xaxes(
+        type="category",
+        tickangle=tick_angle,
+        showgrid=False,
+        automargin=True,
+        tickfont=dict(size=10),
+    )
+    fig.update_yaxes(visible=False, showgrid=False)
+    return fig
+
+
+def _render_deals_dynamics_departments_chart(series: dict, tile: Tile) -> go.Figure:
+    depts = list(series["categories"])
+    period_series = list(series["series"])
+    n_depts = len(depts)
+    n_periods = len(period_series)
+    show_bar_text = n_depts * n_periods <= 60
+
+    fig = go.Figure()
+    for i, period in enumerate(period_series):
+        values = [float(v) for v in period["values"]]
+        texts = (
+            [str(int(v)) if abs(v - round(v)) < 1e-9 else f"{v:.1f}" for v in values]
+            if show_bar_text
+            else None
+        )
+        fig.add_trace(
+            go.Bar(
+                name=period["label"],
+                x=depts,
+                y=values,
+                marker_color=_DEPT_DYNAMICS_COLORS[i % len(_DEPT_DYNAMICS_COLORS)],
+                text=texts,
+                textposition="outside" if show_bar_text else None,
+                textangle=-90 if show_bar_text else 0,
+                cliponaxis=False,
+            )
+        )
+
+    fig_width = max(560, min(72 * n_depts + 40 * n_periods, 1400))
+    fig.update_layout(
+        title=dict(
+            text="ДИНАМИКА СДЕЛОВ. СЛУЖБЫ",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=13),
+        ),
+        width=fig_width,
+        height=560,
+        autosize=False,
+        barmode="group",
+        bargap=0.15,
+        bargroupgap=0.08,
+        margin=dict(l=16, r=16, t=96, b=72),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            x=0,
+            xanchor="left",
+            font=dict(size=10),
+        ),
+        template="plotly_white",
+    )
+    fig.update_xaxes(type="category", tickangle=-25 if n_depts > 4 else 0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False)
+    return fig
+
+
+def _render_deals_outcome_share_chart(series: dict, tile: Tile) -> go.Figure:
+    depts = [str(label) for label in series["categories"]]
+    period_series = list(series["series"])
+    n_depts = len(depts)
+    n_periods = len(period_series)
+    show_bar_text = n_depts * n_periods <= 60
+
+    fig = go.Figure()
+    for i, period in enumerate(period_series):
+        values = [float(v) for v in period["values"]]
+        texts = (
+            [f"{int(round(v))}%" for v in values] if show_bar_text else None
+        )
+        fig.add_trace(
+            go.Bar(
+                name=period["label"],
+                x=depts,
+                y=values,
+                marker_color=_DEPT_DYNAMICS_COLORS[i % len(_DEPT_DYNAMICS_COLORS)],
+                text=texts,
+                textposition="outside" if show_bar_text else None,
+                textangle=-90 if show_bar_text else 0,
+                cliponaxis=False,
+            )
+        )
+
+    fig_width = max(560, min(72 * n_depts + 40 * n_periods, 1400))
+    fig.update_layout(
+        title=dict(
+            text="ДОЛЯ ОТМЕНЫ/ПРОИГРЫША СДЕЛОК",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=13),
+        ),
+        width=fig_width,
+        height=560,
+        autosize=False,
+        barmode="group",
+        bargap=0.15,
+        bargroupgap=0.08,
+        margin=dict(l=16, r=16, t=96, b=72),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            x=0,
+            xanchor="left",
+            font=dict(size=10),
+        ),
+        template="plotly_white",
+    )
+    fig.update_xaxes(type="category", tickangle=-25 if n_depts > 4 else 0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, 100])
+    return fig
+
+
 def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
     kind = tile.source.kind
     if kind == "columns_pattern":
@@ -830,6 +1330,12 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _halfyear_data(df, tile)
     if kind == "status_summary":
         return _status_summary_data(df, tile)
+    if kind == "deals_dynamics":
+        return _deals_dynamics_data(df, tile)
+    if kind == "deals_dynamics_departments":
+        return _deals_dynamics_departments_data(df, tile)
+    if kind == "deals_dynamics_outcome_share":
+        return _deals_dynamics_outcome_share_data(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)
@@ -956,6 +1462,37 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 }
                 if data.get("bucket_period"):
                     payload["bucket_period"] = data["bucket_period"]
+                tiles.append(payload)
+                continue
+
+            if tile.source.kind in (
+                "deals_dynamics",
+                "deals_dynamics_departments",
+                "deals_dynamics_outcome_share",
+            ) and data.get("table"):
+                series = data.get("chart_series") or {}
+                chart_type = tile.source.kind
+                try:
+                    if chart_type == "deals_dynamics_departments":
+                        fig = _render_deals_dynamics_departments_chart(series, tile)
+                    elif chart_type == "deals_dynamics_outcome_share":
+                        fig = _render_deals_outcome_share_chart(series, tile)
+                    else:
+                        fig = _render_deals_dynamics_chart(series, tile)
+                    plotly_json = fig.to_json()
+                except Exception as exc:
+                    logger.warning("График динамики «%s» упал: %s", tile.title, exc)
+                    plotly_json = None
+                payload = {
+                    "title": tile.title,
+                    "chart_type": chart_type,
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                if data.get("bucket_period"):
+                    payload["bucket_period"] = data["bucket_period"]
+                if plotly_json:
+                    payload["plotly_json"] = plotly_json
                 tiles.append(payload)
                 continue
 

@@ -25,7 +25,10 @@ class TileSource(BaseModel):
     period — динамика по дате;
     pivot — таблица: категория × период (кварталы по подразделениям);
     halfyear — блоки «Сделки и ЗК» по полугодиям/кварталам/месяцам (period: half | quarter | month);
-    status_summary — сводка сделок и ЗК по статусам (в работе, выиграна, …).
+    status_summary — сводка сделок и ЗК по статусам (в работе, выиграна, …);
+    deals_dynamics — вкладка «Динамика»: число сделок по периодам (таблица + график под ней);
+    deals_dynamics_departments — то же по всем подразделениям (групповые столбцы по периодам);
+    deals_dynamics_outcome_share — доля отменённых и проигранных сделок, % (Совтест + подразделения).
     """
 
     kind: Literal[
@@ -38,6 +41,9 @@ class TileSource(BaseModel):
         "outcome",
         "halfyear",
         "status_summary",
+        "deals_dynamics",
+        "deals_dynamics_departments",
+        "deals_dynamics_outcome_share",
     ]
     group_semantic: str | None = None
     group_column: str | None = None

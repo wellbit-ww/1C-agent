@@ -44,7 +44,7 @@ export function PlotChart({ json, className }: { json: string; className?: strin
     const srcMargin = (src.margin || {}) as Record<string, number>;
     const layout: Record<string, unknown> = {
       ...src,
-      autosize: true,
+      autosize: src.autosize !== false,
       paper_bgcolor: "rgba(0,0,0,0)",
       plot_bgcolor: "rgba(0,0,0,0)",
       font: { color: "#c5cad3", size: 11, family: "Segoe UI, sans-serif", ...(src.font as object) },

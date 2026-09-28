@@ -250,8 +250,14 @@ class TestDealsPivot:
 
         spec = build_sales_dashboard_spec(sales_df)
         assert spec.tabs[0].title == "Данные"
-        assert [t.title for t in spec.tabs] == ["Данные"]
+        assert [t.title for t in spec.tabs] == ["Данные", "Динамика"]
+        assert spec.tabs[1].tiles[0].source.kind == "deals_dynamics"
+        assert spec.tabs[1].tiles[1].source.kind == "deals_dynamics_departments"
+        assert spec.tabs[1].tiles[2].source.kind == "deals_dynamics_outcome_share"
         rendered = render_spec(sales_df, spec)
+        dynamics = rendered["tabs"][1]["tiles"][0]
+        assert dynamics["chart_type"] == "deals_dynamics"
+        assert dynamics.get("plotly_json")
         deals = rendered["tabs"][0]["tiles"]
         assert deals[0]["chart_type"] == "table"
         assert "1 кв" in " ".join(deals[0]["table"]["columns"])
@@ -305,6 +311,151 @@ def test_department_short_names():
     assert department_short("Служба микроэлектроники") == "СМЭ"
     assert department_short("Отдел АПЛиС") == "ОАПЛиС"
     assert department_short("СИО") == "СИО"
+
+
+def test_enrich_dynamics_replaces_pivot_tile(sales_df):
+    from services.report_profiles.sales_profile import enrich_deals_tab
+
+    spec = DashboardSpec(
+        tabs=[
+            Tab(title="Данные", tiles=[]),
+            Tab(
+                title="Динамика",
+                tiles=[
+                    Tile(
+                        title="Количество сделок по периодам",
+                        chart_type="table",
+                        source={
+                            "kind": "pivot",
+                            "group_semantic": "department",
+                            "period": "month",
+                        },
+                        agg="count",
+                        top_n=50,
+                        sort="desc",
+                    )
+                ],
+            ),
+        ]
+    )
+    enrich_deals_tab(spec, sales_df)
+    assert len(spec.tabs[1].tiles) == 3
+    assert spec.tabs[1].tiles[0].source.kind == "deals_dynamics"
+    assert spec.tabs[1].tiles[1].source.kind == "deals_dynamics_departments"
+    assert spec.tabs[1].tiles[2].source.kind == "deals_dynamics_outcome_share"
+    assert spec.tabs[1].tiles[0].source.period == "month"
+    assert spec.tabs[1].tiles[1].source.period == "month"
+    rendered = render_spec(sales_df, spec)["tabs"][1]["tiles"][0]
+    assert len(rendered["table"]["rows"]) == 1
+    assert rendered["table"]["rows"][0]["label"] == "Совтест"
+    dept_tile = render_spec(sales_df, spec)["tabs"][1]["tiles"][1]
+    assert dept_tile["chart_type"] == "deals_dynamics_departments"
+    assert len(dept_tile["table"]["rows"]) > 1
+    assert dept_tile.get("plotly_json")
+
+
+def test_deals_dynamics_outcome_share_table_and_chart():
+    df = pd.DataFrame(
+        {
+            "подразделение": ["Служба технологического оборудования"] * 4,
+            "дата начала сделки": pd.to_datetime(
+                ["2025-01-15", "2025-04-10", "2025-04-12", "2025-07-20"]
+            ),
+            "статус": ["В работе", "Проиграна", "Отменена", "Выиграна"],
+            "количество сделок": [1, 1, 1, 1],
+            "сумма по сделке": [10.0, 10.0, 10.0, 10.0],
+        }
+    )
+    tile = Tile(
+        title="Доля отмены и проигрыша сделок",
+        chart_type="table",
+        source={
+            "kind": "deals_dynamics_outcome_share",
+            "group_semantic": "department",
+            "period": "quarter",
+        },
+        agg="sum",
+        top_n=10,
+        sort="desc",
+    )
+    out = render_spec(df, DashboardSpec(tabs=[Tab(title="Динамика", tiles=[tile])]))
+    payload = out["tabs"][0]["tiles"][0]
+    assert payload["chart_type"] == "deals_dynamics_outcome_share"
+    assert payload["table"]["rows"][0]["label"] == "Совтест"
+    assert payload["table"]["column_kinds"][0] == "percent"
+    q2 = next(i for i, c in enumerate(payload["table"]["columns"]) if "2 кв" in c)
+    assert payload["table"]["rows"][0]["values"][q2] == 100
+    fig = json.loads(payload["plotly_json"])
+    assert fig["layout"]["title"]["text"] == "ДОЛЯ ОТМЕНЫ/ПРОИГРЫША СДЕЛОК"
+
+
+def test_deals_dynamics_departments_grouped_chart():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба испытательного оборудования",
+                "Служба испытательного оборудования",
+                "Служба технологического оборудования",
+                "Отдел АПЛиС",
+            ],
+            "дата начала сделки": pd.to_datetime(
+                ["2025-01-15", "2025-04-10", "2025-04-12", "2025-07-20"]
+            ),
+            "количество сделок": [1, 1, 2, 3],
+            "сумма по сделке": [10.0, 10.0, 20.0, 30.0],
+        }
+    )
+    tile = Tile(
+        title="Сделки по подразделениям",
+        chart_type="table",
+        source={
+            "kind": "deals_dynamics_departments",
+            "group_semantic": "department",
+            "period": "quarter",
+        },
+        agg="sum",
+        top_n=10,
+        sort="desc",
+    )
+    out = render_spec(df, DashboardSpec(tabs=[Tab(title="Динамика", tiles=[tile])]))
+    payload = out["tabs"][0]["tiles"][0]
+    assert payload["chart_type"] == "deals_dynamics_departments"
+    assert len(payload["table"]["rows"]) >= 2
+    fig = json.loads(payload["plotly_json"])
+    assert len(fig["data"]) == len(payload["table"]["columns"])
+    assert fig["layout"]["barmode"] == "group"
+
+
+def test_deals_dynamics_table_and_chart():
+    df = pd.DataFrame(
+        {
+            "подразделение": ["Служба испытательного оборудования"] * 3 + ["Отдел АПЛиС"],
+            "дата начала сделки": pd.to_datetime(
+                ["2025-01-15", "2025-04-10", "2025-07-20", "2025-04-12"]
+            ),
+            "количество сделок": [1, 1, 1, 2],
+            "сумма по сделке": [10.0, 10.0, 10.0, 20.0],
+        }
+    )
+    tile = Tile(
+        title="Количество сделок по периодам",
+        chart_type="table",
+        source={"kind": "deals_dynamics", "group_semantic": "department", "period": "quarter"},
+        agg="sum",
+        top_n=10,
+        sort="desc",
+    )
+    out = render_spec(df, DashboardSpec(tabs=[Tab(title="Динамика", tiles=[tile])]))
+    payload = out["tabs"][0]["tiles"][0]
+    assert payload["chart_type"] == "deals_dynamics"
+    assert "1 кв 2025" in payload["table"]["columns"]
+    assert len(payload["table"]["rows"]) == 1
+    assert payload["table"]["rows"][0]["label"] == "Совтест"
+    assert payload["table"]["rows"][0]["values"][0] == 1
+    assert payload.get("plotly_json")
+    fig = json.loads(payload["plotly_json"])
+    assert fig["layout"].get("autosize") is False
+    assert all(t.get("type") != "scatter" for t in fig["data"])
 
 
 def test_halfyear_splits_company_and_departments():
