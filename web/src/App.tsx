@@ -5,7 +5,7 @@ import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
-import type { ChatMessage, Dashboard, DashSpec, FileContext, PivotTable, Report, ReportChart, SectionBlock, Tile } from "./types";
+import type { ChatMessage, Dashboard, DashSpec, FileContext, MoneyBoard, MoneyMetric, PivotTable, Report, ReportChart, SectionBlock, Tile } from "./types";
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -329,7 +329,15 @@ function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
   );
 }
 
-function PivotTableView({ table }: { table: PivotTable }) {
+function PivotTableView({
+  table,
+  activeColumn,
+  onColumnClick,
+}: {
+  table: PivotTable;
+  activeColumn?: number;
+  onColumnClick?: (column: number) => void;
+}) {
   const spans = table.year_spans ?? [];
   const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
   const breaks = quarterStarts(spans);
@@ -365,16 +373,33 @@ function PivotTableView({ table }: { table: PivotTable }) {
                 {table.index_label || "Подразделение"}
               </th>
             )}
-            {table.columns.map((col, i) => (
+            {table.columns.map((col, i) => {
+              const label =
+                hasYears && isYearTotalColumn(col) ? col : hasYears ? col.replace(/\s+\d{4}$/, "") : col;
+              const selected = activeColumn === i;
+              return (
               <th
                 key={`${i}-${col}`}
                 className={`border-b border-line px-2 py-1.5 font-medium whitespace-nowrap ${
-                  isYearTotalColumn(col) ? "text-zinc-200" : ""
+                  selected ? "bg-accent/15 text-accent" : isYearTotalColumn(col) ? "text-zinc-200" : ""
                 } ${breaks.has(i) ? quarterEdge : ""}`}
               >
-                {hasYears && isYearTotalColumn(col) ? col : hasYears ? col.replace(/\s+\d{4}$/, "") : col}
+                {onColumnClick ? (
+                  <button
+                    type="button"
+                    className={`underline-offset-2 hover:text-accent hover:underline ${
+                      selected ? "text-accent" : ""
+                    }`}
+                    onClick={() => onColumnClick(i)}
+                  >
+                    {label}
+                  </button>
+                ) : (
+                  label
+                )}
               </th>
-            ))}
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -387,9 +412,11 @@ function PivotTableView({ table }: { table: PivotTable }) {
                 <td
                   key={`${row.label}-${i}`}
                   className={`px-2 py-1.5 tabular-nums ${
-                    isYearTotalColumn(col) || table.column_kinds?.[i] === "percent"
-                      ? "font-medium text-zinc-100"
-                      : "text-zinc-300"
+                    activeColumn === i
+                      ? "bg-accent/10 font-medium text-zinc-100"
+                      : isYearTotalColumn(col) || table.column_kinds?.[i] === "percent"
+                        ? "font-medium text-zinc-100"
+                        : "text-zinc-300"
                   } ${breaks.has(i) ? quarterEdge : ""}`}
                 >
                   {formatPivotNumber(row.values[i], table.column_kinds?.[i])}
@@ -416,6 +443,301 @@ function PivotTableView({ table }: { table: PivotTable }) {
           </tfoot>
         )}
       </table>
+    </div>
+  );
+}
+
+const COMPARE_BAR_COLORS = ["#5B9BD5", "#ED7D31"];
+
+function conversionCompareFigure(table: PivotTable, columns: number[]) {
+  const labels = table.rows.map((row) => row.label);
+  const periodNames = columns.map((index) => table.columns[index] ?? "");
+  const data = columns.map((index, seriesI) => ({
+    type: "bar",
+    name: `Конверсия сделок в заказы (${periodNames[seriesI]})`,
+    x: labels,
+    y: table.rows.map((row) => Number(row.values[index] ?? 0)),
+    marker: { color: COMPARE_BAR_COLORS[seriesI % COMPARE_BAR_COLORS.length] },
+    text: table.rows.map((row) => `${Math.round(Number(row.values[index] ?? 0))}%`),
+    textposition: "outside",
+    cliponaxis: false,
+  }));
+  return JSON.stringify({
+    data,
+    layout: {
+      title: {
+        text: `Конверсия сделок в заказы (${periodNames.join("/")})`,
+        x: 0.5,
+        xanchor: "center",
+        font: { size: 14 },
+      },
+      barmode: columns.length > 1 ? "group" : "relative",
+      autosize: false,
+      width: Math.max(640, Math.min(96 * Math.max(labels.length, 1), 1280)),
+      height: 480,
+      showlegend: columns.length > 1,
+      legend: { orientation: "h", y: -0.28, x: 0.5, xanchor: "center" },
+      margin: { l: 16, r: 16, t: 64, b: columns.length > 1 ? 96 : 64 },
+      bargap: 0.28,
+      xaxis: { type: "category", tickangle: labels.length > 6 ? -25 : 0 },
+      yaxis: { visible: false, range: [0, 140] },
+    },
+  });
+}
+
+function ConversionCompareBlock({ table, columns }: { table: PivotTable; columns: number[] }) {
+  return (
+    <div className="space-y-4 border-t border-line pt-4">
+      <div className="overflow-auto rounded-lg border border-line">
+        <table className="min-w-full border-collapse text-right text-xs">
+          <thead className="bg-panel text-zinc-400">
+            <tr>
+              <th className="sticky left-0 bg-panel px-3 py-1.5 text-left font-medium text-zinc-300">
+                {table.index_label || "Подразделение"}
+              </th>
+              {columns.map((index) => (
+                <th key={index} className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">
+                  Конверсия сделок в заказы ({table.columns[index]})
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.rows.map((row) => {
+              const company = row.label === "Совтест";
+              return (
+                <tr key={row.label} className="border-t border-line">
+                  <th
+                    className={`sticky left-0 bg-card px-3 py-1.5 text-left font-medium ${
+                      company ? "text-red-400" : "text-zinc-200"
+                    }`}
+                  >
+                    {row.label}
+                  </th>
+                  {columns.map((index) => (
+                    <td
+                      key={index}
+                      className={`px-3 py-1.5 tabular-nums font-medium ${
+                        company ? "text-red-400" : "text-zinc-100"
+                      }`}
+                    >
+                      {formatPivotNumber(row.values[index], table.column_kinds?.[index] ?? "percent")}
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex justify-center overflow-x-auto">
+        <PlotChart json={conversionCompareFigure(table, columns)} className="h-[30rem] w-full min-w-[640px]" />
+      </div>
+    </div>
+  );
+}
+
+function formatMoney(value: number) {
+  return Math.round(value).toLocaleString("ru-RU");
+}
+
+function formatMoneyDelta(current: number, previous: number | null) {
+  if (previous == null || previous === 0) return "—";
+  const pct = Math.round((100 * (current - previous)) / previous);
+  return pct > 0 ? `+${pct}%` : `${pct}%`;
+}
+
+function moneyPieFigure(title: string, slices: { label: string; value: number }[]) {
+  return JSON.stringify({
+    data: [
+      {
+        type: "pie",
+        labels: slices.map((item) => item.label),
+        values: slices.map((item) => item.value),
+        textinfo: "percent",
+        textposition: "inside",
+        sort: false,
+        hovertemplate: "%{label}<br>%{value:,.0f}<br>%{percent}<extra></extra>",
+      },
+    ],
+    layout: {
+      title: { text: title, x: 0.5, xanchor: "center", font: { size: 14 } },
+      showlegend: true,
+      legend: { orientation: "h", y: -0.08, font: { size: 11 } },
+      height: 420,
+      autosize: true,
+      margin: { l: 8, r: 8, t: 48, b: 72 },
+    },
+  });
+}
+
+function MoneyMetricBlock({
+  metric,
+  currentIndex,
+  previousIndex,
+  currentLabel,
+  previousLabel,
+}: {
+  metric: MoneyMetric;
+  currentIndex: number;
+  previousIndex: number | null;
+  currentLabel: string;
+  previousLabel: string | null;
+}) {
+  const rows = [...metric.rows].sort((a, b) => {
+    if (a.company) return -1;
+    if (b.company) return 1;
+    return Number(b.values[currentIndex] ?? 0) - Number(a.values[currentIndex] ?? 0);
+  });
+  const slices = (index: number) =>
+    rows
+      .filter((row) => !row.company && Number(row.values[index] ?? 0) > 0)
+      .map((row) => ({ label: row.label, value: Number(row.values[index] ?? 0) }));
+  const currentSlices = slices(currentIndex);
+  const previousSlices = previousIndex == null ? [] : slices(previousIndex);
+  return (
+    <section className="space-y-3 rounded-xl border border-line bg-bg/40 p-3">
+      <h3 className="text-sm font-medium text-zinc-100">{metric.title}</h3>
+      <div className="overflow-auto rounded-lg border border-line">
+        <table className="min-w-full border-collapse text-right text-xs">
+          <thead className="bg-panel text-zinc-400">
+            <tr>
+              <th className="sticky left-0 bg-panel px-3 py-1.5 text-left font-medium text-zinc-300">
+                Подразделение
+              </th>
+              <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">{currentLabel}</th>
+              {previousLabel ? (
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">{previousLabel}</th>
+              ) : null}
+              {previousLabel ? (
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">Изменение</th>
+              ) : null}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => {
+              const current = Number(row.values[currentIndex] ?? 0);
+              const previous = previousIndex == null ? null : Number(row.values[previousIndex] ?? 0);
+              const delta = formatMoneyDelta(current, previous);
+              return (
+                <tr key={row.label} className="border-t border-line">
+                  <th
+                    className={`sticky left-0 bg-card px-3 py-1.5 text-left font-medium ${
+                      row.company ? "text-red-400" : "text-zinc-200"
+                    }`}
+                  >
+                    {row.label}
+                  </th>
+                  <td className={`px-3 py-1.5 tabular-nums ${row.company ? "text-red-400" : "text-zinc-100"}`}>
+                    {formatMoney(current)}
+                  </td>
+                  {previousLabel ? (
+                    <td className={`px-3 py-1.5 tabular-nums ${row.company ? "text-red-400" : "text-zinc-300"}`}>
+                      {formatMoney(previous ?? 0)}
+                    </td>
+                  ) : null}
+                  {previousLabel ? (
+                    <td
+                      className={`px-3 py-1.5 tabular-nums ${
+                        delta.startsWith("+") ? "text-emerald-300" : delta.startsWith("-") ? "text-red-300" : "text-zinc-400"
+                      }`}
+                    >
+                      {delta}
+                    </td>
+                  ) : null}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className={`grid gap-3 ${previousLabel ? "lg:grid-cols-2" : ""}`}>
+        {currentSlices.length > 0 ? (
+          <PlotChart
+            json={moneyPieFigure(`${metric.title} (${currentLabel})`, currentSlices)}
+            className="h-[26rem] w-full"
+          />
+        ) : (
+          <p className="py-8 text-center text-sm text-zinc-500">Нет сумм за {currentLabel}</p>
+        )}
+        {previousLabel && previousIndex != null ? (
+          previousSlices.length > 0 ? (
+            <PlotChart
+              json={moneyPieFigure(`${metric.title} (${previousLabel})`, previousSlices)}
+              className="h-[26rem] w-full"
+            />
+          ) : (
+            <p className="py-8 text-center text-sm text-zinc-500">Нет сумм за {previousLabel}</p>
+          )
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function MoneyBoardView({ board }: { board: MoneyBoard }) {
+  const [index, setIndex] = useState(Math.max(0, board.periods.length - 1));
+  const [compareIndex, setCompareIndex] = useState<number | null>(null);
+  const currentIndex = Math.min(index, Math.max(0, board.periods.length - 1));
+  const current = board.periods[currentIndex];
+  const previousIndex =
+    compareIndex != null && compareIndex !== currentIndex && compareIndex < board.periods.length
+      ? compareIndex
+      : null;
+  const previous = previousIndex == null ? undefined : board.periods[previousIndex];
+  if (!current) return <p className="text-sm text-zinc-500">Нет периодов с датами сделок</p>;
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-zinc-400">
+        <label className="flex items-center gap-2">
+          Период
+          <select
+            value={currentIndex}
+            onChange={(event) => {
+              const next = Number(event.target.value);
+              setIndex(next);
+              if (compareIndex === next) setCompareIndex(null);
+            }}
+            className="rounded-md border border-line bg-bg px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/60"
+          >
+            {board.periods.map((period, periodI) => (
+              <option key={period.label} value={periodI}>
+                {period.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          Сравнить с
+          <select
+            value={previousIndex == null ? "" : String(previousIndex)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setCompareIndex(value === "" ? null : Number(value));
+            }}
+            className="rounded-md border border-line bg-bg px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/60"
+          >
+            <option value="">Без сравнения</option>
+            {board.periods.map((period, periodI) =>
+              periodI === currentIndex ? null : (
+                <option key={`compare-${period.label}`} value={periodI}>
+                  {period.label}
+                </option>
+              ),
+            )}
+          </select>
+        </label>
+      </div>
+      {board.metrics.map((metric) => (
+        <MoneyMetricBlock
+          key={metric.title}
+          metric={metric}
+          currentIndex={currentIndex}
+          previousIndex={previousIndex}
+          currentLabel={current.label}
+          previousLabel={previous?.label ?? null}
+        />
+      ))}
     </div>
   );
 }
@@ -520,6 +842,10 @@ export function App() {
   const [tab, setTab] = useState(0);
   const [dashPrompt, setDashPrompt] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [conversionPeriod, setConversionPeriod] = useState<Record<string, number>>({});
+  const [conversionCompare, setConversionCompare] = useState<
+    Record<string, { columnsKey: string; base: number; second: number | null }>
+  >({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(() => !isNarrowViewport());
@@ -781,7 +1107,9 @@ export function App() {
       | "halfyear"
       | "deals_dynamics"
       | "deals_dynamics_departments"
-      | "deals_dynamics_outcome_share",
+      | "deals_dynamics_outcome_share"
+      | "deals_conversion"
+      | "deals_money",
   ) {
     const spec = dashboard?.spec;
     if (!spec || !fileId) return;
@@ -1158,22 +1486,57 @@ export function App() {
                           chartEditor.tabI === tab &&
                           chartEditor.tileI === tileI;
                         const specTile = dashboard?.spec?.tabs[tab]?.tiles[tileI];
+                        const conversionTile =
+                          specTile?.source?.kind === "deals_conversion" ||
+                          tile.chart_type === "deals_conversion";
+                        const moneyTile =
+                          specTile?.source?.kind === "deals_money" || tile.chart_type === "deals_money";
                         const periodBucketTile =
                           specTile?.source?.kind === "halfyear" ||
+                          conversionTile ||
+                          moneyTile ||
                           DYNAMICS_PERIOD_KINDS.includes(
                             specTile?.source?.kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
                           );
                         const periodBucketDefault =
-                          specTile?.source?.kind === "halfyear" ? "half" : "quarter";
+                          specTile?.source?.kind === "halfyear" ||
+                          specTile?.source?.kind === "deals_conversion" ||
+                          specTile?.source?.kind === "deals_money"
+                            ? "half"
+                            : "quarter";
                         const dynamicsTile = DYNAMICS_PERIOD_KINDS.includes(
                           tile.chart_type as (typeof DYNAMICS_PERIOD_KINDS)[number],
                         );
+                        const periodCharts = tile.period_charts ?? [];
+                        const selectedPeriod =
+                          conversionPeriod[id] != null && conversionPeriod[id] < periodCharts.length
+                            ? conversionPeriod[id]
+                            : Math.max(0, periodCharts.length - 1);
+                        const conversionChart = periodCharts[selectedPeriod] ?? tile.plotly_json;
+                        const conversionColumnsKey = (tile.table?.columns ?? []).join("|");
+                        const storedCompare = conversionCompare[id];
+                        const activeCompare =
+                          storedCompare &&
+                          storedCompare.columnsKey === conversionColumnsKey &&
+                          storedCompare.base < (tile.table?.columns.length ?? 0)
+                            ? storedCompare
+                            : null;
+                        const compareColumns = activeCompare
+                          ? [
+                              activeCompare.base,
+                              ...(activeCompare.second != null &&
+                              activeCompare.second !== activeCompare.base &&
+                              activeCompare.second < (tile.table?.columns.length ?? 0)
+                                ? [activeCompare.second]
+                                : []),
+                            ]
+                          : [];
                         return (
                         <div
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${tile.table || tile.sections || dynamicsTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${tile.table || tile.sections || tile.money || dynamicsTile || conversionTile || moneyTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1191,7 +1554,9 @@ export function App() {
                                         | "halfyear"
                                         | "deals_dynamics"
                                         | "deals_dynamics_departments"
-                                        | "deals_dynamics_outcome_share",
+                                        | "deals_dynamics_outcome_share"
+                                        | "deals_conversion"
+                                        | "deals_money",
                                     )
                                   }
                                   className="rounded-md border border-line bg-bg px-2 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-accent/60"
@@ -1232,7 +1597,7 @@ export function App() {
                                     toggleReportChart({
                                       id,
                                       title: tile.title,
-                                      plotly_json: tile.plotly_json,
+                                      plotly_json: conversionTile ? conversionChart : tile.plotly_json,
                                       table: tile.table,
                                     })
                                   }
@@ -1244,24 +1609,75 @@ export function App() {
                           </div>
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
+                          ) : moneyTile && tile.money ? (
+                            <MoneyBoardView
+                              key={`${tile.bucket_period ?? "half"}-${tile.money.periods.length}`}
+                              board={tile.money}
+                            />
                           ) : tile.sections ? (
                             <HalfYearTables
                               key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "half"}`}
                               sections={tile.sections}
                             />
-                          ) : dynamicsTile && tile.table ? (
+                          ) : (dynamicsTile || conversionTile) && tile.table ? (
                             <div
                               key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "quarter"}`}
                               className="space-y-4"
                             >
-                              <PivotTableView table={tile.table} />
-                              {tile.plotly_json ? (
-                                <div className="flex justify-center overflow-x-auto">
+                              <PivotTableView
+                                table={tile.table}
+                                activeColumn={conversionTile ? selectedPeriod : undefined}
+                                onColumnClick={
+                                  conversionTile
+                                    ? (column) => {
+                                        setConversionPeriod((prev) => ({ ...prev, [id]: column }));
+                                        setConversionCompare((prev) => {
+                                          const current = prev[id];
+                                          if (
+                                            !current ||
+                                            current.columnsKey !== conversionColumnsKey ||
+                                            column === current.base
+                                          ) {
+                                            return prev;
+                                          }
+                                          return { ...prev, [id]: { ...current, second: column } };
+                                        });
+                                      }
+                                    : undefined
+                                }
+                              />
+                              {(conversionTile ? conversionChart : tile.plotly_json) ? (
+                                <div className="relative flex justify-center overflow-x-auto">
+                                  {conversionTile && conversionChart ? (
+                                    <button
+                                      type="button"
+                                      className="absolute right-2 top-2 z-10 rounded-md border border-line bg-card/90 px-2 py-1 text-[11px] text-zinc-200 hover:border-accent/50 hover:text-accent"
+                                      onClick={() =>
+                                        setConversionCompare((prev) => ({
+                                          ...prev,
+                                          [id]: {
+                                            columnsKey: conversionColumnsKey,
+                                            base: selectedPeriod,
+                                            second: null,
+                                          },
+                                        }))
+                                      }
+                                    >
+                                      К сравнению
+                                    </button>
+                                  ) : null}
                                   <PlotChart
-                                    json={tile.plotly_json}
-                                    className="h-[32rem] w-auto min-w-[min(100%,400px)]"
+                                    json={(conversionTile ? conversionChart : tile.plotly_json)!}
+                                    className={
+                                      conversionTile
+                                        ? "h-[28rem] w-full min-w-[640px]"
+                                        : "h-[32rem] w-auto min-w-[min(100%,400px)]"
+                                    }
                                   />
                                 </div>
+                              ) : null}
+                              {conversionTile && tile.table && compareColumns.length > 0 ? (
+                                <ConversionCompareBlock table={tile.table} columns={compareColumns} />
                               ) : null}
                             </div>
                           ) : tile.table ? (

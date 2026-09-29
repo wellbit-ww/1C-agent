@@ -199,6 +199,8 @@ _VALID_KINDS = {
     "deals_dynamics",
     "deals_dynamics_departments",
     "deals_dynamics_outcome_share",
+    "deals_conversion",
+    "deals_money",
 }
 _VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
@@ -311,6 +313,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deals_dynamics",
         "deals_dynamics_departments",
         "deals_dynamics_outcome_share",
+        "deals_conversion",
+        "deals_money",
     ):
         kind = "pivot"
 
@@ -354,6 +358,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deals_dynamics",
         "deals_dynamics_departments",
         "deals_dynamics_outcome_share",
+        "deals_conversion",
+        "deals_money",
     ):
         group_column = _best_column(df, source.get("group_column"))
         if group_column:
@@ -364,7 +370,7 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             src["group_semantic"] = "department"
         default_period = (
             "half"
-            if kind == "halfyear"
+            if kind in ("halfyear", "deals_conversion", "deals_money")
             else "quarter"
             if kind
             in (

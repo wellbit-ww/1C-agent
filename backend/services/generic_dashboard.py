@@ -134,6 +134,8 @@ def _fmt(value: float) -> str:
 
 SALES_DATA_TAB_TITLE = "Данные"
 SALES_DYNAMICS_TAB_TITLE = "Динамика"
+SALES_CONVERSION_TAB_TITLE = "Конверсия"
+SALES_MONEY_TAB_TITLE = "Деньги"
 
 
 def build_deals_tab(df: pd.DataFrame) -> Tab | None:

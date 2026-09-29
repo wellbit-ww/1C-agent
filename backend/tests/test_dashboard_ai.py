@@ -66,7 +66,7 @@ class TestSpecPersistence:
         fid = f"test-{uuid.uuid4()}"
         spec = dashboard_service.get_current_spec(fid, sales_df)
         assert spec is not None  # дефолт sales_pipeline v2
-        assert [t.title for t in spec.tabs] == ["Данные", "Динамика"]
+        assert [t.title for t in spec.tabs] == ["Данные", "Динамика", "Конверсия", "Деньги"]
         assert spec.tabs[0].tiles[0].chart_type == "table"
         assert spec.tabs[0].tiles[1].source.kind == "outcome"
         assert spec.tabs[1].tiles[0].source.kind == "deals_dynamics"
@@ -83,7 +83,7 @@ class TestSpecPersistence:
         fid = f"test-{uuid.uuid4()}"
         db_service.save_dashboard_spec(fid, "{not valid json")
         spec = dashboard_service.get_current_spec(fid, sales_df)
-        assert [t.title for t in spec.tabs] == ["Данные", "Динамика"]
+        assert [t.title for t in spec.tabs] == ["Данные", "Динамика", "Конверсия", "Деньги"]
         assert db_service.get_dashboard_spec(fid) is None  # мусор вычищен
 
 
@@ -322,7 +322,7 @@ class TestEndpoints:
         )
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert [tab["title"] for tab in payload["spec"]["tabs"]] == ["Данные", "Динамика"]
+        assert [tab["title"] for tab in payload["spec"]["tabs"]] == ["Данные", "Динамика", "Конверсия", "Деньги"]
         kinds = [tile["source"]["kind"] for tab in payload["spec"]["tabs"] for tile in tab["tiles"]]
         assert "pivot" in kinds
         db_service.delete_dashboard_spec(sales_file_id)

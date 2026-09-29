@@ -1314,6 +1314,258 @@ def _render_deals_outcome_share_chart(series: dict, tile: Tile) -> go.Figure:
     return fig
 
 
+def _conversion_percent(zk: float, deals: float) -> int:
+    if deals <= 0:
+        return 0
+    return int(round(100.0 * zk / deals))
+
+
+def _sum_named(frame: pd.DataFrame, col: str | None) -> float:
+    if not col or col not in frame.columns:
+        return 0.0
+    return float(pd.to_numeric(frame[col], errors="coerce").fillna(0).sum())
+
+
+def _deals_conversion_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Конверсия сделок в заказы: количество ЗК / количество сделок, %."""
+    prep = _deals_dynamics_prepare(df, tile)
+    if prep.get("error"):
+        return prep
+    zk_n = _named_column(df, "количество зк")
+    if not zk_n:
+        return {"error": "Не нашёл колонку количества ЗК"}
+    group_col = _resolve_group_column(df, tile)
+    work = prep["work"]
+    if not group_col or group_col not in work.columns:
+        return {"error": "Не нашёл колонку подразделения"}
+
+    buckets = prep["buckets"]
+    bucket_mode = prep["bucket_mode"]
+    deal_n = prep["deal_n"]
+    columns = [_deals_zk_section_title(bucket, bucket_mode) for bucket in buckets]
+
+    def percents(mask: pd.Series) -> list[int]:
+        values: list[int] = []
+        for bucket in buckets:
+            part = work.loc[mask & (work["_bucket"] == bucket)]
+            deals = _deal_count_in_frame(part, deal_n)
+            zk = _sum_named(part, zk_n)
+            values.append(_conversion_percent(zk, deals))
+        return values
+
+    company_values = percents(pd.Series(True, index=work.index))
+    rows = [
+        {
+            "label": _COMPANY_ROW_LABEL,
+            "values": company_values,
+            "total": company_values[-1] if company_values else 0,
+        }
+    ]
+
+    names = work[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    ranked = (
+        work.loc[~blank]
+        .assign(_dept=names.loc[~blank])
+        .groupby("_dept", sort=False)
+        .apply(lambda part: _deal_count_in_frame(part, deal_n), include_groups=False)
+        .sort_values(ascending=False)
+    )
+    used: set[str] = set()
+    for dept in ranked.index:
+        short = department_short(str(dept))
+        if short in used:
+            short = str(dept)
+        used.add(short)
+        mask = names == str(dept).strip()
+        values = percents(mask)
+        rows.append(
+            {
+                "label": short,
+                "values": values,
+                "total": values[-1] if values else 0,
+            }
+        )
+
+    period_series = []
+    for col_i, label in enumerate(columns):
+        period_series.append(
+            {
+                "period_label": label,
+                "points": [
+                    {
+                        "label": row["label"],
+                        "value": float(row["values"][col_i]) if col_i < len(row["values"]) else 0.0,
+                        "company": row["label"] == _COMPANY_ROW_LABEL,
+                    }
+                    for row in rows
+                ],
+            }
+        )
+    latest = period_series[-1] if period_series else {"period_label": "", "points": []}
+    return {
+        "groups": {row["label"]: float(row["total"]) for row in rows},
+        "bucket_period": bucket_mode,
+        "chart_series": latest,
+        "period_series": period_series,
+        "table": {
+            "index_label": "Подразделение",
+            "columns": columns,
+            "column_kinds": ["percent"] * len(columns),
+            "rows": rows,
+        },
+    }
+
+
+_CONVERSION_COMPANY_COLOR = "#C00000"
+_CONVERSION_HIGH_COLOR = "#548235"
+_CONVERSION_OTHER_COLOR = "#5B9BD5"
+
+
+def _render_deals_conversion_chart(series: dict, tile: Tile) -> go.Figure:
+    points = sorted(series.get("points") or [], key=lambda item: -float(item["value"]))
+    labels = [str(item["label"]) for item in points]
+    values = [float(item["value"]) for item in points]
+    colors = []
+    for item, value in zip(points, values):
+        if item.get("company"):
+            colors.append(_CONVERSION_COMPANY_COLOR)
+        elif value >= 50:
+            colors.append(_CONVERSION_HIGH_COLOR)
+        else:
+            colors.append(_CONVERSION_OTHER_COLOR)
+    texts = [f"{int(round(value))}%" for value in values]
+    n = max(len(labels), 1)
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=values,
+            marker_color=colors,
+            text=texts,
+            textposition="outside",
+            cliponaxis=False,
+            width=0.62,
+        )
+    )
+    period = str(series.get("period_label") or "").strip()
+    title = "Конверсия сделок в заказы"
+    if period:
+        title = f"{title} ({period})"
+    fig.update_layout(
+        title=dict(text=title, x=0.5, xanchor="center", font=dict(size=14)),
+        width=max(560, min(78 * n, 1280)),
+        height=460,
+        autosize=False,
+        margin=dict(l=16, r=16, t=64, b=72),
+        showlegend=False,
+        template="plotly_white",
+        bargap=0.28,
+    )
+    fig.update_xaxes(type="category", tickangle=-25 if n > 6 else 0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, 120])
+    return fig
+
+
+def _bucket_year_part(bucket, mode: str) -> tuple[int, int]:
+    if mode == "half":
+        year, half = bucket
+        return int(year), int(half)
+    if mode == "month":
+        return int(bucket.year), int(bucket.month)
+    return int(bucket.year), int(bucket.quarter)
+
+
+def _money_values(
+    work: pd.DataFrame,
+    buckets: list,
+    column: str,
+    mask: pd.Series,
+) -> list[float]:
+    values: list[float] = []
+    for bucket in buckets:
+        part = work.loc[mask & (work["_bucket"] == bucket)]
+        values.append(_pivot_cell(_sum_named(part, column)))
+    return values
+
+
+def _deals_money_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Потенциал сделок и сумма заказов по периодам: компания и все подразделения."""
+    prep = _deals_dynamics_prepare(df, tile)
+    if prep.get("error"):
+        return prep
+    deal_s = _named_column(df, "сумма по сделке")
+    zk_s = _named_column(df, "сумма зк")
+    if not deal_s or not zk_s:
+        return {"error": "Нет колонок суммы сделки или суммы ЗК"}
+    group_col = _resolve_group_column(df, tile)
+    work = prep["work"]
+    if not group_col or group_col not in work.columns:
+        return {"error": "Не нашёл колонку подразделения"}
+
+    buckets = prep["buckets"]
+    bucket_mode = prep["bucket_mode"]
+    periods = [
+        {
+            "label": _deals_zk_section_title(bucket, bucket_mode),
+            "year": year,
+            "part": part,
+        }
+        for bucket in buckets
+        for year, part in [_bucket_year_part(bucket, bucket_mode)]
+    ]
+
+    names = work[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    ranked = (
+        work.loc[~blank]
+        .assign(_dept=names.loc[~blank])
+        .groupby("_dept", sort=False)
+        .apply(lambda part: _sum_named(part, deal_s), include_groups=False)
+        .sort_values(ascending=False)
+    )
+
+    def rows_for(column: str) -> list[dict]:
+        company = _money_values(work, buckets, column, pd.Series(True, index=work.index))
+        rows = [
+            {
+                "label": _COMPANY_ROW_LABEL,
+                "company": True,
+                "values": company,
+            }
+        ]
+        used: set[str] = set()
+        for dept in ranked.index:
+            short = department_short(str(dept))
+            if short in used:
+                short = str(dept)
+            used.add(short)
+            mask = names == str(dept).strip()
+            rows.append(
+                {
+                    "label": short,
+                    "company": False,
+                    "values": _money_values(work, buckets, column, mask),
+                }
+            )
+        return rows
+
+    groups = {
+        row["label"]: float(row["values"][-1] if row["values"] else 0)
+        for row in rows_for(deal_s)
+    }
+    return {
+        "groups": groups,
+        "bucket_period": bucket_mode,
+        "money": {
+            "periods": periods,
+            "metrics": [
+                {"title": "Потенциал сделок", "rows": rows_for(deal_s)},
+                {"title": "Сумма заказов", "rows": rows_for(zk_s)},
+            ],
+        },
+    }
+
+
 def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
     kind = tile.source.kind
     if kind == "columns_pattern":
@@ -1336,6 +1588,10 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _deals_dynamics_departments_data(df, tile)
     if kind == "deals_dynamics_outcome_share":
         return _deals_dynamics_outcome_share_data(df, tile)
+    if kind == "deals_conversion":
+        return _deals_conversion_data(df, tile)
+    if kind == "deals_money":
+        return _deals_money_data(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)
@@ -1465,10 +1721,23 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 tiles.append(payload)
                 continue
 
+            if tile.source.kind == "deals_money" and data.get("money"):
+                tiles.append(
+                    {
+                        "title": tile.title,
+                        "chart_type": "deals_money",
+                        "money": data["money"],
+                        "bucket_period": data.get("bucket_period"),
+                        "stats": _tile_stats(tile, data),
+                    }
+                )
+                continue
+
             if tile.source.kind in (
                 "deals_dynamics",
                 "deals_dynamics_departments",
                 "deals_dynamics_outcome_share",
+                "deals_conversion",
             ) and data.get("table"):
                 series = data.get("chart_series") or {}
                 chart_type = tile.source.kind
@@ -1477,12 +1746,23 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                         fig = _render_deals_dynamics_departments_chart(series, tile)
                     elif chart_type == "deals_dynamics_outcome_share":
                         fig = _render_deals_outcome_share_chart(series, tile)
+                    elif chart_type == "deals_conversion":
+                        fig = _render_deals_conversion_chart(series, tile)
                     else:
                         fig = _render_deals_dynamics_chart(series, tile)
                     plotly_json = fig.to_json()
                 except Exception as exc:
                     logger.warning("График динамики «%s» упал: %s", tile.title, exc)
                     plotly_json = None
+                period_charts: list[str] = []
+                if chart_type == "deals_conversion":
+                    for item in data.get("period_series") or []:
+                        try:
+                            period_charts.append(
+                                _render_deals_conversion_chart(item, tile).to_json()
+                            )
+                        except Exception as exc:
+                            logger.warning("График конверсии «%s» упал: %s", tile.title, exc)
                 payload = {
                     "title": tile.title,
                     "chart_type": chart_type,
@@ -1491,7 +1771,10 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 }
                 if data.get("bucket_period"):
                     payload["bucket_period"] = data["bucket_period"]
-                if plotly_json:
+                if period_charts:
+                    payload["period_charts"] = period_charts
+                    payload["plotly_json"] = period_charts[-1]
+                elif plotly_json:
                     payload["plotly_json"] = plotly_json
                 tiles.append(payload)
                 continue

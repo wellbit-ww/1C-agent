@@ -1,7 +1,12 @@
 import pandas as pd
 
 from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
-from services.generic_dashboard import SALES_DATA_TAB_TITLE, SALES_DYNAMICS_TAB_TITLE
+from services.generic_dashboard import (
+    SALES_CONVERSION_TAB_TITLE,
+    SALES_DATA_TAB_TITLE,
+    SALES_DYNAMICS_TAB_TITLE,
+    SALES_MONEY_TAB_TITLE,
+)
 from services.report_profiles.base_profile import ReportProfile
 
 _LEGACY_SALES_DATA_TAB_TITLE = "Сделки"
@@ -57,6 +62,44 @@ def _dynamics_outcome_share_tile() -> Tile:
     )
 
 
+def _conversion_deals_tile() -> Tile:
+    return Tile(
+        title="Конверсия сделок в заказы",
+        chart_type="table",
+        source=TileSource(
+            kind="deals_conversion",
+            group_semantic="department",
+            period="half",
+        ),
+        agg="sum",
+        top_n=50,
+        sort="desc",
+    )
+
+
+def _conversion_tab() -> Tab:
+    return Tab(title=SALES_CONVERSION_TAB_TITLE, tiles=[_conversion_deals_tile()])
+
+
+def _money_tile() -> Tile:
+    return Tile(
+        title="Финансовые показатели сделок",
+        chart_type="table",
+        source=TileSource(
+            kind="deals_money",
+            group_semantic="department",
+            period="half",
+        ),
+        agg="sum",
+        top_n=50,
+        sort="desc",
+    )
+
+
+def _money_tab() -> Tab:
+    return Tab(title=SALES_MONEY_TAB_TITLE, tiles=[_money_tile()])
+
+
 def _dynamics_tab() -> Tab:
     return Tab(
         title=SALES_DYNAMICS_TAB_TITLE,
@@ -69,14 +112,22 @@ def _dynamics_tab() -> Tab:
 
 
 def _sales_pipeline_tabs(spec: DashboardSpec, df: pd.DataFrame | None = None) -> DashboardSpec:
-    """«Данные» + пустая «Динамика»; убрать устаревшие вкладки Воронка/Менеджеры/Клиенты."""
+    """«Данные», «Динамика», «Конверсия» и пустая «Деньги»; убрать устаревшие вкладки."""
     data_tab: Tab | None = None
     dynamics_tab: Tab | None = None
+    conversion_tab: Tab | None = None
+    money_tab: Tab | None = None
     for tab in spec.tabs:
         if tab.title in _REMOVED_SALES_TABS:
             continue
         if tab.title == SALES_DYNAMICS_TAB_TITLE:
             dynamics_tab = tab
+            continue
+        if tab.title == SALES_CONVERSION_TAB_TITLE:
+            conversion_tab = tab
+            continue
+        if tab.title == SALES_MONEY_TAB_TITLE:
+            money_tab = tab
             continue
         if _is_sales_data_tab(tab):
             tab.title = SALES_DATA_TAB_TITLE
@@ -93,10 +144,13 @@ def _sales_pipeline_tabs(spec: DashboardSpec, df: pd.DataFrame | None = None) ->
             _dynamics_departments_tile(),
             _dynamics_outcome_share_tile(),
         ]
-    if data_tab is not None:
-        spec.tabs = [data_tab, dynamics_tab]
-    elif dynamics_tab is not None:
-        spec.tabs = [dynamics_tab]
+    if conversion_tab is None:
+        conversion_tab = _conversion_tab()
+    if money_tab is None:
+        money_tab = _money_tab()
+    ordered = [tab for tab in (data_tab, dynamics_tab, conversion_tab, money_tab) if tab is not None]
+    if ordered:
+        spec.tabs = ordered
     return spec
 
 
@@ -170,12 +224,54 @@ def ensure_dynamics_deals_tile(spec: DashboardSpec) -> DashboardSpec:
     return spec
 
 
+def ensure_conversion_tile(spec: DashboardSpec) -> DashboardSpec:
+    """Вкладка «Конверсия»: доля заказов от сделок по компании и всем подразделениям."""
+    for tab in spec.tabs:
+        if tab.title != SALES_CONVERSION_TAB_TITLE:
+            continue
+        period = "half"
+        for tile in tab.tiles:
+            if tile.source.kind == "deals_conversion" and tile.source.period in (
+                "month",
+                "quarter",
+                "half",
+            ):
+                period = tile.source.period
+        tile = _conversion_deals_tile()
+        tile.source.period = period
+        tab.tiles = [tile]
+        return spec
+    return spec
+
+
+def ensure_money_tile(spec: DashboardSpec) -> DashboardSpec:
+    """Вкладка «Деньги»: потенциал сделок и сумма заказов."""
+    for tab in spec.tabs:
+        if tab.title != SALES_MONEY_TAB_TITLE:
+            continue
+        period = "half"
+        for tile in tab.tiles:
+            if tile.source.kind == "deals_money" and tile.source.period in (
+                "month",
+                "quarter",
+                "half",
+            ):
+                period = tile.source.period
+        tile = _money_tile()
+        tile.source.period = period
+        tab.tiles = [tile]
+        return spec
+    return spec
+
+
 def enrich_deals_tab(spec: DashboardSpec, df: pd.DataFrame | None = None) -> DashboardSpec:
-    """Вкладки «Данные» и «Динамика» для этапов продаж."""
+    """Вкладки «Данные», «Динамика» и «Конверсия» для этапов продаж."""
     spec = _sales_pipeline_tabs(spec, df)
     spec = _drop_legacy_deals_pie(spec)
     spec = ensure_status_summary_tile(ensure_halfyear_tile(ensure_outcome_tile(spec)))
-    return ensure_dynamics_deals_tile(spec)
+    spec = ensure_dynamics_deals_tile(spec)
+    spec = ensure_conversion_tile(spec)
+    return ensure_money_tile(spec)
 
 
 def ensure_status_summary_tile(spec: DashboardSpec) -> DashboardSpec:
@@ -231,7 +327,7 @@ def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
 
 
 def build_sales_dashboard_spec(df):
-    """Дашборд этапов продаж: «Данные» с таблицами и пустая «Динамика»."""
+    """Дашборд этапов продаж: «Данные», «Динамика», «Конверсия» и пустая «Деньги»."""
     from services.generic_dashboard import build_deals_tab, build_generic_spec
 
     has_funnel = any(str(c).endswith("(сумма)") for c in df.columns)
@@ -241,7 +337,7 @@ def build_sales_dashboard_spec(df):
     deals = build_deals_tab(df)
     if not deals:
         return build_generic_spec(df)
-    return DashboardSpec(tabs=[deals, _dynamics_tab()])
+    return DashboardSpec(tabs=[deals, _dynamics_tab(), _conversion_tab(), _money_tab()])
 
 
 class SalesProfile(ReportProfile):

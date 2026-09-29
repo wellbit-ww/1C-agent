@@ -250,7 +250,10 @@ class TestDealsPivot:
 
         spec = build_sales_dashboard_spec(sales_df)
         assert spec.tabs[0].title == "Данные"
-        assert [t.title for t in spec.tabs] == ["Данные", "Динамика"]
+        assert [t.title for t in spec.tabs] == ["Данные", "Динамика", "Конверсия", "Деньги"]
+        assert spec.tabs[3].tiles[0].source.kind == "deals_money"
+        assert spec.tabs[2].tiles[0].source.kind == "deals_conversion"
+        assert spec.tabs[2].tiles[0].source.period == "half"
         assert spec.tabs[1].tiles[0].source.kind == "deals_dynamics"
         assert spec.tabs[1].tiles[1].source.kind == "deals_dynamics_departments"
         assert spec.tabs[1].tiles[2].source.kind == "deals_dynamics_outcome_share"
@@ -387,6 +390,89 @@ def test_deals_dynamics_outcome_share_table_and_chart():
     assert payload["table"]["rows"][0]["values"][q2] == 100
     fig = json.loads(payload["plotly_json"])
     assert fig["layout"]["title"]["text"] == "ДОЛЯ ОТМЕНЫ/ПРОИГРЫША СДЕЛОК"
+
+
+def test_deals_money_compares_same_period_last_year():
+    df = pd.DataFrame(
+        {
+            "подразделение": ["Служба технологического оборудования"] * 2
+            + ["Сервисная служба"] * 2,
+            "дата начала сделки": pd.to_datetime(
+                ["2025-02-01", "2026-03-01", "2025-02-10", "2026-04-01"]
+            ),
+            "количество сделок": [1, 1, 1, 1],
+            "сумма по сделке": [100.0, 200.0, 10.0, 40.0],
+            "сумма зк": [50.0, 80.0, 10.0, 30.0],
+        }
+    )
+    tile = Tile(
+        title="Финансовые показатели сделок",
+        chart_type="table",
+        source={"kind": "deals_money", "group_semantic": "department", "period": "half"},
+        agg="sum",
+        top_n=50,
+        sort="desc",
+    )
+    payload = render_spec(df, DashboardSpec(tabs=[Tab(title="Деньги", tiles=[tile])]))["tabs"][0][
+        "tiles"
+    ][0]
+    assert payload["chart_type"] == "deals_money"
+    periods = payload["money"]["periods"]
+    assert [item["label"] for item in periods] == ["1 полуг. 2025", "1 полуг. 2026"]
+    potential = payload["money"]["metrics"][0]
+    assert potential["title"] == "Потенциал сделок"
+    by_label = {row["label"]: row["values"] for row in potential["rows"]}
+    assert by_label["Совтест"] == [110, 240]
+    assert by_label["СТО"] == [100, 200]
+    assert by_label["СС"] == [10, 40]
+    orders = payload["money"]["metrics"][1]
+    assert orders["rows"][0]["values"] == [60, 110]
+
+
+def test_deals_conversion_includes_company_and_every_department():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Сервисная служба",
+                "Сервисная служба",
+                "Служба оборудования обработки кабеля",
+                "Служба микроэлектроники",
+            ],
+            "дата начала сделки": pd.to_datetime(
+                ["2026-02-01", "2026-03-01", "2026-04-01", "2026-05-01"]
+            ),
+            "количество сделок": [1, 1, 1, 1],
+            "количество зк": [1, 1, 0, 0],
+        }
+    )
+    tile = Tile(
+        title="Конверсия сделок в заказы",
+        chart_type="table",
+        source={
+            "kind": "deals_conversion",
+            "group_semantic": "department",
+            "period": "half",
+        },
+        agg="sum",
+        top_n=50,
+        sort="desc",
+    )
+    payload = render_spec(df, DashboardSpec(tabs=[Tab(title="Конверсия", tiles=[tile])]))[
+        "tabs"
+    ][0]["tiles"][0]
+    assert payload["chart_type"] == "deals_conversion"
+    labels = [row["label"] for row in payload["table"]["rows"]]
+    assert labels[0] == "Совтест"
+    assert set(labels) == {"Совтест", "СС", "СООК", "СМЭ"}
+    by_label = {row["label"]: row["values"][-1] for row in payload["table"]["rows"]}
+    assert by_label["Совтест"] == 50
+    assert by_label["СС"] == 100
+    assert by_label["СООК"] == 0
+    assert payload["table"]["column_kinds"][0] == "percent"
+    fig = json.loads(payload["plotly_json"])
+    assert fig["data"][0]["x"][0] == "СС"
+    assert fig["layout"]["title"]["text"] == "Конверсия сделок в заказы (1 полуг. 2026)"
+    assert len(payload["period_charts"]) == len(payload["table"]["columns"])
 
 
 def test_deals_dynamics_departments_grouped_chart():

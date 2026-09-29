@@ -38,6 +38,11 @@ export type SectionBlock = {
   tables: SectionTable[];
 };
 
+export type MoneyPeriod = { label: string; year: number; part: number };
+export type MoneyRow = { label: string; company?: boolean; values: number[] };
+export type MoneyMetric = { title: string; rows: MoneyRow[] };
+export type MoneyBoard = { periods: MoneyPeriod[]; metrics: MoneyMetric[] };
+
 export type Tile = {
   title: string;
   plotly_json?: string;
@@ -45,6 +50,8 @@ export type Tile = {
   table?: PivotTable;
   sections?: SectionBlock[];
   bucket_period?: string;
+  period_charts?: string[];
+  money?: MoneyBoard;
   error?: string;
 };
 
