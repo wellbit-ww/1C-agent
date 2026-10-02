@@ -201,6 +201,8 @@ _VALID_KINDS = {
     "deals_dynamics_outcome_share",
     "deals_conversion",
     "deals_money",
+    "deal_statuses",
+    "in_work_stages",
 }
 _VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
@@ -360,6 +362,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deals_dynamics_outcome_share",
         "deals_conversion",
         "deals_money",
+        "deal_statuses",
+        "in_work_stages",
     ):
         group_column = _best_column(df, source.get("group_column"))
         if group_column:
@@ -368,20 +372,11 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
             src["group_semantic"] = source["group_semantic"]
         else:
             src["group_semantic"] = "department"
-        default_period = (
-            "half"
-            if kind in ("halfyear", "deals_conversion", "deals_money")
-            else "quarter"
-            if kind
-            in (
-                "deals_dynamics",
-                "deals_dynamics_departments",
-                "deals_dynamics_outcome_share",
-            )
-            else "quarter"
-        )
+        default_period = "quarter"
         period = str(source.get("period") or default_period).lower()
         src["period"] = period if period in _VALID_PERIODS else default_period
+        if source.get("variant") in ("full", "counts"):
+            src["variant"] = source["variant"]
         chart = "table"
     elif kind == "pivot":
         group_column = _best_column(df, source.get("group_column"))
@@ -440,6 +435,16 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         top_n = int(tile.get("top_n") or 10)
     except (TypeError, ValueError):
         top_n = 10
+
+    raw_departments = source.get("departments") if isinstance(source, dict) else None
+    if isinstance(raw_departments, list):
+        cleaned: list[str] = []
+        for item in raw_departments:
+            text = str(item).strip()
+            if text and text not in cleaned:
+                cleaned.append(text[:40])
+        if cleaned:
+            src["departments"] = cleaned[:40]
 
     out = {
         "title": title,

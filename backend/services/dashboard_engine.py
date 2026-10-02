@@ -230,9 +230,10 @@ def _current_stage_data(df: pd.DataFrame, tile: Tile) -> dict:
     if not matched:
         return {"error": "Нет колонок этапов для воронки «текущий этап»"}
 
-    numeric = df[matched].apply(pd.to_numeric, errors="coerce")
-    stage_idx = _last_filled_stage_index(numeric)
-    labels = _stage_labels(matched, pattern)
+    sum_cols = [c for c in matched if str(c).endswith("(сумма)")] or list(matched)
+    stage_idx = _funnel_current_stage_index(df, sum_cols)
+    labels = _stage_labels(sum_cols, "(сумма)" if sum_cols else pattern)
+    numeric = df[sum_cols].apply(pd.to_numeric, errors="coerce")
     valid = stage_idx >= 0
     groups = {label: 0.0 for label in labels}
     value_col = None
@@ -331,6 +332,36 @@ def _period_label(period: pd.Period, freq: str) -> str:
     return str(int(period.year))
 
 
+def _year_total_is_redundant(periods, freq: str) -> bool:
+    """Итог года повторяет видимые колонки, если они умещаются в одно полугодие, квартал или месяц."""
+    if not periods or freq == "Y":
+        return True
+    if freq == "M":
+        months = [int(period.month) for period in periods]
+        return max(months) <= 6 or min(months) >= 7
+    if freq == "Q":
+        quarters = [int(period.quarter) for period in periods]
+        return max(quarters) <= 2 or min(quarters) >= 3
+    if freq == "H":
+        halves = {int(bucket[1]) for bucket in periods}
+        return len(halves) <= 1
+    return False
+
+
+def _append_year_total(
+    columns: list[str],
+    matrix: list[list[float]],
+    col_totals: list[float],
+    start_len: int,
+    year: int,
+) -> None:
+    columns.append(str(year))
+    year_vals = [_pivot_cell(sum(row[start_len:])) for row in matrix]
+    for i, value in enumerate(year_vals):
+        matrix[i].append(value)
+    col_totals.append(_pivot_cell(sum(year_vals)))
+
+
 def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
     group_col = _resolve_group_column(df, tile)
     date_col = _pivot_date_column(df)
@@ -353,11 +384,14 @@ def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
     names = work[group_col].astype(str).str.strip()
     blank = names.str.lower().isin({"", "nan", "-", "none"})
     work = work.loc[~blank].copy()
-    work[group_col] = names.loc[~blank]
+    work[group_col] = _department_labels(names.loc[~blank])
     work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
     work = work.dropna(subset=[date_col, group_col])
     if work.empty:
         return {"error": "Нет сделок с датой начала и подразделением"}
+
+    if (tile.source.period or "quarter") == "half":
+        return _pivot_half_data(work, tile, group_col, value_col, date_col)
 
     work["_period"] = work[date_col].dt.to_period(freq)
     if tile.agg == "count":
@@ -407,12 +441,8 @@ def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
             for i, value in enumerate(values):
                 matrix[i].append(value)
             col_totals.append(_pivot_cell(series.sum()))
-        if freq != "Y" and year_periods:
-            columns.append(str(year))
-            year_vals = [_pivot_cell(sum(row[start_len:])) for row in matrix]
-            for i, value in enumerate(year_vals):
-                matrix[i].append(value)
-            col_totals.append(_pivot_cell(sum(year_vals)))
+        if not _year_total_is_redundant(year_periods, freq):
+            _append_year_total(columns, matrix, col_totals, start_len, year)
         year_spans.append({"label": str(year), "count": len(columns) - start_len})
 
     rows = []
@@ -436,23 +466,103 @@ def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
+def _pivot_half_data(
+    work: pd.DataFrame,
+    tile: Tile,
+    group_col: str,
+    value_col: str | None,
+    date_col: str,
+) -> dict:
+    """Сводная по полугодиям: те же строки, что у кварталов, плюс итог года."""
+    work = work.copy()
+    work["_bucket"] = _deals_zk_bucket_key(work[date_col], "half")
+    buckets = _sort_time_buckets(list(work["_bucket"].unique()), "half")
+    if tile.agg == "count":
+        grouped = work.groupby([group_col, "_bucket"], sort=False).size()
+    elif tile.agg == "mean":
+        grouped = work.groupby([group_col, "_bucket"], sort=False)[value_col].mean()
+    else:
+        grouped = work.groupby([group_col, "_bucket"], sort=False)[value_col].sum()
+    pivot = grouped.unstack(fill_value=0).reindex(columns=buckets, fill_value=0)
+    if pivot.empty:
+        return {"error": "Нет данных для таблицы сделок"}
+
+    order: list[str] = []
+    for name in work[group_col]:
+        text = str(name).strip()
+        if text and text not in order:
+            order.append(text)
+    pivot = pivot.reindex(index=[name for name in order if name in pivot.index])
+    row_totals = pivot.sum(axis=1)
+    if tile.sort == "desc":
+        pivot = pivot.loc[row_totals.sort_values(ascending=False).index]
+    elif tile.sort == "asc":
+        pivot = pivot.loc[row_totals.sort_values(ascending=True).index]
+    pivot = pivot.head(tile.top_n)
+
+    columns: list[str] = []
+    year_spans: list[dict] = []
+    matrix: list[list[float]] = [[] for _ in range(len(pivot.index))]
+    col_totals: list[float] = []
+    years: list[int] = []
+    for year, _half in buckets:
+        if not years or years[-1] != int(year):
+            years.append(int(year))
+    for year in years:
+        year_buckets = [bucket for bucket in buckets if int(bucket[0]) == year]
+        start_len = len(columns)
+        for bucket in year_buckets:
+            columns.append(_deals_zk_section_title(bucket, "half"))
+            series = pivot[bucket]
+            values = [_pivot_cell(v) for v in series.tolist()]
+            for i, value in enumerate(values):
+                matrix[i].append(value)
+            col_totals.append(_pivot_cell(series.sum()))
+        if not _year_total_is_redundant(year_buckets, "H"):
+            _append_year_total(columns, matrix, col_totals, start_len, year)
+        year_spans.append({"label": str(year), "count": len(columns) - start_len})
+
+    rows = []
+    groups: dict[str, float] = {}
+    for i, name in enumerate(pivot.index.astype(str)):
+        period_total = _pivot_cell(float(row_totals.loc[name]))
+        rows.append({"label": name, "values": matrix[i], "total": period_total})
+        groups[name] = period_total
+    return {
+        "groups": groups,
+        "group_column": group_col,
+        "value_column": value_col,
+        "table": {
+            "index_label": str(group_col),
+            "columns": columns,
+            "year_spans": year_spans,
+            "rows": rows,
+            "totals": col_totals,
+        },
+    }
+
+
 _OUTCOME_HEADERS = ("Все сделки", "Проиграны", "Отменены", "Всего (П+О)", "%")
 _OUTCOME_KINDS = ("count", "count", "count", "count", "percent")
 _DEPT_SHORT = {
     "служба испытательного оборудования": "СИО",
-    "служба технологического оборудования": "СТО",
+    "служба технологического оборудования": "СТЕ",
     "служба оборудования обработки кабеля": "СООК",
     "служба микроэлектроники": "СМЭ",
     "отдел аплис": "ОАПЛиС",
     "сервисная служба": "СС",
-    "отдел функционального контроля": "ОФК",
-    "отдел неразрушающего контроля": "ОНК",
-    "отдел внутрисхемного контроля": "ОВК",
+    "служба тестового оборудования": "СТО",
+    "отдел функционального контроля": "СТО",
+    "отдел неразрушающего контроля": "СТО",
+    "отдел внутрисхемного контроля": "СТО",
+    "офк": "СТО",
+    "онк": "СТО",
+    "овк": "СТО",
 }
 
 
 def department_short(name: str) -> str:
-    """«Служба испытательного оборудования» → «СИО», «Отдел АПЛиС» → «ОАПЛиС»."""
+    """Короткое имя подразделения. ОВК, ОНК и ОФК вместе — это СТО, не СТЕ."""
     text = str(name or "").strip()
     key = text.lower().replace("ё", "е")
     if key in _DEPT_SHORT:
@@ -475,6 +585,180 @@ def department_short(name: str) -> str:
     if prefix and letters and not letters.startswith(prefix):
         letters = prefix + letters
     return letters or text
+
+
+def _department_labels(names: pd.Series) -> pd.Series:
+    """Подписи строк: одинаковый короткий код склеивает подразделения в одну группу."""
+    return names.map(lambda value: department_short(str(value).strip()))
+
+
+_DEPT_BREAKDOWN_ORDER = ("СИО и АПЛиС", "СТО", "СМЭ", "СТЕ", "СООК", "Сервис")
+_STO_SUBDIVISION_ORDER = ("ОВК", "ОНК", "ОФК")
+
+
+def _dept_breakdown_group(short_label: str) -> str:
+    if short_label in ("СИО", "ОАПЛиС"):
+        return "СИО и АПЛиС"
+    if short_label == "СС":
+        return "Сервис"
+    return short_label
+
+
+def _dept_sto_subdivision(raw_name: str) -> str | None:
+    key = str(raw_name or "").strip().lower().replace("ё", "е")
+    if "внутрисхем" in key or key == "овк":
+        return "ОВК"
+    if "неразрушающ" in key or key == "онк":
+        return "ОНК"
+    if "функциональн" in key or key == "офк":
+        return "ОФК"
+    return None
+
+
+def _stage_dept_breakdown_table(
+    part: pd.DataFrame,
+    group_col: str,
+    deal_n: str,
+    deal_s: str,
+) -> dict:
+    """Таблица «Служба × кол-во × сумма» для сделок на одном этапе воронки."""
+    names = part[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    work = part.loc[~blank].copy()
+    if work.empty:
+        return {
+            "index_label": "Служба",
+            "columns": ["Кол-во", "Сумма, р."],
+            "rows": [
+                {
+                    "label": "Всего",
+                    "values": [0, 0],
+                    "kinds": ["count", "money"],
+                }
+            ],
+        }
+
+    work["_raw"] = names.loc[~blank].values
+    work["_short"] = _department_labels(work["_raw"])
+    work["_group"] = work["_short"].map(_dept_breakdown_group)
+    work["_sto_sub"] = work["_raw"].map(_dept_sto_subdivision)
+
+    def metrics(frame: pd.DataFrame) -> tuple[float, float]:
+        if frame.empty:
+            return 0.0, 0.0
+        return _sum_numeric(frame, deal_n), _sum_numeric(frame, deal_s)
+
+    rows: list[dict] = []
+    for group in _DEPT_BREAKDOWN_ORDER:
+        group_frame = work.loc[work["_group"] == group]
+        if group_frame.empty:
+            continue
+        count, amount = metrics(group_frame)
+        if not count and not amount:
+            continue
+        rows.append(
+            {
+                "label": group,
+                "values": [_json_number(count), _json_number(amount)],
+                "kinds": ["count", "money"],
+                "row_role": "group" if group == "СТО" else None,
+            }
+        )
+        if group != "СТО":
+            continue
+        for sub in _STO_SUBDIVISION_ORDER:
+            sub_frame = group_frame.loc[group_frame["_sto_sub"] == sub]
+            sub_count, sub_amount = metrics(sub_frame)
+            if not sub_count and not sub_amount:
+                continue
+            rows.append(
+                {
+                    "label": sub,
+                    "values": [_json_number(sub_count), _json_number(sub_amount)],
+                    "kinds": ["count", "money"],
+                    "indent": True,
+                    "row_role": "sub",
+                }
+            )
+
+    total_count, total_amount = metrics(work)
+    rows.append(
+        {
+            "label": "Всего",
+            "values": [_json_number(total_count), _json_number(total_amount)],
+            "kinds": ["count", "money"],
+        }
+    )
+    return {
+        "index_label": "Служба",
+        "columns": ["Кол-во", "Сумма, р."],
+        "rows": rows,
+    }
+
+
+def _top_in_work_stages(
+    labels: list[str],
+    counts: list[float],
+    sums: list[float],
+    metric: str,
+    limit: int = 3,
+) -> list[tuple[str, int]]:
+    """Топ этапов по количеству или сумме (индекс этапа в воронке)."""
+    ranked: list[tuple[str, float, int]] = []
+    for index, label in enumerate(labels):
+        value = counts[index] if metric == "count" else sums[index]
+        if value > 0:
+            ranked.append((label, float(value), index))
+    ranked.sort(key=lambda item: (-item[1], item[0].lower()))
+    return [(label, index) for label, _, index in ranked[:limit]]
+
+
+_DEPT_FILTER_KINDS = {
+    "pivot",
+    "outcome",
+    "halfyear",
+    "deals_dynamics",
+    "deals_dynamics_departments",
+    "deals_dynamics_outcome_share",
+    "deals_conversion",
+    "deals_money",
+}
+
+
+def department_catalog(df: pd.DataFrame) -> list[str]:
+    """Все короткие имена подразделений в файле, без пустых."""
+    from services.column_resolver import resolve_semantic_column
+
+    group_col = resolve_semantic_column(df, "", "department", dtype="categorical")
+    if not group_col or group_col not in df.columns:
+        return []
+    names = df[group_col].astype(str).str.strip()
+    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    seen: list[str] = []
+    for label in _department_labels(names.loc[~blank]):
+        if label and label not in seen:
+            seen.append(label)
+    return seen
+
+
+def _selected_department_labels(tile: Tile) -> set[str] | None:
+    raw = tile.source.departments
+    if not raw:
+        return None
+    labels = {department_short(str(item).strip()) for item in raw if str(item).strip()}
+    return labels or None
+
+
+def _limit_departments(df: pd.DataFrame, tile: Tile) -> pd.DataFrame:
+    """None в настройках — все службы. Список — только отмеченные."""
+    selected = _selected_department_labels(tile)
+    if not selected:
+        return df
+    group_col = _resolve_group_column(df, tile)
+    if not group_col or group_col not in df.columns:
+        return df
+    labels = _department_labels(df[group_col].astype(str).str.strip())
+    return df.loc[labels.isin(selected)].copy()
 
 
 def _status_column(df: pd.DataFrame) -> str | None:
@@ -507,7 +791,7 @@ def _outcome_data(df: pd.DataFrame, tile: Tile) -> dict:
     names = work[group_col].astype(str).str.strip()
     blank = names.str.lower().isin({"", "nan", "-", "none"})
     work = work.loc[~blank].copy()
-    work[group_col] = names.loc[~blank]
+    work[group_col] = _department_labels(names.loc[~blank])
     work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
     work = work.dropna(subset=[date_col, group_col])
     if work.empty:
@@ -516,8 +800,9 @@ def _outcome_data(df: pd.DataFrame, tile: Tile) -> dict:
     status = work[status_col].astype(str).str.lower()
     lost = status.str.contains("проигран", na=False)
     cancelled = status.str.contains("отмен", na=False) & ~lost
-    work["_quarter"] = work[date_col].dt.to_period("Q")
-    quarters = list(pd.period_range(work["_quarter"].min(), work["_quarter"].max(), freq="Q"))
+    bucket_mode = _deals_zk_bucket_mode(tile) if tile.source.period else "quarter"
+    work["_bucket"] = _deals_zk_bucket_key(work[date_col], bucket_mode)
+    buckets = _sort_time_buckets(list(work["_bucket"].unique()), bucket_mode)
 
     order: list[str] = []
     for name in work[group_col]:
@@ -527,8 +812,8 @@ def _outcome_data(df: pd.DataFrame, tile: Tile) -> dict:
 
     def _counts(frame: pd.DataFrame) -> list[int]:
         cells: list[int] = []
-        for quarter in quarters:
-            part = frame.loc[frame["_quarter"] == quarter]
+        for bucket in buckets:
+            part = frame.loc[frame["_bucket"] == bucket]
             all_n = int(len(part))
             lost_n = int(lost.loc[part.index].sum()) if all_n else 0
             cancel_n = int(cancelled.loc[part.index].sum()) if all_n else 0
@@ -536,26 +821,24 @@ def _outcome_data(df: pd.DataFrame, tile: Tile) -> dict:
             cells.extend([all_n, lost_n, cancel_n, both, _outcome_percent(both, all_n)])
         return cells
 
-    labels = []
-    used: set[str] = set()
-    for name in order:
-        short = department_short(name)
-        if short in used:
-            short = name
-        used.add(short)
-        labels.append(short)
     rows = [
-        {"label": label, "values": _counts(work.loc[work[group_col] == name])}
-        for label, name in zip(labels, order)
+        {"label": name, "values": _counts(work.loc[work[group_col] == name])}
+        for name in order
     ]
     totals = _counts(work)
     columns: list[str] = []
     kinds: list[str] = []
     spans: list[dict] = []
-    for quarter in quarters:
+    for bucket in buckets:
         columns.extend(_OUTCOME_HEADERS)
         kinds.extend(_OUTCOME_KINDS)
-        spans.append({"label": _period_label(quarter, "Q"), "count": len(_OUTCOME_HEADERS)})
+        if bucket_mode == "half":
+            span_label = _deals_zk_section_title(bucket, "half")
+        elif bucket_mode == "month":
+            span_label = _period_label(bucket, "M")
+        else:
+            span_label = _period_label(bucket, "Q")
+        spans.append({"label": span_label, "count": len(_OUTCOME_HEADERS)})
 
     step = len(_OUTCOME_HEADERS)
     groups = {
@@ -716,11 +999,288 @@ def _status_summary_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
+def _deal_statuses_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Статусы сделок за каждый период: суммы и отдельно только количества."""
+    status_col = _status_column(df)
+    date_col = _pivot_date_column(df)
+    deal_n = _named_column(df, "количество сделок")
+    deal_s = _named_column(df, "сумма по сделке")
+    zk_n = _named_column(df, "количество зк")
+    zk_s = _named_column(df, "сумма зк")
+    if not status_col:
+        return {"error": "Не нашёл колонку статуса"}
+    if not date_col:
+        return {"error": "Не нашёл дату начала сделки"}
+    if not all([deal_n, deal_s, zk_n, zk_s]):
+        return {"error": "Нет колонок количества и суммы сделок или ЗК"}
+
+    bucket_mode = _deals_zk_bucket_mode(tile)
+    work = df.copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+    work = work.dropna(subset=[date_col])
+    if work.empty:
+        return {"error": "Нет сделок с датой начала"}
+    work["_status"] = work[status_col].map(_normalize_deal_status)
+    work["_bucket"] = _deals_zk_bucket_key(work[date_col], bucket_mode)
+    buckets = _sort_time_buckets(list(work["_bucket"].unique()), bucket_mode)
+
+    def _metrics(part: pd.DataFrame) -> tuple[float, float, float, float]:
+        if part.empty:
+            return 0.0, 0.0, 0.0, 0.0
+        return (
+            _sum_numeric(part, deal_n),
+            _sum_numeric(part, deal_s),
+            _sum_numeric(part, zk_n),
+            _sum_numeric(part, zk_s),
+        )
+
+    sections = []
+    for bucket in buckets:
+        period = work.loc[work["_bucket"] == bucket]
+        full_rows = []
+        count_rows = []
+        totals = [0.0, 0.0, 0.0, 0.0]
+        for label in _STATUS_SUMMARY_ORDER:
+            deals_count, deals_sum, zk_count, zk_sum = _metrics(
+                period.loc[period["_status"] == label]
+            )
+            full_rows.append(
+                {
+                    "label": label,
+                    "values": [
+                        _json_number(deals_count),
+                        _json_number(deals_sum),
+                        _json_number(zk_count),
+                        _json_number(zk_sum),
+                    ],
+                    "kinds": ["count", "money", "count", "money"],
+                }
+            )
+            count_rows.append(
+                {
+                    "label": label,
+                    "values": [_json_number(deals_count), _json_number(zk_count)],
+                    "kinds": ["count", "count"],
+                }
+            )
+            totals[0] += deals_count
+            totals[1] += deals_sum
+            totals[2] += zk_count
+            totals[3] += zk_sum
+        full_rows.append(
+            {
+                "label": "Всего",
+                "values": [_json_number(v) for v in totals],
+                "kinds": ["count", "money", "count", "money"],
+            }
+        )
+        count_rows.append(
+            {
+                "label": "Всего",
+                "values": [_json_number(totals[0]), _json_number(totals[2])],
+                "kinds": ["count", "count"],
+            }
+        )
+        period_title = _deals_zk_section_title(bucket, bucket_mode)
+        counts_only = tile.source.variant == "counts"
+        sections.append(
+            {
+                "title": period_title,
+                "tables": [
+                    {
+                        "title": "",
+                        "index_label": "Статус",
+                        "columns": ["Сделки", "Заказы"] if counts_only else ["Сделки", "Сумма", "Заказы", "Сумма"],
+                        "rows": count_rows if counts_only else full_rows,
+                    }
+                ],
+            }
+        )
+    if not sections:
+        return {"error": "Нет сделок в выбранных периодах"}
+    return {"sections": sections, "bucket_period": bucket_mode}
+
+
+def _stage_amount_columns(df: pd.DataFrame) -> list[str]:
+    columns: list[str] = []
+    for col in df.columns:
+        name = str(col).strip()
+        low = name.lower().replace("ё", "е")
+        if not low.endswith("(сумма)"):
+            continue
+        if "зк" in low:
+            continue
+        columns.append(name)
+    return columns
+
+
+def _stage_quantity_column(df: pd.DataFrame, sum_col: str) -> str | None:
+    name = str(sum_col).strip()
+    low = name.lower().replace("ё", "е")
+    if not low.endswith("(сумма)"):
+        return None
+    base = name[: -len("(сумма)")].strip()
+    target = f"{base} (количество)".lower().replace("ё", "е")
+    for col in df.columns:
+        if str(col).strip().lower().replace("ё", "е") == target:
+            return str(col)
+    return None
+
+
+def _funnel_stage_markers(df: pd.DataFrame, sum_cols: list[str]) -> pd.DataFrame:
+    """Матрица этапов: 1, если в выгрузке 1С заполнена сумма или количество этапа."""
+    series: dict[str, pd.Series] = {}
+    for col in sum_cols:
+        sums = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        qty_col = _stage_quantity_column(df, col)
+        if qty_col:
+            qty = pd.to_numeric(df[qty_col], errors="coerce").fillna(0)
+            series[col] = ((sums != 0) | (qty != 0)).astype(float)
+        else:
+            series[col] = (sums != 0).astype(float)
+    return pd.DataFrame(series, index=df.index)
+
+
+def _funnel_current_stage_index(df: pd.DataFrame, sum_cols: list[str]) -> pd.Series:
+    if not sum_cols:
+        return pd.Series(-1, index=df.index, dtype=int)
+    return _last_filled_stage_index(_funnel_stage_markers(df, sum_cols))
+
+
+def _pretty_stage_label(label: str) -> str:
+    text = str(label or "").strip()
+    if text and text[0].islower():
+        return text[0].upper() + text[1:]
+    return text
+
+
+def _in_work_stages_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Сделки «В работе» по текущему этапу: количество, сумма и доли."""
+    status_col = _status_column(df)
+    date_col = _pivot_date_column(df)
+    deal_n = _named_column(df, "количество сделок")
+    deal_s = _named_column(df, "сумма по сделке")
+    stage_cols = _stage_amount_columns(df)
+    if not status_col:
+        return {"error": "Не нашёл колонку статуса"}
+    if not date_col:
+        return {"error": "Не нашёл дату начала сделки"}
+    if not deal_n or not deal_s:
+        return {"error": "Нет колонок количества и суммы сделок"}
+    if not stage_cols:
+        return {"error": "Нет колонок этапов"}
+    from services.column_resolver import resolve_semantic_column
+
+    group_col = resolve_semantic_column(df, "", "department", dtype="categorical")
+
+    bucket_mode = _deals_zk_bucket_mode(tile)
+    work = df.copy()
+    work[date_col] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+    work = work.dropna(subset=[date_col])
+    if work.empty:
+        return {"error": "Нет сделок с датой начала"}
+    work["_status"] = work[status_col].map(_normalize_deal_status)
+    work["_bucket"] = _deals_zk_bucket_key(work[date_col], bucket_mode)
+    work["_stage"] = _funnel_current_stage_index(work, stage_cols)
+    labels = [_pretty_stage_label(label) for label in _stage_labels(stage_cols, "(сумма)")]
+    buckets = _sort_time_buckets(list(work["_bucket"].unique()), bucket_mode)
+
+    sections = []
+    for bucket in buckets:
+        period = work.loc[(work["_bucket"] == bucket) & (work["_status"] == "В работе")]
+        counts: list[float] = []
+        sums: list[float] = []
+        for index in range(len(labels)):
+            part = period.loc[period["_stage"] == index]
+            counts.append(_sum_numeric(part, deal_n) if not part.empty else 0.0)
+            sums.append(_sum_numeric(part, deal_s) if not part.empty else 0.0)
+        missing = period.loc[period["_stage"] < 0]
+        missing_count = _sum_numeric(missing, deal_n) if not missing.empty else 0.0
+        missing_sum = _sum_numeric(missing, deal_s) if not missing.empty else 0.0
+        row_labels = list(labels)
+        if missing_count or missing_sum:
+            row_labels.append("Не указан")
+            counts.append(missing_count)
+            sums.append(missing_sum)
+        total_count = float(sum(counts))
+        total_sum = float(sum(sums))
+        rows = []
+        for label, count, amount in zip(row_labels, counts, sums):
+            rows.append(
+                {
+                    "label": label,
+                    "values": [
+                        _json_number(count),
+                        _json_number(amount),
+                        _half_percent(count, total_count, 0) or 0,
+                        _half_percent(amount, total_sum, 1) or 0,
+                    ],
+                    "kinds": ["count", "money", "percent", "percent1"],
+                }
+            )
+        rows.append(
+            {
+                "label": "Всего",
+                "values": [
+                    _json_number(total_count),
+                    _json_number(total_sum),
+                    100 if total_count else 0,
+                    100 if total_sum else 0,
+                ],
+                "kinds": ["count", "money", "percent", "percent"],
+            }
+        )
+        period_title = _deals_zk_section_title(bucket, bucket_mode)
+        stage_breakdowns: dict[str, list[dict]] = {"by_count": [], "by_sum": []}
+        if group_col and group_col in period.columns:
+            for stage_label, stage_index in _top_in_work_stages(
+                labels, counts, sums, "count"
+            ):
+                stage_part = period.loc[period["_stage"] == stage_index]
+                stage_breakdowns["by_count"].append(
+                    {
+                        "stage": stage_label,
+                        "table": _stage_dept_breakdown_table(
+                            stage_part, group_col, deal_n, deal_s
+                        ),
+                    }
+                )
+            for stage_label, stage_index in _top_in_work_stages(
+                labels, counts, sums, "sum"
+            ):
+                stage_part = period.loc[period["_stage"] == stage_index]
+                stage_breakdowns["by_sum"].append(
+                    {
+                        "stage": stage_label,
+                        "table": _stage_dept_breakdown_table(
+                            stage_part, group_col, deal_n, deal_s
+                        ),
+                    }
+                )
+        sections.append(
+            {
+                "title": f"{tile.title} ({period_title})",
+                "tables": [
+                    {
+                        "title": "",
+                        "index_label": "Этап",
+                        "columns": ["Кол-во", "Сумма, р.", "Доля в кол-ве", "Доля в сумме"],
+                        "rows": rows,
+                    }
+                ],
+                "stage_breakdowns": stage_breakdowns,
+            }
+        )
+    if not sections:
+        return {"error": "Нет сделок в выбранных периодах"}
+    return {"sections": sections, "bucket_period": bucket_mode}
+
+
 def _deals_zk_bucket_mode(tile: Tile) -> str:
-    mode = tile.source.period or "half"
+    mode = tile.source.period or "quarter"
     if mode in ("month", "quarter", "half"):
         return mode
-    return "half"
+    return "quarter"
 
 
 def _deals_zk_bucket_key(date_col: pd.Series, mode: str) -> pd.Series:
@@ -781,8 +1341,8 @@ def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
         tables = [company]
         suffix = _deals_zk_group_suffix(bucket, bucket_mode)
         if group_col and group_col in part.columns:
-            names = part[group_col].astype(str).str.strip()
-            blank = names.str.lower().isin({"", "nan", "-", "none"})
+            names = _department_labels(part[group_col].astype(str).str.strip())
+            blank = part[group_col].astype(str).str.strip().str.lower().isin({"", "nan", "-", "none"})
             ranked = (
                 part.loc[~blank]
                 .assign(_dept=names.loc[~blank])
@@ -790,18 +1350,13 @@ def _halfyear_data(df: pd.DataFrame, tile: Tile) -> dict:
                 .apply(lambda s: float(pd.to_numeric(s, errors="coerce").sum()))
                 .sort_values(ascending=False)
             )
-            used: set[str] = set()
             for dept in ranked.index:
-                short = department_short(str(dept))
-                if short in used:
-                    short = str(dept)
-                used.add(short)
                 block = _halfyear_metrics(
                     part.loc[names == dept], deal_n, deal_s, zk_n, zk_s
                 )
-                block["title"] = short
+                block["title"] = str(dept)
                 tables.append(block)
-                groups[f"{suffix}:{short}"] = float(block["rows"][0]["values"][0] or 0)
+                groups[f"{suffix}:{dept}"] = float(block["rows"][0]["values"][0] or 0)
         sections.append({"title": _deals_zk_section_title(bucket, bucket_mode), "tables": tables})
 
     if not sections:
@@ -824,6 +1379,34 @@ def _bucket_column_label(bucket, mode: str) -> str:
     if mode == "month":
         return _period_label(bucket, "M")
     return _period_label(bucket, "Q")
+
+
+def _file_span_column_label(dates: pd.Series) -> str:
+    """Подпись итога за весь файл: месяц, квартал, полугодие, год или диапазон лет."""
+    start = pd.Timestamp(dates.min())
+    end = pd.Timestamp(dates.max())
+    if pd.isna(start) or pd.isna(end):
+        return "Итого"
+    same_year = int(start.year) == int(end.year)
+    if same_year and int(start.month) == int(end.month):
+        return f"{int(start.month):02d}.{int(start.year)}"
+    start_q = (int(start.month) - 1) // 3
+    end_q = (int(end.month) - 1) // 3
+    if same_year and start_q == end_q:
+        return f"{start_q + 1} кв {int(start.year)}"
+    start_h = 1 if int(start.month) <= 6 else 2
+    end_h = 1 if int(end.month) <= 6 else 2
+    if same_year and start_h == end_h:
+        return f"{start_h} пг {int(start.year)}"
+    if same_year:
+        return str(int(start.year))
+    return f"{int(start.year)}–{int(end.year)}"
+
+
+def _append_span_column(columns: list[str], rows: list[dict], label: str, totals: list[float]) -> list[str]:
+    for row, total in zip(rows, totals):
+        row["values"] = [*row["values"], total]
+    return [*columns, label]
 
 
 def _sort_time_buckets(buckets: list, mode: str) -> list:
@@ -861,6 +1444,8 @@ def _deals_dynamics_prepare(df: pd.DataFrame, tile: Tile) -> dict:
         "columns": columns,
         "deal_n": deal_n,
         "bucket_mode": bucket_mode,
+        "date_col": date_col,
+        "total_label": _file_span_column_label(work[date_col]),
     }
 
 
@@ -872,8 +1457,8 @@ def _department_rows_for_dynamics(
     top_n: int,
     sort: str,
 ) -> list[dict]:
-    names = work[group_col].astype(str).str.strip()
-    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    names = _department_labels(work[group_col].astype(str).str.strip())
+    blank = work[group_col].astype(str).str.strip().str.lower().isin({"", "nan", "-", "none"})
     ranked = (
         work.loc[~blank]
         .assign(_dept=names.loc[~blank])
@@ -882,13 +1467,9 @@ def _department_rows_for_dynamics(
         .sort_values(ascending=False)
     )
     dept_rows: list[dict] = []
-    used: set[str] = set()
     for dept in ranked.index:
-        short = department_short(str(dept))
-        if short in used:
-            short = str(dept)
-        used.add(short)
-        dept_mask = work[group_col].astype(str).str.strip() == str(dept).strip()
+        short = str(dept)
+        dept_mask = names == short
         values = []
         row_total = 0.0
         for bucket in buckets:
@@ -931,10 +1512,11 @@ def _deals_dynamics_data(df: pd.DataFrame, tile: Tile) -> dict:
     rows = [
         {
             "label": _COMPANY_ROW_LABEL,
-            "values": company_values,
+            "values": list(company_values),
             "total": total,
         }
     ]
+    table_columns = _append_span_column(columns, rows, prep["total_label"], [total])
 
     groups = {_COMPANY_ROW_LABEL: float(total)}
     return {
@@ -947,8 +1529,8 @@ def _deals_dynamics_data(df: pd.DataFrame, tile: Tile) -> dict:
         },
         "table": {
             "index_label": "",
-            "columns": columns,
-            "column_kinds": ["count"] * len(columns),
+            "columns": table_columns,
+            "column_kinds": ["count"] * len(table_columns),
             "rows": rows,
         },
     }
@@ -997,6 +1579,9 @@ def _deals_dynamics_departments_data(df: pd.DataFrame, tile: Tile) -> dict:
             values.append(float(row["values"][col_i]))
         series.append({"label": col_label, "values": values})
 
+    table_columns = _append_span_column(
+        columns, rows, prep["total_label"], [float(row["total"]) for row in rows]
+    )
     groups = {row["label"]: float(row["total"]) for row in rows}
     return {
         "groups": groups,
@@ -1007,8 +1592,8 @@ def _deals_dynamics_departments_data(df: pd.DataFrame, tile: Tile) -> dict:
         },
         "table": {
             "index_label": "Подразделение",
-            "columns": columns,
-            "column_kinds": ["count"] * len(columns),
+            "columns": table_columns,
+            "column_kinds": ["count"] * len(table_columns),
             "rows": rows,
         },
     }
@@ -1038,8 +1623,8 @@ def _department_outcome_share_rows(
     top_n: int,
     sort: str,
 ) -> list[dict]:
-    names = work[group_col].astype(str).str.strip()
-    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    names = _department_labels(work[group_col].astype(str).str.strip())
+    blank = work[group_col].astype(str).str.strip().str.lower().isin({"", "nan", "-", "none"})
     ranked = (
         work.loc[~blank]
         .assign(_dept=names.loc[~blank])
@@ -1048,13 +1633,9 @@ def _department_outcome_share_rows(
         .sort_values(ascending=False)
     )
     dept_rows: list[dict] = []
-    used: set[str] = set()
     for dept in ranked.index:
-        short = department_short(str(dept))
-        if short in used:
-            short = str(dept)
-        used.add(short)
-        dept_mask = work[group_col].astype(str).str.strip() == str(dept).strip()
+        short = str(dept)
+        dept_mask = names == short
         values = []
         volume = 0.0
         for bucket in buckets:
@@ -1066,6 +1647,9 @@ def _department_outcome_share_rows(
                 "label": short,
                 "values": values,
                 "total": volume,
+                "span_total": _outcome_share_percent(
+                    work.loc[dept_mask], deal_n, status_col
+                ),
             }
         )
 
@@ -1108,6 +1692,7 @@ def _deals_dynamics_outcome_share_data(df: pd.DataFrame, tile: Tile) -> dict:
         part = work.loc[work["_bucket"] == bucket]
         company_values.append(_outcome_share_percent(part, deal_n, status_col))
 
+    company_span = _outcome_share_percent(work, deal_n, status_col)
     rows = [
         {
             "label": _COMPANY_ROW_LABEL,
@@ -1115,6 +1700,7 @@ def _deals_dynamics_outcome_share_data(df: pd.DataFrame, tile: Tile) -> dict:
             "total": _pivot_cell(
                 sum(company_values) / max(len(company_values), 1)
             ),
+            "span_total": company_span,
         }
     ]
     rows.extend(
@@ -1123,12 +1709,19 @@ def _deals_dynamics_outcome_share_data(df: pd.DataFrame, tile: Tile) -> dict:
         )
     )
 
-    categories = [row["label"] for row in rows]
+    chart_rows = sorted(rows, key=lambda row: -float(row["span_total"]))
+    categories = [row["label"] for row in chart_rows]
     series = []
     for col_i, col_label in enumerate(columns):
-        values = [float(row["values"][col_i]) for row in rows]
+        values = [float(row["values"][col_i]) for row in chart_rows]
         series.append({"label": col_label, "values": values})
 
+    table_columns = _append_span_column(
+        columns,
+        rows,
+        prep["total_label"],
+        [float(row.pop("span_total")) for row in rows],
+    )
     groups = {row["label"]: float(row["total"]) for row in rows}
     return {
         "groups": groups,
@@ -1139,8 +1732,8 @@ def _deals_dynamics_outcome_share_data(df: pd.DataFrame, tile: Tile) -> dict:
         },
         "table": {
             "index_label": "Подразделение",
-            "columns": columns,
-            "column_kinds": ["percent"] * len(columns),
+            "columns": table_columns,
+            "column_kinds": ["percent"] * len(table_columns),
             "rows": rows,
         },
     }
@@ -1174,7 +1767,7 @@ def _render_deals_dynamics_chart(series: dict, tile: Tile) -> go.Figure:
     subtitle = str(series.get("label") or _COMPANY_ROW_LABEL)
     fig.update_layout(
         title=dict(
-            text=f"ДИНАМИКА СДЕЛОВ. {subtitle.upper()}",
+            text=f"ДИНАМИКА СДЕЛОК. {subtitle.upper()}",
             x=0.5,
             xanchor="center",
             font=dict(size=13),
@@ -1229,7 +1822,7 @@ def _render_deals_dynamics_departments_chart(series: dict, tile: Tile) -> go.Fig
     fig_width = max(560, min(72 * n_depts + 40 * n_periods, 1400))
     fig.update_layout(
         title=dict(
-            text="ДИНАМИКА СДЕЛОВ. СЛУЖБЫ",
+            text="ДИНАМИКА СДЕЛОК. СЛУЖБЫ",
             x=0.5,
             xanchor="center",
             font=dict(size=13),
@@ -1362,8 +1955,8 @@ def _deals_conversion_data(df: pd.DataFrame, tile: Tile) -> dict:
         }
     ]
 
-    names = work[group_col].astype(str).str.strip()
-    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    names = _department_labels(work[group_col].astype(str).str.strip())
+    blank = work[group_col].astype(str).str.strip().str.lower().isin({"", "nan", "-", "none"})
     ranked = (
         work.loc[~blank]
         .assign(_dept=names.loc[~blank])
@@ -1371,13 +1964,9 @@ def _deals_conversion_data(df: pd.DataFrame, tile: Tile) -> dict:
         .apply(lambda part: _deal_count_in_frame(part, deal_n), include_groups=False)
         .sort_values(ascending=False)
     )
-    used: set[str] = set()
     for dept in ranked.index:
-        short = department_short(str(dept))
-        if short in used:
-            short = str(dept)
-        used.add(short)
-        mask = names == str(dept).strip()
+        short = str(dept)
+        mask = names == short
         values = percents(mask)
         rows.append(
             {
@@ -1426,11 +2015,15 @@ def _render_deals_conversion_chart(series: dict, tile: Tile) -> go.Figure:
     points = sorted(series.get("points") or [], key=lambda item: -float(item["value"]))
     labels = [str(item["label"]) for item in points]
     values = [float(item["value"]) for item in points]
+    company_value = next(
+        (float(item["value"]) for item in points if item.get("company")),
+        None,
+    )
     colors = []
     for item, value in zip(points, values):
         if item.get("company"):
             colors.append(_CONVERSION_COMPANY_COLOR)
-        elif value >= 50:
+        elif company_value is not None and value > company_value:
             colors.append(_CONVERSION_HIGH_COLOR)
         else:
             colors.append(_CONVERSION_OTHER_COLOR)
@@ -1514,8 +2107,8 @@ def _deals_money_data(df: pd.DataFrame, tile: Tile) -> dict:
         for year, part in [_bucket_year_part(bucket, bucket_mode)]
     ]
 
-    names = work[group_col].astype(str).str.strip()
-    blank = names.str.lower().isin({"", "nan", "-", "none"})
+    names = _department_labels(work[group_col].astype(str).str.strip())
+    blank = work[group_col].astype(str).str.strip().str.lower().isin({"", "nan", "-", "none"})
     ranked = (
         work.loc[~blank]
         .assign(_dept=names.loc[~blank])
@@ -1533,13 +2126,9 @@ def _deals_money_data(df: pd.DataFrame, tile: Tile) -> dict:
                 "values": company,
             }
         ]
-        used: set[str] = set()
         for dept in ranked.index:
-            short = department_short(str(dept))
-            if short in used:
-                short = str(dept)
-            used.add(short)
-            mask = names == str(dept).strip()
+            short = str(dept)
+            mask = names == short
             rows.append(
                 {
                     "label": short,
@@ -1567,6 +2156,8 @@ def _deals_money_data(df: pd.DataFrame, tile: Tile) -> dict:
 
 
 def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
+    if tile.source.kind in _DEPT_FILTER_KINDS:
+        df = _limit_departments(df, tile)
     kind = tile.source.kind
     if kind == "columns_pattern":
         return _columns_pattern_data(df, tile)
@@ -1582,6 +2173,10 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _halfyear_data(df, tile)
     if kind == "status_summary":
         return _status_summary_data(df, tile)
+    if kind == "deal_statuses":
+        return _deal_statuses_data(df, tile)
+    if kind == "in_work_stages":
+        return _in_work_stages_data(df, tile)
     if kind == "deals_dynamics":
         return _deals_dynamics_data(df, tile)
     if kind == "deals_dynamics_departments":
@@ -1695,19 +2290,24 @@ def _tile_stats(tile: Tile, data: dict) -> dict:
 
 def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
     """Возвращает {"tabs": [{title, tiles: [{title, chart_type, plotly_json, stats} | {title, error}]}]}."""
+    catalog = department_catalog(df)
     rendered_tabs = []
     for tab in spec.tabs:
         tiles = []
         for tile in tab.tiles:
+            def emit(payload: dict, tile=tile) -> None:
+                if tile.source.kind in _DEPT_FILTER_KINDS:
+                    payload["departments"] = catalog
+                tiles.append(payload)
             try:
                 data = _tile_data(df, tile)
             except Exception as exc:
                 logger.warning("Тайл «%s» упал: %s", tile.title, exc)
-                tiles.append({"title": tile.title, "error": str(exc)})
+                emit({"title": tile.title, "error": str(exc)})
                 continue
 
             if "error" in data:
-                tiles.append({"title": tile.title, "error": data["error"]})
+                emit({"title": tile.title, "error": data["error"]})
                 continue
 
             if data.get("sections"):
@@ -1718,11 +2318,11 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 }
                 if data.get("bucket_period"):
                     payload["bucket_period"] = data["bucket_period"]
-                tiles.append(payload)
+                emit(payload)
                 continue
 
             if tile.source.kind == "deals_money" and data.get("money"):
-                tiles.append(
+                emit(
                     {
                         "title": tile.title,
                         "chart_type": "deals_money",
@@ -1776,11 +2376,11 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                     payload["plotly_json"] = period_charts[-1]
                 elif plotly_json:
                     payload["plotly_json"] = plotly_json
-                tiles.append(payload)
+                emit(payload)
                 continue
 
             if tile.chart_type == "table" or data.get("table"):
-                tiles.append(
+                emit(
                     {
                         "title": tile.title,
                         "chart_type": "table",
@@ -1794,10 +2394,10 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 fig = _render_figure(tile, data)
             except Exception as exc:
                 logger.warning("Рендер тайла «%s» упал: %s", tile.title, exc)
-                tiles.append({"title": tile.title, "error": str(exc)})
+                emit({"title": tile.title, "error": str(exc)})
                 continue
 
-            tiles.append(
+            emit(
                 {
                     "title": tile.title,
                     "chart_type": tile.chart_type,

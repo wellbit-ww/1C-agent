@@ -78,7 +78,7 @@ def test_sales_pipeline_unchanged(sales_df):
     assert detect_report_type(sales_df, filename="Этапы продаж.xlsx") == "sales_pipeline"
     _, profile = get_profile_for_df(sales_df, filename="Этапы продаж.xlsx")
     spec = profile.get_dashboard_spec(sales_df)
-    assert [t.title for t in spec.tabs] == ["Данные", "Динамика", "Конверсия", "Деньги"]
+    assert [t.title for t in spec.tabs] == ["Данные", "Динамика", "Конверсия", "Деньги", "Этапы продаж"]
     assert spec.tabs[0].tiles[0].chart_type == "table"
     rendered = render_spec(sales_df, spec)
     table_tile = rendered["tabs"][0]["tiles"][0]

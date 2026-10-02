@@ -1,11 +1,25 @@
-﻿import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { copyExcelMarkup } from "./clipboard";
 import * as api from "./api";
 import { ChatPanel } from "./ChatPanel";
 import { FileBrief } from "./FileBrief";
 import { PlotChart } from "./PlotChart";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
-import type { ChatMessage, Dashboard, DashSpec, FileContext, MoneyBoard, MoneyMetric, PivotTable, Report, ReportChart, SectionBlock, Tile } from "./types";
+import type {
+  ChatMessage,
+  Dashboard,
+  DashSpec,
+  FileContext,
+  MoneyBoard,
+  MoneyMetric,
+  PivotTable,
+  Report,
+  ReportChart,
+  SectionBlock,
+  SectionTable,
+  Tile,
+} from "./types";
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -272,36 +286,33 @@ function sectionsToGrid(sections: SectionBlock[]): { plain: string[][]; html: Ht
 }
 
 async function writeExcelTable(plain: string[][], html: HtmlCell[][]) {
-  const markup = gridToHtml(html);
-  if (navigator.clipboard?.write && typeof ClipboardItem !== "undefined") {
-    await navigator.clipboard.write([
-      new ClipboardItem({
-        "text/html": new Blob([markup], { type: "text/html" }),
-      }),
-    ]);
-    return;
-  }
-  await navigator.clipboard.writeText(gridToTsv(plain));
+  await copyExcelMarkup(gridToHtml(html), gridToTsv(plain));
 }
 
 function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
   return (
     <div className="space-y-6">
       {sections.map((block) => (
-        <section key={block.title}>
-          <h3 className="mb-3 text-sm font-semibold text-zinc-100">{block.title}</h3>
-          <div className="grid gap-3 md:grid-cols-2">
-            {block.tables.map((item) => (
-              <div key={`${block.title}-${item.title}`} className="overflow-hidden rounded-lg border border-line">
-                <div className="border-b border-line bg-panel px-3 py-1.5 text-sm font-medium text-zinc-100">
-                  {item.title}
-                </div>
+        <section key={block.title || "table-block"}>
+          {block.title ? (
+            <h3 className="mb-3 text-sm font-semibold text-zinc-100">{block.title}</h3>
+          ) : null}
+          <div className={`grid gap-3 ${block.tables.length > 1 ? "md:grid-cols-2" : ""}`}>
+            {block.tables.map((item, tableI) => (
+              <div key={`${block.title}-${tableI}-${item.title}`} className="overflow-hidden rounded-lg border border-line">
+                {item.title ? (
+                  <div className="border-b border-line bg-panel px-3 py-1.5 text-sm font-medium text-zinc-100">
+                    {item.title}
+                  </div>
+                ) : null}
                 <table className="w-full border-collapse text-right text-xs">
                   <thead>
                     <tr className="text-zinc-500">
-                      <th className="border-b border-line px-2 py-1.5 text-left font-medium" />
-                      {item.columns.map((col) => (
-                        <th key={col} className="border-b border-line px-2 py-1.5 font-medium whitespace-nowrap">
+                      <th className="border-b border-line px-2 py-1.5 text-left font-medium">
+                        {item.index_label || ""}
+                      </th>
+                      {item.columns.map((col, i) => (
+                        <th key={`${i}-${col}`} className="border-b border-line px-2 py-1.5 font-medium whitespace-nowrap">
                           {col}
                         </th>
                       ))}
@@ -309,10 +320,23 @@ function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
                   </thead>
                   <tbody>
                     {item.rows.map((row) => (
-                      <tr key={row.label} className="border-t border-line">
-                        <th className="px-2 py-1.5 text-left font-medium text-zinc-200">{row.label}</th>
+                      <tr key={`${row.label}-${row.indent ? "sub" : "main"}`} className="border-t border-line">
+                        <th
+                          className={`px-2 py-1.5 text-left font-medium text-zinc-200 ${
+                            row.label === "Всего" ? "font-semibold text-accent" : ""
+                          } ${row.indent ? "pl-5 text-[11px] font-normal italic text-zinc-400" : ""} ${
+                            row.row_role === "group" ? "font-semibold" : ""
+                          }`}
+                        >
+                          {row.label}
+                        </th>
                         {item.columns.map((col, i) => (
-                          <td key={col} className="px-2 py-1.5 tabular-nums text-zinc-100">
+                          <td
+                            key={`${row.label}-${i}`}
+                            className={`px-2 py-1.5 tabular-nums text-zinc-100 ${
+                              row.label === "Всего" ? "font-semibold text-accent" : ""
+                            }`}
+                          >
                             {formatSectionCell(row.values[i], row.kinds?.[i])}
                           </td>
                         ))}
@@ -324,6 +348,265 @@ function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
             ))}
           </div>
         </section>
+      ))}
+    </div>
+  );
+}
+
+const STATUS_PIE_COLORS: Record<string, string> = {
+  "В работе": "#5B9BD5",
+  Выиграна: "#ED7D31",
+  Проиграна: "#A5A5A5",
+  Отменена: "#FFC000",
+};
+
+function statusDealsOrdersFigure(block: SectionBlock) {
+  const table = block.tables[0];
+  const labels = table.rows.map((row) => row.label.toUpperCase());
+  const deals = table.rows.map((row) => Number(row.values[0] ?? 0));
+  const orders = table.rows.map((row) => Number(row.values[2] ?? 0));
+  const dealSums = table.rows.map((row) => Number(row.values[1] ?? 0));
+  const orderSums = table.rows.map((row) => Number(row.values[3] ?? 0));
+  const peak = Math.max(1, ...deals, ...orders);
+  return JSON.stringify({
+    data: [
+      {
+        type: "bar",
+        name: "Сделки",
+        x: labels,
+        y: deals,
+        customdata: dealSums,
+        marker: { color: "#5B9BD5" },
+        text: deals.map((value) => String(value)),
+        textposition: "outside",
+        textangle: -90,
+        cliponaxis: false,
+        hovertemplate: "Сделки<br>%{y:,.0f}<br>%{customdata:,.0f} р.<extra></extra>",
+      },
+      {
+        type: "bar",
+        name: "Заказы",
+        x: labels,
+        y: orders,
+        customdata: orderSums,
+        marker: { color: "#ED7D31" },
+        text: orders.map((value) => String(value)),
+        textposition: "outside",
+        textangle: -90,
+        cliponaxis: false,
+        hovertemplate: "Заказы<br>%{y:,.0f}<br>%{customdata:,.0f} р.<extra></extra>",
+      },
+    ],
+    layout: {
+      title: {
+        text: `СДЕЛКИ И ЗАКАЗЫ ${block.title.toUpperCase()}`,
+        x: 0.5,
+        xanchor: "center",
+        font: { size: 14 },
+      },
+      barmode: "group",
+      bargap: 0.28,
+      bargroupgap: 0.08,
+      showlegend: true,
+      legend: { orientation: "h", y: 1.08, x: 0.5, xanchor: "center" },
+      margin: { l: 16, r: 16, t: 72, b: 48 },
+      height: 420,
+      autosize: true,
+      xaxis: { type: "category", categoryorder: "array", categoryarray: labels, tickangle: 0 },
+      yaxis: { visible: false, range: [0, peak * 1.35] },
+    },
+  });
+}
+
+function statusDealsPieFigure(block: SectionBlock) {
+  const rows = block.tables[0].rows.filter((row) => row.label !== "Всего");
+  return JSON.stringify({
+    data: [
+      {
+        type: "pie",
+        labels: rows.map((row) => row.label),
+        values: rows.map((row) => Number(row.values[0] ?? 0)),
+        marker: { colors: rows.map((row) => STATUS_PIE_COLORS[row.label] ?? "#5B9BD5") },
+        textinfo: "label+percent",
+        textposition: "outside",
+        sort: false,
+        hovertemplate: "%{label}<br>%{value:,.0f}<br>%{percent}<extra></extra>",
+      },
+    ],
+    layout: {
+      title: { text: "Сделки", x: 0.5, xanchor: "center", font: { size: 14 } },
+      showlegend: true,
+      legend: { orientation: "h", y: -0.08, x: 0.5, xanchor: "center" },
+      margin: { l: 16, r: 16, t: 48, b: 56 },
+      height: 420,
+      autosize: true,
+    },
+  });
+}
+
+function DealStatusView({ sections, variant }: { sections: SectionBlock[]; variant?: string }) {
+  const counts = variant === "counts";
+  return (
+    <div className="space-y-4">
+      {sections.map((block) => (
+        <div key={block.title} className="space-y-3">
+          <HalfYearTables sections={[block]} />
+          <PlotChart
+            json={counts ? statusDealsPieFigure(block) : statusDealsOrdersFigure(block)}
+            className="h-[26rem] w-full"
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const IN_WORK_STAGE_BAR_BLUE = "#5B9BD5";
+const IN_WORK_STAGE_BAR_YELLOW = "#FFC000";
+const IN_WORK_STAGE_BAR_PERIWINKLE = "#9DC3E6";
+const IN_WORK_STAGE_BAR_GREY = "#A5A5A5";
+
+function inWorkStageKey(label: string) {
+  return label.toLowerCase().replace(/ё/g, "е").trim();
+}
+
+function inWorkStageBarColor(label: string): string {
+  const low = inWorkStageKey(label);
+  if (low.includes("формирование предложения")) return IN_WORK_STAGE_BAR_YELLOW;
+  if (low.includes("согласование") && low.includes("контрагент")) return IN_WORK_STAGE_BAR_PERIWINKLE;
+  if (low.includes("ожидание финансирования")) return IN_WORK_STAGE_BAR_GREY;
+  return IN_WORK_STAGE_BAR_BLUE;
+}
+
+function inWorkStageHighlight(label: string): boolean {
+  const low = inWorkStageKey(label);
+  return (
+    low.includes("формирование предложения") ||
+    (low.includes("согласование") && low.includes("контрагент")) ||
+    low.includes("ожидание финансирования")
+  );
+}
+
+function inWorkPeriodLabel(sectionTitle: string): string {
+  const match = sectionTitle.match(/\(([^)]+)\)\s*$/);
+  return match ? match[1] : sectionTitle;
+}
+
+function inWorkStageRows(block: SectionBlock) {
+  return block.tables[0].rows.filter((row) => row.label !== "Всего");
+}
+
+function inWorkStageHbarFigure(block: SectionBlock, metric: "count" | "money") {
+  const rows = inWorkStageRows(block);
+  const labels = rows.map((row) => row.label);
+  const values = rows.map((row) => Number(row.values[metric === "count" ? 0 : 1] ?? 0));
+  const colors = labels.map((label) => inWorkStageBarColor(label));
+  const highlights = labels.map((label) => inWorkStageHighlight(label));
+  const period = inWorkPeriodLabel(block.title);
+  const suffix = metric === "count" ? "Количество" : "Сумма, р.";
+  const text = values.map((value) =>
+    metric === "count"
+      ? formatSectionCell(value, "count")
+      : formatSectionCell(value, "money"),
+  );
+  const peak = Math.max(1, ...values);
+  const barHeight = Math.max(320, 26 * labels.length + 72);
+  return JSON.stringify({
+    data: [
+      {
+        type: "bar",
+        orientation: "h",
+        y: labels,
+        x: values,
+        marker: { color: colors },
+        text,
+        textposition: "outside",
+        cliponaxis: false,
+        textfont: {
+          size: highlights.map((bold) => (bold && metric === "money" ? 12 : 11)),
+          weight: highlights.map((bold) => (bold && metric === "money" ? 700 : 400)),
+        },
+        hovertemplate:
+          metric === "count"
+            ? "%{y}<br>%{x:,.0f}<extra></extra>"
+            : "%{y}<br>%{x:,.0f} р.<extra></extra>",
+      },
+    ],
+    layout: {
+      title: {
+        text: `Сделки В работе (${period}) — ${suffix}`,
+        x: 0.5,
+        xanchor: "center",
+        font: { size: 13 },
+      },
+      showlegend: false,
+      margin: { l: 8, r: 88, t: 48, b: 8 },
+      height: barHeight,
+      autosize: true,
+      xaxis: { visible: false, range: [0, peak * 1.22] },
+      yaxis: {
+        automargin: true,
+        autorange: "reversed",
+        showgrid: false,
+        tickfont: { size: 11 },
+      },
+    },
+  });
+}
+
+function StageDeptBreakdownGrid({
+  title,
+  items,
+}: {
+  title: string;
+  items: { stage: string; table: SectionTable }[];
+}) {
+  if (!items.length) return null;
+  return (
+    <div className="space-y-2">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{title}</h4>
+      <div className="grid gap-3 xl:grid-cols-3">
+        {items.map((item) => (
+          <div key={item.stage} className="overflow-hidden rounded-lg border border-line">
+            <div className="border-b border-line bg-panel px-3 py-1.5 text-center text-sm font-medium text-zinc-100">
+              {item.stage}
+            </div>
+            <HalfYearTables
+              sections={[
+                {
+                  title: "",
+                  tables: [{ ...item.table, title: "" }],
+                },
+              ]}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InWorkStagesView({ sections }: { sections: SectionBlock[] }) {
+  return (
+    <div className="space-y-6">
+      {sections.map((block) => (
+        <div key={block.title} className="space-y-4">
+          <HalfYearTables sections={[{ title: block.title, tables: block.tables }]} />
+          <PlotChart json={inWorkStageHbarFigure(block, "count")} className="w-full" />
+          {block.stage_breakdowns?.by_count?.length ? (
+            <StageDeptBreakdownGrid
+              title="Разрез по службам — топ‑3 этапа по количеству"
+              items={block.stage_breakdowns.by_count}
+            />
+          ) : null}
+          <PlotChart json={inWorkStageHbarFigure(block, "money")} className="w-full" />
+          {block.stage_breakdowns?.by_sum?.length ? (
+            <StageDeptBreakdownGrid
+              title="Разрез по службам — топ‑3 этапа по сумме"
+              items={block.stage_breakdowns.by_sum}
+            />
+          ) : null}
+        </div>
       ))}
     </div>
   );
@@ -447,42 +730,140 @@ function PivotTableView({
   );
 }
 
-const COMPARE_BAR_COLORS = ["#5B9BD5", "#ED7D31"];
+const COMPARE_BAR_COLORS = [
+  "#5B9BD5",
+  "#ED7D31",
+  "#70AD47",
+  "#FFC000",
+  "#A5A5A5",
+  "#1F4E79",
+  "#C00000",
+  "#7030A0",
+  "#00B0F0",
+  "#548235",
+  "#C65911",
+  "#833C0C",
+];
 
-function conversionCompareFigure(table: PivotTable, columns: number[]) {
-  const labels = table.rows.map((row) => row.label);
+const CONVERSION_COMPANY = "Совтест";
+const CONVERSION_COMPANY_COLOR = "#C00000";
+const CONVERSION_ABOVE_COLOR = "#548235";
+const CONVERSION_OTHER_COLOR = "#5B9BD5";
+
+function conversionSingleFigure(table: PivotTable, column: number, title: string) {
+  const points = table.rows.map((row) => ({
+    label: row.label,
+    value: Number(row.values[column] ?? 0),
+    company: row.label === CONVERSION_COMPANY,
+  }));
+  points.sort((a, b) => b.value - a.value);
+  const companyValue = points.find((item) => item.company)?.value;
+  const colors = points.map((item) => {
+    if (item.company) return CONVERSION_COMPANY_COLOR;
+    if (companyValue != null && item.value > companyValue) return CONVERSION_ABOVE_COLOR;
+    return CONVERSION_OTHER_COLOR;
+  });
+  const labels = points.map((item) => item.label);
+  const values = points.map((item) => item.value);
+  return JSON.stringify({
+    data: [
+      {
+        type: "bar",
+        x: labels,
+        y: values,
+        marker: { color: colors },
+        text: values.map((value) => `${Math.round(value)}%`),
+        textposition: "outside",
+        cliponaxis: false,
+        width: 0.62,
+      },
+    ],
+    layout: {
+      title: {
+        text: title,
+        x: 0.5,
+        xanchor: "center",
+        font: { size: 14 },
+      },
+      barmode: "relative",
+      autosize: false,
+      width: Math.max(720, Math.min(88 * Math.max(labels.length, 1), 1500)),
+      height: 520,
+      showlegend: false,
+      margin: { l: 16, r: 16, t: 64, b: 64 },
+      bargap: 0.22,
+      xaxis: { type: "category", tickangle: labels.length > 6 ? -25 : 0 },
+      yaxis: { visible: false, range: [0, 140] },
+    },
+  });
+}
+
+function conversionGroupedFigure(table: PivotTable, columns: number[], title: string) {
+  if (columns.length === 1) return conversionSingleFigure(table, columns[0], title);
+  const ranked = [...table.rows].sort((a, b) => {
+    const score = (row: (typeof table.rows)[number]) =>
+      columns.reduce((total, index) => total + Number(row.values[index] ?? 0), 0);
+    return score(b) - score(a);
+  });
+  const labels = ranked.map((row) => row.label);
   const periodNames = columns.map((index) => table.columns[index] ?? "");
+  const showText = columns.length * Math.max(labels.length, 1) <= 36;
   const data = columns.map((index, seriesI) => ({
     type: "bar",
-    name: `Конверсия сделок в заказы (${periodNames[seriesI]})`,
+    name: periodNames[seriesI],
     x: labels,
-    y: table.rows.map((row) => Number(row.values[index] ?? 0)),
+    y: ranked.map((row) => Number(row.values[index] ?? 0)),
     marker: { color: COMPARE_BAR_COLORS[seriesI % COMPARE_BAR_COLORS.length] },
-    text: table.rows.map((row) => `${Math.round(Number(row.values[index] ?? 0))}%`),
-    textposition: "outside",
+    text: showText
+      ? ranked.map((row) => `${Math.round(Number(row.values[index] ?? 0))}%`)
+      : undefined,
+    textposition: showText ? "outside" : undefined,
     cliponaxis: false,
   }));
   return JSON.stringify({
     data,
     layout: {
       title: {
-        text: `Конверсия сделок в заказы (${periodNames.join("/")})`,
+        text: title,
         x: 0.5,
         xanchor: "center",
         font: { size: 14 },
       },
       barmode: columns.length > 1 ? "group" : "relative",
       autosize: false,
-      width: Math.max(640, Math.min(96 * Math.max(labels.length, 1), 1280)),
-      height: 480,
+      width: Math.max(720, Math.min(88 * Math.max(labels.length, 1) + 24 * columns.length, 1500)),
+      height: 520,
       showlegend: columns.length > 1,
-      legend: { orientation: "h", y: -0.28, x: 0.5, xanchor: "center" },
+      legend: { orientation: "h", y: -0.22, x: 0.5, xanchor: "center" },
       margin: { l: 16, r: 16, t: 64, b: columns.length > 1 ? 96 : 64 },
-      bargap: 0.28,
-      xaxis: { type: "category", tickangle: labels.length > 6 ? -25 : 0 },
+      bargap: 0.22,
+      bargroupgap: 0.06,
+      xaxis: {
+        type: "category",
+        categoryorder: "array",
+        categoryarray: labels,
+        tickangle: labels.length > 6 ? -25 : 0,
+      },
       yaxis: { visible: false, range: [0, 140] },
     },
   });
+}
+
+function conversionCompareFigure(table: PivotTable, columns: number[]) {
+  const periodNames = columns.map((index) => table.columns[index] ?? "");
+  return conversionGroupedFigure(
+    table,
+    columns,
+    `Конверсия сделок в заказы (${periodNames.join("/")})`,
+  );
+}
+
+function conversionOverviewFigure(table: PivotTable) {
+  return conversionGroupedFigure(
+    table,
+    table.columns.map((_, index) => index),
+    "Конверсия сделок в заказы",
+  );
 }
 
 function ConversionCompareBlock({ table, columns }: { table: PivotTable; columns: number[] }) {
@@ -547,6 +928,8 @@ function formatMoneyDelta(current: number, previous: number | null) {
   return pct > 0 ? `+${pct}%` : `${pct}%`;
 }
 
+const MONEY_PIE_COLORS = ["#2ee6a6", "#5b8def", "#f0b429", "#e05d5d", "#c084fc", "#67e8f9"];
+
 function moneyPieFigure(title: string, slices: { label: string; value: number }[]) {
   return JSON.stringify({
     data: [
@@ -554,6 +937,9 @@ function moneyPieFigure(title: string, slices: { label: string; value: number }[
         type: "pie",
         labels: slices.map((item) => item.label),
         values: slices.map((item) => item.value),
+        marker: {
+          colors: slices.map((_, index) => MONEY_PIE_COLORS[index % MONEY_PIE_COLORS.length]),
+        },
         textinfo: "percent",
         textposition: "inside",
         sort: false,
@@ -595,9 +981,43 @@ function MoneyMetricBlock({
       .map((row) => ({ label: row.label, value: Number(row.values[index] ?? 0) }));
   const currentSlices = slices(currentIndex);
   const previousSlices = previousIndex == null ? [] : slices(previousIndex);
+  const [copied, setCopied] = useState(false);
+
+  async function onCopy() {
+    const header = ["Подразделение", currentLabel];
+    if (previousLabel) header.push(previousLabel, "Отклонение");
+    const plain: string[][] = [header];
+    const html: HtmlCell[][] = [header.map((text) => ({ text }))];
+    for (const row of rows) {
+      const current = Number(row.values[currentIndex] ?? 0);
+      const values: (number | null)[] = [current];
+      const kinds = ["count"];
+      if (previousIndex != null) {
+        const previous = Number(row.values[previousIndex] ?? 0);
+        values.push(previous);
+        kinds.push("count");
+        values.push(previous === 0 ? null : Math.round((100 * (current - previous)) / previous));
+        kinds.push("percent");
+      }
+      pushExcelLine(plain, html, row.label, values, kinds);
+    }
+    await writeExcelTable(plain, html);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
   return (
     <section className="space-y-3 rounded-xl border border-line bg-bg/40 p-3">
-      <h3 className="text-sm font-medium text-zinc-100">{metric.title}</h3>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-medium text-zinc-100">{metric.title}</h3>
+        <button
+          type="button"
+          className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+          onClick={() => void onCopy().catch(() => setCopied(false))}
+        >
+          {copied ? "Скопировано" : "Скопировать"}
+        </button>
+      </div>
       <div className="overflow-auto rounded-lg border border-line">
         <table className="min-w-full border-collapse text-right text-xs">
           <thead className="bg-panel text-zinc-400">
@@ -610,7 +1030,7 @@ function MoneyMetricBlock({
                 <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">{previousLabel}</th>
               ) : null}
               {previousLabel ? (
-                <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">Изменение</th>
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">Отклонение</th>
               ) : null}
             </tr>
           </thead>
@@ -825,14 +1245,15 @@ function useBusyLabel(busy: string | null) {
 type View = "dash" | "report";
 
 export function App() {
-  const [backendOk, setBackendOk] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    document.documentElement.dataset.theme === "light" ? "light" : "dark",
+  );
   const [view, setView] = useState<View>("dash");
   const [fileId, setFileId] = useState<string | null>(null);
   const [filename, setFilename] = useState<string | null>(null);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [ctx, setCtx] = useState<FileContext | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [table, setTable] = useState<Record<string, unknown>[] | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [reportCharts, setReportCharts] = useState<ReportChart[]>([]);
   const [narrative, setNarrative] = useState("");
@@ -855,14 +1276,6 @@ export function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const fileIdRef = useRef<string | null>(null);
   const restoredRef = useRef(false);
-
-  useEffect(() => {
-    void api.checkBackend().then(setBackendOk);
-    const id = window.setInterval(() => {
-      void api.checkBackend().then(setBackendOk);
-    }, 15000);
-    return () => window.clearInterval(id);
-  }, []);
 
   const loadFile = useCallback(async (id: string, name: string, restore?: SavedSession) => {
     fileIdRef.current = id;
@@ -897,14 +1310,6 @@ export function App() {
         })
         .catch(() => {
           /* карточка по колонкам уже в dashboard */
-        });
-      void api
-        .getTable(id)
-        .then((rows) => {
-          if (fileIdRef.current === id) setTable(rows.data ?? []);
-        })
-        .catch(() => {
-          if (fileIdRef.current === id) setTable(null);
         });
       if (restore?.view === "report") {
         try {
@@ -964,6 +1369,13 @@ export function App() {
   async function onUpload(file: File) {
     setBusy("Загружаю файл…");
     setError(null);
+    setDashboard(null);
+    setCtx(null);
+    setSpecBackup(null);
+    setChartEditor(null);
+    setFileId(null);
+    setFilename(null);
+    fileIdRef.current = null;
     try {
       const { file_id } = await api.uploadFile(file);
       await loadFile(file_id, file.name);
@@ -1105,11 +1517,15 @@ export function App() {
     period: string,
     kind:
       | "halfyear"
+      | "pivot"
+      | "outcome"
       | "deals_dynamics"
       | "deals_dynamics_departments"
       | "deals_dynamics_outcome_share"
       | "deals_conversion"
-      | "deals_money",
+      | "deals_money"
+      | "deal_statuses"
+      | "in_work_stages",
   ) {
     const spec = dashboard?.spec;
     if (!spec || !fileId) return;
@@ -1248,7 +1664,6 @@ export function App() {
     setDashboard(null);
     setCtx(null);
     setMessages([]);
-    setTable(null);
     setReport(null);
     setReportCharts([]);
     setChartEditor(null);
@@ -1279,10 +1694,22 @@ export function App() {
           onClick={() => setChatOpen((open) => !open)}
         />
         <div className="mt-auto flex flex-col items-center gap-2">
-          <span
-            className={`h-2 w-2 rounded-full ${backendOk ? "bg-accent" : "bg-red-500"}`}
-            title={backendOk ? "Backend доступен" : "Backend недоступен"}
-          />
+          <button
+            type="button"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-line text-accent hover:bg-accent-dim"
+            title={theme === "dark" ? "Светлая тема" : "Тёмная тема"}
+            aria-label={theme === "dark" ? "Включить светлую тему" : "Включить тёмную тему"}
+            onClick={() => {
+              const next = theme === "dark" ? "light" : "dark";
+              if (next === "light") document.documentElement.dataset.theme = "light";
+              else delete document.documentElement.dataset.theme;
+              localStorage.setItem("excel-agent-theme", next);
+              setTheme(next);
+              window.dispatchEvent(new Event("themechange"));
+            }}
+          >
+            {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+          </button>
         </div>
       </nav>
 
@@ -1493,26 +1920,28 @@ export function App() {
                           specTile?.source?.kind === "deals_money" || tile.chart_type === "deals_money";
                         const periodBucketTile =
                           specTile?.source?.kind === "halfyear" ||
+                          specTile?.source?.kind === "pivot" ||
+                          specTile?.source?.kind === "outcome" ||
+                          specTile?.source?.kind === "deal_statuses" ||
+                          specTile?.source?.kind === "in_work_stages" ||
                           conversionTile ||
                           moneyTile ||
                           DYNAMICS_PERIOD_KINDS.includes(
                             specTile?.source?.kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
                           );
-                        const periodBucketDefault =
-                          specTile?.source?.kind === "halfyear" ||
-                          specTile?.source?.kind === "deals_conversion" ||
-                          specTile?.source?.kind === "deals_money"
-                            ? "half"
-                            : "quarter";
+                        const periodBucketDefault = "quarter";
                         const dynamicsTile = DYNAMICS_PERIOD_KINDS.includes(
                           tile.chart_type as (typeof DYNAMICS_PERIOD_KINDS)[number],
                         );
+                        const sideBySideTile = specTile?.source?.kind === "deal_statuses";
                         const periodCharts = tile.period_charts ?? [];
                         const selectedPeriod =
                           conversionPeriod[id] != null && conversionPeriod[id] < periodCharts.length
                             ? conversionPeriod[id]
                             : Math.max(0, periodCharts.length - 1);
                         const conversionChart = periodCharts[selectedPeriod] ?? tile.plotly_json;
+                        const conversionOverview =
+                          conversionTile && tile.table ? conversionOverviewFigure(tile.table) : conversionChart;
                         const conversionColumnsKey = (tile.table?.columns ?? []).join("|");
                         const storedCompare = conversionCompare[id];
                         const activeCompare =
@@ -1536,7 +1965,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${tile.table || tile.sections || tile.money || dynamicsTile || conversionTile || moneyTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${(tile.table || tile.sections || tile.money || dynamicsTile || conversionTile || moneyTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1552,11 +1981,15 @@ export function App() {
                                       e.target.value,
                                       specTile.source.kind as
                                         | "halfyear"
+                                        | "pivot"
+                                        | "outcome"
                                         | "deals_dynamics"
                                         | "deals_dynamics_departments"
                                         | "deals_dynamics_outcome_share"
                                         | "deals_conversion"
-                                        | "deals_money",
+                                        | "deals_money"
+                                        | "deal_statuses"
+                                        | "in_work_stages",
                                     )
                                   }
                                   className="rounded-md border border-line bg-bg px-2 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-accent/60"
@@ -1597,7 +2030,7 @@ export function App() {
                                     toggleReportChart({
                                       id,
                                       title: tile.title,
-                                      plotly_json: conversionTile ? conversionChart : tile.plotly_json,
+                                      plotly_json: conversionTile ? conversionOverview : tile.plotly_json,
                                       table: tile.table,
                                     })
                                   }
@@ -1613,6 +2046,17 @@ export function App() {
                             <MoneyBoardView
                               key={`${tile.bucket_period ?? "half"}-${tile.money.periods.length}`}
                               board={tile.money}
+                            />
+                          ) : sideBySideTile && tile.sections ? (
+                            <DealStatusView
+                              key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "quarter"}-${specTile?.source?.variant ?? "full"}`}
+                              sections={tile.sections}
+                              variant={specTile?.source?.variant}
+                            />
+                          ) : specTile?.source?.kind === "in_work_stages" && tile.sections ? (
+                            <InWorkStagesView
+                              key={`${tile.title}-${tile.bucket_period ?? specTile?.source?.period ?? "quarter"}`}
+                              sections={tile.sections}
                             />
                           ) : tile.sections ? (
                             <HalfYearTables
@@ -1646,9 +2090,9 @@ export function App() {
                                     : undefined
                                 }
                               />
-                              {(conversionTile ? conversionChart : tile.plotly_json) ? (
+                              {(conversionTile ? conversionOverview : tile.plotly_json) ? (
                                 <div className="relative flex justify-center overflow-x-auto">
-                                  {conversionTile && conversionChart ? (
+                                  {conversionTile && conversionOverview ? (
                                     <button
                                       type="button"
                                       className="absolute right-2 top-2 z-10 rounded-md border border-line bg-card/90 px-2 py-1 text-[11px] text-zinc-200 hover:border-accent/50 hover:text-accent"
@@ -1667,7 +2111,7 @@ export function App() {
                                     </button>
                                   ) : null}
                                   <PlotChart
-                                    json={(conversionTile ? conversionChart : tile.plotly_json)!}
+                                    json={(conversionTile ? conversionOverview : tile.plotly_json)!}
                                     className={
                                       conversionTile
                                         ? "h-[28rem] w-full min-w-[640px]"
@@ -1722,37 +2166,6 @@ export function App() {
                   </div>
                 )}
 
-                {table && table.length > 0 && (
-                  <details className="mt-6">
-                    <summary className="cursor-pointer text-sm text-zinc-400">
-                      Детализация ({table.length} строк)
-                    </summary>
-                    <div className="mt-2 max-h-80 overflow-auto rounded-xl border border-line">
-                      <table className="min-w-full text-left text-xs">
-                        <thead className="sticky top-0 bg-panel text-zinc-500">
-                          <tr>
-                            {Object.keys(table[0]).slice(0, 12).map((col) => (
-                              <th key={col} className="px-2 py-1 font-medium">
-                                {col}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {table.slice(0, 50).map((row, i) => (
-                            <tr key={i} className="border-t border-line">
-                              {Object.keys(table[0]).slice(0, 12).map((col) => (
-                                <td key={col} className="max-w-40 truncate px-2 py-1 text-zinc-300">
-                                  {String(row[col] ?? "")}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </details>
-                )}
               </>
             )}
           </div>
@@ -1761,6 +2174,11 @@ export function App() {
               key={`${chartEditor.mode}-${chartEditor.tabI}-${chartEditor.mode === "edit" ? chartEditor.tileI : "new"}`}
               spec={dashboard.spec}
               columns={meta?.column_names ?? []}
+              departments={
+                chartEditor.mode === "edit"
+                  ? tabs[chartEditor.tabI]?.tiles[chartEditor.tileI]?.departments ?? []
+                  : []
+              }
               busy={!!busy}
               mode={chartEditor}
               onClose={() => setChartEditor(null)}
@@ -1790,6 +2208,33 @@ export function App() {
         onClose={() => setChatOpen(false)}
       />
     </div>
+  );
+}
+
+function SunIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="4" stroke="currentColor" strokeWidth="1.8" />
+      <path
+        d="M12 2.5v2.2M12 19.3v2.2M4.8 4.8l1.6 1.6M17.6 17.6l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.8 19.2l1.6-1.6M17.6 6.4l1.6-1.6"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function MoonIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M16.5 3.5a8.5 8.5 0 1 0 4 13.5A7.2 7.2 0 0 1 16.5 3.5Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

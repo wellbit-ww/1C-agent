@@ -20,6 +20,17 @@ from services.chart_service import (
     create_monthly_trend_chart,
 )
 
+from models.dashboard_spec import DashboardSpec
+
+
+def _persist_enriched_spec(file_id: str, spec: DashboardSpec) -> None:
+    """Сохраняет спеку после enrich (нормализация вкладки «Этапы продаж» и т.д.)."""
+    from services import db_service
+
+    new_json = spec.model_dump_json()
+    if db_service.get_dashboard_spec(file_id) != new_json:
+        db_service.save_dashboard_spec(file_id, new_json)
+
 
 class ExcelAgent:
 
@@ -149,6 +160,7 @@ class ExcelAgent:
                 from services.report_profiles.sales_profile import enrich_deals_tab
 
                 spec = enrich_deals_tab(spec, df)
+                _persist_enriched_spec(file_id, spec)
             try:
                 result["tabs"] = render_spec(df, spec)["tabs"]
                 result["spec"] = spec.model_dump(mode="json")

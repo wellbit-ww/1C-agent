@@ -136,6 +136,7 @@ SALES_DATA_TAB_TITLE = "Данные"
 SALES_DYNAMICS_TAB_TITLE = "Динамика"
 SALES_CONVERSION_TAB_TITLE = "Конверсия"
 SALES_MONEY_TAB_TITLE = "Деньги"
+SALES_STAGES_TAB_TITLE = "Этапы продаж"
 
 
 def build_deals_tab(df: pd.DataFrame) -> Tab | None:
@@ -180,7 +181,7 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
                 source=TileSource(
                     kind="halfyear",
                     group_semantic="department",
-                    period="half",
+                    period="quarter",
                 ),
                 agg="sum",
                 top_n=50,

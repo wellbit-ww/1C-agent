@@ -87,9 +87,21 @@ const MAX_TILES = 8;
 const selectClass =
   "w-full rounded-lg border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent/60";
 
+const DEPARTMENT_KINDS = new Set([
+  "pivot",
+  "outcome",
+  "halfyear",
+  "deals_dynamics",
+  "deals_dynamics_departments",
+  "deals_dynamics_outcome_share",
+  "deals_conversion",
+  "deals_money",
+]);
+
 type Props = {
   spec: DashSpec;
   columns: string[];
+  departments?: string[];
   busy: boolean;
   mode: ChartEditorMode;
   onClose: () => void;
@@ -145,7 +157,7 @@ function blankTile(intent: string, columns: string[]): TileSpec {
       top_n: 50,
       unit: "auto",
       sort: "none",
-      source: { kind: "halfyear", group_semantic: "department", period: "half" },
+      source: { kind: "halfyear", group_semantic: "department", period: "quarter" },
     };
   }
   if (intent === "status_summary") {
@@ -205,7 +217,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-export function ChartEditor({ spec, columns, busy, mode, onClose, onSave }: Props) {
+export function ChartEditor({ spec, columns, departments = [], busy, mode, onClose, onSave }: Props) {
   const [draft, setDraft] = useState<DashSpec>(() => cloneSpec(spec));
   const [picked, setPicked] = useState(mode.mode === "edit");
   const [tileI, setTileI] = useState(mode.mode === "edit" ? mode.tileI : -1);
@@ -322,11 +334,59 @@ export function ChartEditor({ spec, columns, busy, mode, onClose, onSave }: Prop
                 className={selectClass}
               />
             </Field>
+            {DEPARTMENT_KINDS.has(tile.source.kind || "") && departments.length > 0 && (
+              <div>
+                <div className="mb-1 flex items-center justify-between text-xs text-zinc-400">
+                  <span>Службы</span>
+                  <button
+                    type="button"
+                    className="text-accent hover:underline"
+                    onClick={() => patch({}, { ...tile.source, departments: undefined })}
+                  >
+                    Все
+                  </button>
+                </div>
+                <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-line p-2">
+                  {departments.map((name) => {
+                    const pickedDepts = tile.source.departments;
+                    const on = !pickedDepts?.length || pickedDepts.includes(name);
+                    return (
+                      <label key={name} className="flex items-center gap-2 text-xs text-zinc-200">
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => {
+                            const current = pickedDepts?.length ? pickedDepts : departments;
+                            const next = on
+                              ? current.filter((item) => item !== name)
+                              : [...current, name];
+                            if (next.length === 0) return;
+                            const allOn = departments.every((item) => next.includes(item));
+                            patch(
+                              {},
+                              {
+                                ...tile.source,
+                                departments: allOn ? undefined : next,
+                              },
+                            );
+                          }}
+                        />
+                        <span>{name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-[11px] text-zinc-500">
+                  По умолчанию считаются все службы. Снимите галочку, чтобы исключить подразделение из
+                  таблицы и графиков.
+                </p>
+              </div>
+            )}
             {intent === "halfyear" && (
               <>
                 <Field label="Группировать">
                   <select
-                    value={tile.source.period || "half"}
+                    value={tile.source.period || "quarter"}
                     onChange={(e) =>
                       patch({}, { ...tile.source, kind: "halfyear", period: e.target.value })
                     }

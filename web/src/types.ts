@@ -25,17 +25,31 @@ export type SectionRow = {
   label: string;
   values: (number | null)[];
   kinds?: string[];
+  indent?: boolean;
+  row_role?: "group" | "sub";
 };
 
 export type SectionTable = {
   title: string;
+  index_label?: string;
   columns: string[];
   rows: SectionRow[];
+};
+
+export type StageDeptBreakdown = {
+  stage: string;
+  table: SectionTable;
+};
+
+export type StageBreakdowns = {
+  by_count?: StageDeptBreakdown[];
+  by_sum?: StageDeptBreakdown[];
 };
 
 export type SectionBlock = {
   title: string;
   tables: SectionTable[];
+  stage_breakdowns?: StageBreakdowns;
 };
 
 export type MoneyPeriod = { label: string; year: number; part: number };
@@ -52,6 +66,7 @@ export type Tile = {
   bucket_period?: string;
   period_charts?: string[];
   money?: MoneyBoard;
+  departments?: string[];
   error?: string;
 };
 
@@ -79,6 +94,8 @@ export type TileSpec = {
     columns_pattern?: string;
     column_names?: string[];
     period?: string;
+    departments?: string[];
+    variant?: "full" | "counts";
   };
 };
 

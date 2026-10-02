@@ -74,10 +74,6 @@ export async function getHistory(fileId: string): Promise<{ messages: ChatMessag
   return postJson("/history", { file_id: fileId });
 }
 
-export async function getTable(fileId: string): Promise<{ data: Record<string, unknown>[] }> {
-  return postJson("/table", { file_id: fileId });
-}
-
 export async function sendChat(
   fileId: string,
   question: string,

@@ -2,7 +2,10 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "venv\Scripts\python.exe" (
+set "PYEXE="
+if exist "venv\Scripts\python.exe" set "PYEXE=venv\Scripts\python.exe"
+if not defined PYEXE if exist ".venv\Scripts\python.exe" set "PYEXE=.venv\Scripts\python.exe"
+if not defined PYEXE (
   echo [ERROR] venv not found.
   echo Run once:
   echo   python -m venv venv
@@ -27,9 +30,10 @@ if errorlevel 1 (
 powershell -NoProfile -Command "try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8000); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
   echo Starting backend :8000 ...
-  start "Excel Agent Backend" /D "%~dp0backend" cmd /k "..\venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000"
+  start "Excel Agent Backend" /D "%~dp0backend" cmd /k "..\\%PYEXE% -m uvicorn app:app --host 127.0.0.1 --port 8000 --reload"
 ) else (
   echo Backend already running: http://127.0.0.1:8000
+  echo If dashboard numbers look stale, close the Backend window and run start.bat again.
 )
 
 echo Waiting for backend...

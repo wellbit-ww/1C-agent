@@ -30,7 +30,9 @@ class TileSource(BaseModel):
     deals_dynamics_departments — то же по всем подразделениям (групповые столбцы по периодам);
     deals_dynamics_outcome_share — доля отменённых и проигранных сделок, % (Совтест + подразделения);
     deals_conversion — вкладка «Конверсия»: заказы (ЗК) / сделки, % по компании и всем подразделениям;
-    deals_money — вкладка «Деньги»: потенциал сделок и сумма заказов, сравнение с тем же периодом год назад.
+    deals_money — вкладка «Деньги»: потенциал сделок и сумма заказов, сравнение с тем же периодом год назад;
+    deal_statuses — вкладка «Этапы продаж»: статусы сделок и заказов по периодам;
+    in_work_stages — сделки со статусом «В работе» по текущему этапу.
     """
 
     kind: Literal[
@@ -48,6 +50,8 @@ class TileSource(BaseModel):
         "deals_dynamics_outcome_share",
         "deals_conversion",
         "deals_money",
+        "deal_statuses",
+        "in_work_stages",
     ]
     group_semantic: str | None = None
     group_column: str | None = None
@@ -56,6 +60,8 @@ class TileSource(BaseModel):
     columns_pattern: str | None = None
     column_names: list[str] | None = None
     period: PeriodType | None = None
+    departments: list[str] | None = None
+    variant: Literal["full", "counts"] | None = None
 
 
 class Tile(BaseModel):
