@@ -154,6 +154,8 @@ def test_money_kpi_matches_named_column(filename):
 
 def test_xls_date_columns_are_datetime():
     files = sorted(EXAMPLES.glob("*.xls"))
+    if not files:
+        pytest.skip("нет examples/*.xls (локальные выгрузки не в git)")
     assert len(files) == 9, [p.name for p in files]
     dated = 0
     for path in files:
