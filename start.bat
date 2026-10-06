@@ -2,7 +2,10 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "venv\Scripts\python.exe" (
+set "PYEXE="
+if exist "venv\Scripts\python.exe" set "PYEXE=venv\Scripts\python.exe"
+if not defined PYEXE if exist ".venv\Scripts\python.exe" set "PYEXE=.venv\Scripts\python.exe"
+if not defined PYEXE (
   echo [ERROR] venv not found.
   echo Run once:
   echo   python -m venv venv
@@ -27,9 +30,10 @@ if errorlevel 1 (
 powershell -NoProfile -Command "try { $c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8000); $c.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 if errorlevel 1 (
   echo Starting backend :8000 ...
-  start "Excel Agent Backend" /D "%~dp0backend" cmd /k "..\venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000"
+  start "Excel Agent Backend" /D "%~dp0backend" cmd /k "..\\%PYEXE% -m uvicorn app:app --host 127.0.0.1 --port 8000 --reload"
 ) else (
   echo Backend already running: http://127.0.0.1:8000
+  echo If dashboard numbers look stale, close the Backend window and run start.bat again.
 )
 
 echo Waiting for backend...
@@ -89,6 +93,7 @@ start http://127.0.0.1:8501
 
 echo.
 echo UI:  http://127.0.0.1:8501
-echo API: http://127.0.0.1:8000
+powershell -NoProfile -Command "$ips = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' -and $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -ExpandProperty IPAddress -Unique; foreach ($ip in $ips) { Write-Host ('LAN: http://' + $ip + ':8501') }"
+echo API: http://127.0.0.1:8000 (local only)
 echo Leave the Backend and UI windows open.
 timeout /t 2 >nul

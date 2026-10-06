@@ -36,6 +36,25 @@ class TestSalesFile:
         assert abs(total - 18_254_222_243.30) < 1.0
 
 
+class TestXlsDates:
+    def test_sook_dates_are_datetime_not_nanoseconds(self):
+        from pathlib import Path
+
+        from services.excel_service import read_excel
+
+        path = Path(__file__).resolve().parents[2] / "examples" / "Дефицит СООК_2 декабря.xls"
+        if not path.exists():
+            return
+        df = read_excel(str(path))
+        col = "дата поставки"
+        assert col in df.columns
+        assert pd.api.types.is_datetime64_any_dtype(df[col])
+        numeric_as_int = pd.to_numeric(df[col], errors="coerce")
+        assert not (numeric_as_int <= -1e18).any()
+        detected = detect_date_columns(df)["columns"]
+        assert col in detected
+
+
 class TestDeficitFile:
     def test_shape(self, deficit_df):
         assert deficit_df.shape[0] > 0

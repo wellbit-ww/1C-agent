@@ -100,3 +100,39 @@ def test_pdf_embeds_dashboard_images():
     assert pdf.startswith(b"%PDF")
     assert b"/XObject" in pdf or b"/Image" in pdf
     assert len(pdf) > len(render_report_pdf(_sample_report()))
+
+
+def test_pdf_embeds_pivot_table_totals():
+    from services.pdf_export import _format_pdf_number, render_report_pdf
+
+    assert _format_pdf_number(444) == "444"
+    assert _format_pdf_number(559) == "559"
+    table = {
+        "index_label": "Подразделение",
+        "columns": ["I кв. 2025", "II кв. 2025", "III кв. 2025", "IV кв. 2025"],
+        "rows": [{"label": "СИО", "values": [10, 20, 30, 40]}],
+        "totals": [444, 559, 452, 489],
+    }
+    pdf = render_report_pdf(
+        _sample_report(),
+        dashboard_tabs=[
+            {
+                "title": "Сделки",
+                "tiles": [{"title": "Сделки по подразделениям и кварталам", "table": table}],
+            }
+        ],
+    )
+    assert pdf.startswith(b"%PDF")
+    assert b"%%EOF" in pdf[-64:]
+    assert len(pdf) > len(render_report_pdf(_sample_report()))
+
+
+def test_pdf_content_disposition_allows_cyrillic():
+    from starlette.responses import Response
+
+    from services.pdf_export import pdf_content_disposition
+
+    header = pdf_content_disposition("08.06.2026_Дефицит по КС.xlsx")
+    Response(content=b"%PDF", headers={"Content-Disposition": header})
+    assert "filename*=UTF-8''" in header
+    assert "report.pdf" in header

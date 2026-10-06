@@ -2,7 +2,14 @@
 import httpx
 import pytest
 
-from config import LLM_NUM_PREDICT_DEFAULT, OLLAMA_CONNECT_TIMEOUT, OLLAMA_REQUEST_TIMEOUT
+from config import (
+    BRIEF_NUM_PREDICT,
+    LLM_NUM_PREDICT_DEFAULT,
+    MAIN_MODEL,
+    OLLAMA_CONNECT_TIMEOUT,
+    OLLAMA_REQUEST_TIMEOUT,
+    ROUTER_NUM_PREDICT,
+)
 from services import dashboard_service, file_context_service, llm_service
 from services.exceptions import OllamaUnavailableError
 
@@ -29,8 +36,23 @@ class TestFactory:
 
     def test_router_has_timeout_and_short_predict(self):
         router = llm_service._get_router_llm()
-        assert router.num_predict == 300
+        assert router.num_predict == ROUTER_NUM_PREDICT == 300
         assert _timeout_of(router).read == OLLAMA_REQUEST_TIMEOUT
+
+    def test_roles_keep_token_caps(self):
+        assert ROUTER_NUM_PREDICT == 300
+        assert BRIEF_NUM_PREDICT == 1800
+        assert LLM_NUM_PREDICT_DEFAULT == 800
+        assert ROUTER_NUM_PREDICT < LLM_NUM_PREDICT_DEFAULT < BRIEF_NUM_PREDICT
+        brief = file_context_service._get_brief_llm()
+        spec = dashboard_service._get_spec_llm()
+        fallback = llm_service._get_router_fallback_llm()
+        assert brief.num_predict == BRIEF_NUM_PREDICT
+        assert brief.model == MAIN_MODEL
+        assert spec.num_predict == 2500
+        assert spec.model == MAIN_MODEL
+        assert fallback.num_predict == ROUTER_NUM_PREDICT
+        assert fallback.model == MAIN_MODEL
 
     def test_brief_spec_comments_clients_have_timeout(self):
         for client in (
@@ -104,3 +126,26 @@ class TestAskLlm:
         with pytest.raises(OllamaUnavailableError) as err:
             llm_service.classify("json")
         assert "не ответила" in str(err.value)
+
+    def test_classify_falls_back_when_router_model_missing(self, monkeypatch):
+        class Missing:
+            def invoke(self, prompt):
+                raise RuntimeError("model 'qwen3:1.7b' not found, try pulling it")
+
+        captured = {}
+
+        class Ok:
+            def invoke(self, prompt):
+                captured["prompt"] = prompt
+
+                class Response:
+                    content = '{"action":"general"}'
+
+                return Response()
+
+        monkeypatch.setattr(llm_service, "ROUTER_MODEL", "qwen3:1.7b")
+        monkeypatch.setattr(llm_service, "MAIN_MODEL", "qwen3:8b")
+        monkeypatch.setattr(llm_service, "_get_router_llm", lambda: Missing())
+        monkeypatch.setattr(llm_service, "_get_router_fallback_llm", lambda: Ok())
+        assert llm_service.classify("json") == '{"action":"general"}'
+        assert captured["prompt"] == "json"

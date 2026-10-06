@@ -11,6 +11,9 @@ if str(BACKEND_DIR) not in sys.path:
 DATA_DIR = Path(__file__).resolve().parent / "data"
 SALES_FILE = DATA_DIR / "sales.xlsx"
 DEFICIT_FILE = DATA_DIR / "deficit.xlsx"
+EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "examples"
+PDO_FILE = EXAMPLES_DIR / "Отчет ПДО 01.07.2024 к понедельнику в работе.xlsx"
+WARRANTY_FILE = EXAMPLES_DIR / "Гарантия 2026.xlsx"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -50,6 +53,31 @@ def deficit_df():
     from services.excel_service import read_excel
 
     return read_excel(str(DEFICIT_FILE))
+
+
+@pytest.fixture(scope="session")
+def sales_workbook():
+    from services.excel_parser import parse_excel
+
+    return parse_excel(str(SALES_FILE))
+
+
+@pytest.fixture(scope="session")
+def pdo_df():
+    from services.excel_service import read_excel
+
+    if not PDO_FILE.exists():
+        pytest.skip("нет файла ПДО в examples/")
+    return read_excel(str(PDO_FILE))
+
+
+@pytest.fixture(scope="session")
+def warranty_df():
+    from services.excel_service import read_excel
+
+    if not WARRANTY_FILE.exists():
+        pytest.skip("нет файла гарантии в examples/")
+    return read_excel(str(WARRANTY_FILE))
 
 
 def ollama_available() -> bool:

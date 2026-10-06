@@ -35,7 +35,9 @@ def detect_intent(question: str):
     if "продажи по менеджерам" in q:
         return "chart_managers"
         
-    if "топ клиентов" in q:
+    if "топ клиентов" in q or (
+        "наглядн" in q and any(m in q for m in ("клиент", "компани", "заказчик"))
+    ):
         return "chart_clients"
         
     if "продажи по месяцам" in q or "динамика выручки" in q:
@@ -68,6 +70,8 @@ def detect_intent(question: str):
     if any(
         marker in q
         for marker in ("по квартал", "квартал", "quarter")
+    ) and not (
+        "скольк" in q or "сделк" in q or "разбив" in q
     ):
         return "trend_quarter"
 

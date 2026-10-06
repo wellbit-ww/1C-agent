@@ -11,9 +11,62 @@ export type ChatMessage = {
   charts?: ChartPayload[];
 };
 
+export type PivotTable = {
+  index_label?: string;
+  columns: string[];
+  year_spans?: { label: string; count: number }[];
+  rows: { label: string; values: number[]; total?: number }[];
+  totals?: number[];
+  totals_label?: string;
+  column_kinds?: ("count" | "percent")[];
+};
+
+export type SectionRow = {
+  label: string;
+  values: (number | null)[];
+  kinds?: string[];
+  indent?: boolean;
+  row_role?: "group" | "sub";
+};
+
+export type SectionTable = {
+  title: string;
+  index_label?: string;
+  columns: string[];
+  rows: SectionRow[];
+};
+
+export type StageDeptBreakdown = {
+  stage: string;
+  table: SectionTable;
+};
+
+export type StageBreakdowns = {
+  by_count?: StageDeptBreakdown[];
+  by_sum?: StageDeptBreakdown[];
+};
+
+export type SectionBlock = {
+  title: string;
+  tables: SectionTable[];
+  stage_breakdowns?: StageBreakdowns;
+};
+
+export type MoneyPeriod = { label: string; year: number; part: number };
+export type MoneyRow = { label: string; company?: boolean; values: number[] };
+export type MoneyMetric = { title: string; rows: MoneyRow[] };
+export type MoneyBoard = { periods: MoneyPeriod[]; metrics: MoneyMetric[] };
+
 export type Tile = {
   title: string;
   plotly_json?: string;
+  chart_type?: string;
+  table?: PivotTable;
+  sections?: SectionBlock[];
+  bucket_period?: string;
+  period_charts?: string[];
+  money?: MoneyBoard;
+  departments?: string[];
   error?: string;
 };
 
@@ -24,6 +77,32 @@ export type DashTab = {
 
 export type Kpi = { label: string; value: string | number };
 
+export type TileSpec = {
+  title: string;
+  chart_type: string;
+  agg: string;
+  top_n: number;
+  unit: string;
+  sort?: string;
+  target_line?: number | null;
+  source: {
+    kind?: string;
+    group_semantic?: string;
+    group_column?: string;
+    value_semantic?: string;
+    value_column?: string;
+    columns_pattern?: string;
+    column_names?: string[];
+    period?: string;
+    departments?: string[];
+    variant?: "full" | "counts";
+  };
+};
+
+export type DashSpec = {
+  tabs: { title: string; tiles: TileSpec[] }[];
+};
+
 export type Dashboard = {
   report_type?: string;
   summary?: string;
@@ -31,7 +110,7 @@ export type Dashboard = {
   insights?: string[];
   tabs?: DashTab[];
   charts?: ChartPayload[];
-  spec?: { tabs: unknown[] };
+  spec?: DashSpec;
   metadata?: {
     rows?: number;
     columns?: number;
@@ -52,7 +131,16 @@ export type FileContext = {
   dashboard_ideas?: string[];
   caveats?: string[];
   llm_ready?: boolean;
-  sheets?: { name: string; rows: number; n_columns: number; active?: boolean }[];
+  sheets?: {
+    name: string;
+    rows: number;
+    n_columns: number;
+    active?: boolean;
+    role?: string;
+    role_label?: string;
+    facts?: string[];
+    grain_note?: string;
+  }[];
 };
 
 export type Report = {
@@ -75,4 +163,11 @@ export type Report = {
     duplicates?: number;
     worst_columns?: { column: string; pct: number }[];
   };
+};
+
+export type ReportChart = {
+  id: string;
+  title: string;
+  plotly_json?: string;
+  table?: PivotTable;
 };

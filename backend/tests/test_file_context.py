@@ -10,6 +10,7 @@ from models.file_context import FileContext, SheetBrief
 from services import chat_service, dashboard_service, db_service, file_context_service
 from services.file_context_service import (
     build_column_notes,
+    build_entity_hints,
     data_hash,
     deterministic_context,
     ensure_context,
@@ -111,6 +112,39 @@ class TestDeterministicContext:
         assert any("Строк:" in f for f in ctx.facts)
         for note in ctx.column_notes:
             assert note.name in known
+
+    def test_deficit_facts_have_kpis_and_dual_tops(self, deficit_df):
+        ctx = deterministic_context(deficit_df, filename="deficit.xlsx")
+        joined = "\n".join(ctx.facts)
+        assert any("Неоплаченный остаток" in f for f in ctx.facts)
+        assert any("Оплачено" in f for f in ctx.facts)
+        assert any("Сумма заказов" in f for f in ctx.facts)
+        assert "Топ по неоплаченному остатку" in joined
+        assert "Топ по сумме заказов" in joined
+        unpaid_line = next(f for f in ctx.facts if f.startswith("Топ по неоплаченному остатку"))
+        order_line = next(f for f in ctx.facts if f.startswith("Топ по сумме заказов"))
+        assert unpaid_line != order_line
+        assert "РОБЕЛ" in unpaid_line.upper()
+        assert "АЛАБУГА" in order_line.upper()
+        assert any(f.startswith("Период дат:") for f in ctx.facts)
+        assert ctx.entity_hints
+        joined_hints = " ".join(ctx.entity_hints).upper()
+        assert "АЛАБУГА" in joined_hints or "РОБЕЛ" in joined_hints or "КЭАЗ" in joined_hints
+        block = ctx.prompt_block()
+        assert "Топ по неоплаченному остатку" in block
+        assert "entity_hints" not in block
+        assert "Известные имена" not in block
+        compact = ctx.router_block()
+        assert "Тип:" in compact
+        assert "Факты:" in compact
+        assert len(compact) < len(block)
+        assert "entity_hints" not in compact
+
+    def test_entity_hints_are_short_tokens(self, deficit_df):
+        hints = build_entity_hints(deficit_df)
+        assert hints
+        assert all(len(h) <= 40 for h in hints)
+        assert all(" " not in h for h in hints)
 
     def test_hash_changes_with_columns(self, sales_df):
         other = sales_df.copy()
@@ -405,6 +439,8 @@ class TestLlmSeesAllSheets:
         assert "Секрет" not in dumped
         assert "скрытая колонка" not in dumped
         assert catalog_sheets(workbook)[1]["name"] == "Оплаты"
+        assert catalog_sheets(workbook)[1]["role"] == "data"
+        assert catalog_sheets(workbook)[0]["role"] == "data"
 
     def test_wide_first_sheet_does_not_drop_later_sheets(self, tmp_path):
         from openpyxl import Workbook
@@ -443,6 +479,7 @@ class TestLlmSeesAllSheets:
         block = ctx.prompt_block()
         assert "Оплаты" in block
         assert "сумма оплаты" in block
+        assert any("Цифры считаются только с листа" in f for f in ctx.facts)
 
     def test_llm_prompt_contains_second_sheet(self, tmp_path, monkeypatch):
         from services.excel_parser import parse_excel
@@ -561,3 +598,63 @@ class TestSheetDescribe:
         assert "Сделки" in result["answer"]
         assert "Оплаты" in result["answer"]
         assert "дашборда" in result["answer"].lower() or "считаются" in result["answer"]
+
+    def test_dashboard_sheet_is_vitrine_not_pandas_grain(self, sales_df, monkeypatch):
+        monkeypatch.setattr(
+            chat_service,
+            "_llm_classify",
+            lambda *a, **kw: (_ for _ in ()).throw(AssertionError("не ходить в LLM")),
+        )
+        ctx = FileContext(
+            active_sheet="Данные",
+            sheets=[
+                SheetBrief(
+                    name="Данные",
+                    rows=2394,
+                    n_columns=34,
+                    columns=["компания", "сумма по сделке"],
+                    active=True,
+                    role="data",
+                    role_label="рабочие данные",
+                ),
+                SheetBrief(
+                    name="Дашборд (сделки)",
+                    rows=45,
+                    n_columns=9,
+                    columns=["статус", "количество", "сумма"],
+                    active=False,
+                    role="dashboard",
+                    role_label="готовая витрина 1С",
+                    grain_note="Это готовая витрина 1С, другое зерно.",
+                    facts=["45 строк, 9 колонок"],
+                    sample=[{"статус": "В работе", "количество": 312, "сумма": 2185026203}],
+                ),
+            ],
+        )
+        result = chat_service.handle_question(
+            sales_df, "что на дашборде сделок?", file_context=ctx
+        )
+        text = result["answer"]
+        assert "Дашборд (сделки)" in text
+        assert "витрина" in text.lower() or "1С" in text
+        assert "2185026203" in text.replace(" ", "")
+        assert "На витрине 1С" in text
+        assert "Данные" in text or "другое зерно" in text.lower()
+
+    def test_sales_workbook_roles_and_deal_sum_label(self, sales_df):
+        from services.excel_parser import parse_excel
+        from services.file_context_service import deterministic_context
+
+        workbook = parse_excel(str(SALES_FILE))
+        if len(workbook) < 2:
+            return
+        ctx = deterministic_context(sales_df, filename="sales.xlsx", workbook=workbook)
+        joined = "\n".join(ctx.facts)
+        assert "Сумма заказов, руб." not in joined
+        assert any("сумма по сделке" in f.lower() for f in ctx.facts)
+        roles = {s.name: s.role for s in ctx.sheets}
+        dashboards = [n for n, r in roles.items() if r == "dashboard"]
+        assert dashboards
+        block = ctx.prompt_block()
+        assert "витрина" in block.lower() or "1С" in block
+        assert any("не то же зерно" in c or "Витрины 1С" in c for c in ctx.caveats)

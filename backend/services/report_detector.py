@@ -58,6 +58,10 @@ def detect_report_type(df: pd.DataFrame, filename: str | None = None) -> str:
         return "sales_forecast"
     if "поставщик" in joined and any("%" in c or "оплат" in c for c in cols):
         return "supplier_orders"
+    if "планируемых поступлений" in joined or ("планируем" in joined and "поступлен" in joined):
+        return "planned_receipts"
+    if "сумма проекта" in joined or ("отправитель" in joined and "входящ" in joined):
+        return "incoming_requests"
 
     entities = detect_entities(df.columns.tolist())
     sales_hits = int("revenue" in entities) + int("customer" in entities)

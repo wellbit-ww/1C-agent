@@ -19,6 +19,8 @@ _AMOUNT_MARKERS = (
     "поступлен",
     "задолжен",
     "проект",
+    "издел",
+    "гарант",
 )
 _PREFERRED_GROUPERS = (
     ("заказчик", "клиент", "контрагент", "отправитель", "компания"),
@@ -49,7 +51,8 @@ def _numeric_columns(df: pd.DataFrame) -> list[str]:
         name = str(c).lower()
         if name in {"номер"} or name.startswith("номер "):
             continue
-        if n > 20 and df[c].nunique(dropna=True) > 0.85 * n:
+        amount_like = any(m in name for m in _AMOUNT_MARKERS)
+        if n > 20 and df[c].nunique(dropna=True) > 0.85 * n and not amount_like:
             continue
         cols.append(c)
     return cols
@@ -60,6 +63,9 @@ def pick_metrics(df: pd.DataFrame) -> list[str]:
     preferred = [
         c for c in nums if any(m in str(c).lower() for m in _AMOUNT_MARKERS)
     ]
+    if any("руб" in str(c).lower() or "₽" in str(c) for c in nums):
+        preferred = [c for c in preferred if "валют" not in str(c).lower()]
+        nums = [c for c in nums if "валют" not in str(c).lower()] or nums
     rub = [c for c in preferred if any(h in str(c).lower() for h in ("руб", "₽"))]
     if rub:
         preferred = rub + [c for c in preferred if c not in rub]
@@ -100,21 +106,22 @@ def pick_groupers(df: pd.DataFrame) -> list[str]:
 
 
 def generic_kpis(df: pd.DataFrame) -> list[dict]:
-    kpis = [{"label": "Строк", "value": len(df)}]
     metrics = pick_metrics(df)
-    if metrics:
-        total = pd.to_numeric(df[metrics[0]], errors="coerce").sum()
-        kpis.append({"label": f"Итого «{metrics[0]}»", "value": _fmt(total)})
     groupers = pick_groupers(df)
-    if groupers:
+    kpis: list[dict] = []
+    for col in metrics[:2]:
+        total = pd.to_numeric(df[col], errors="coerce").sum()
+        kpis.append({"label": str(col), "value": _fmt(total)})
+    for col in groupers[:2]:
         kpis.append(
             {
-                "label": f"Уникальных «{groupers[0]}»",
-                "value": int(df[groupers[0]].nunique()),
+                "label": f"Уникальных «{col}»",
+                "value": int(df[col].nunique()),
             }
         )
-    kpis.append({"label": "Колонок", "value": len(df.columns)})
-    return kpis
+    if not kpis:
+        kpis.append({"label": "Записей", "value": len(df)})
+    return kpis[:4]
 
 
 def _fmt(value: float) -> str:
@@ -125,7 +132,75 @@ def _fmt(value: float) -> str:
     return f"{float(value):,.2f}".replace(",", " ")
 
 
-def build_generic_spec(df: pd.DataFrame) -> DashboardSpec | None:
+SALES_DATA_TAB_TITLE = "Данные"
+SALES_DYNAMICS_TAB_TITLE = "Динамика"
+SALES_CONVERSION_TAB_TITLE = "Конверсия"
+SALES_MONEY_TAB_TITLE = "Деньги"
+SALES_STAGES_TAB_TITLE = "Этапы продаж"
+SALES_HALFYEAR_TILE_TITLE = "Сделки и ЗК в заданный период"
+
+
+def build_deals_tab(df: pd.DataFrame) -> Tab | None:
+    """Вкладка «Данные» (этапы продаж): сводные таблицы по кварталам, статусам и ЗК."""
+    from services.chat_question_pack import _start_date_column
+    from services.column_resolver import resolve_semantic_column
+
+    dept = resolve_semantic_column(df, "", "department", dtype="categorical")
+    start = _start_date_column(df)
+    if not dept or not start:
+        return None
+    return Tab(
+        title=SALES_DATA_TAB_TITLE,
+        tiles=[
+            Tile(
+                title="Сделки по кварталам и подразделениям",
+                chart_type="table",
+                source=TileSource(
+                    kind="pivot",
+                    group_semantic="department",
+                    period="quarter",
+                ),
+                agg="count",
+                top_n=30,
+                sort="none",
+            ),
+            Tile(
+                title="Проигранные и отменённые сделки",
+                chart_type="table",
+                source=TileSource(
+                    kind="outcome",
+                    group_semantic="department",
+                    period="quarter",
+                ),
+                agg="count",
+                top_n=50,
+                sort="none",
+            ),
+            Tile(
+                title=SALES_HALFYEAR_TILE_TITLE,
+                chart_type="table",
+                source=TileSource(
+                    kind="halfyear",
+                    group_semantic="department",
+                    period="quarter",
+                ),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
+            Tile(
+                title="Сделки и ЗК по статусам",
+                chart_type="table",
+                source=TileSource(kind="status_summary"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
+        ],
+    )
+
+
+def build_generic_spec(df: pd.DataFrame, kind: str | None = None) -> DashboardSpec | None:
     metrics = pick_metrics(df)
     groupers = pick_groupers(df)
     tiles: list[Tile] = []
@@ -209,10 +284,23 @@ def build_generic_spec(df: pd.DataFrame) -> DashboardSpec | None:
     elif metrics:
         return None
 
-    if not tiles:
-        return None
+    tabs: list[Tab] = []
+    deals = build_deals_tab(df)
+    if deals:
+        tabs.append(deals)
 
-    tabs = [Tab(title="Обзор", tiles=tiles[:4])]
+    if tiles:
+        family_title = {
+            "pdo_report": "Производство",
+            "warranty": "Сервис",
+            "sales_forecast": "Прогноз",
+            "supplier_orders": "Поставщики",
+            "planned_receipts": "Поступления",
+            "incoming_requests": "Запросы",
+        }.get(kind or "", "Обзор")
+        tabs.append(Tab(title=family_title, tiles=tiles[:4]))
+    elif not tabs:
+        return None
 
     from services import data_tools
 

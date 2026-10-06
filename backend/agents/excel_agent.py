@@ -20,6 +20,17 @@ from services.chart_service import (
     create_monthly_trend_chart,
 )
 
+from models.dashboard_spec import DashboardSpec
+
+
+def _persist_enriched_spec(file_id: str, spec: DashboardSpec) -> None:
+    """Сохраняет спеку после enrich (нормализация вкладки «Этапы продаж» и т.д.)."""
+    from services import db_service
+
+    new_json = spec.model_dump_json()
+    if db_service.get_dashboard_spec(file_id) != new_json:
+        db_service.save_dashboard_spec(file_id, new_json)
+
 
 class ExcelAgent:
 
@@ -144,8 +155,23 @@ class ExcelAgent:
         spec = dashboard_service.get_current_spec(file_id, df)
         if spec is not None:
             from services.dashboard_engine import render_spec
-            result["tabs"] = render_spec(df, spec)["tabs"]
-            result["spec"] = spec.model_dump()
+
+            if report_type == "sales_pipeline":
+                from services.report_profiles.sales_profile import enrich_deals_tab
+
+                spec = enrich_deals_tab(spec, df)
+                _persist_enriched_spec(file_id, spec)
+            try:
+                result["tabs"] = render_spec(df, spec)["tabs"]
+                result["spec"] = spec.model_dump(mode="json")
+            except Exception as exc:
+                import logging
+
+                logging.getLogger("excel_agent").exception(
+                    "Не удалось отрисовать дашборд для %s", file_id
+                )
+                result["warning"] = f"Дашборд не собран: {exc}"
+                result["charts"] = profile.get_charts(df)
         else:
             result["charts"] = profile.get_charts(df)
 

@@ -41,16 +41,33 @@ _TYPE_RECOMMENDATIONS = {
 }
 
 
+def _kpi_text(kpis: list[dict], name: str) -> str | None:
+    item = next((k for k in kpis if k.get("name") == name), None)
+    if not item:
+        return None
+    return item.get("formatted") if item.get("formatted") is not None else item.get("value")
+
+
 def generate_summary(report_type: str, kpis: list[dict], insights: list[str]) -> str:
     if report_type == "deficit_report":
-        total_deficit = next((k["formatted"] for k in kpis if k["name"] == "total_deficit"), "0")
-        unique_cust = next((k["formatted"] for k in kpis if k["name"] == "unique_customers"), "0")
+        total_deficit = _kpi_text(kpis, "total_deficit")
+        order_sum = _kpi_text(kpis, "order_sum")
+        unique_cust = _kpi_text(kpis, "unique_customers") or "0"
         
         lines = []
-        lines.append(f"За анализируемый период выявлен общий дефицит на сумму {total_deficit} рублей.")
+        if total_deficit:
+            lines.append(
+                f"За анализируемый период выявлен общий дефицит на сумму {total_deficit} рублей."
+            )
+        elif order_sum:
+            lines.append(
+                f"За анализируемый период сумма заказов составила {order_sum} рублей. "
+                "Колонка неоплаченного остатка в файле не найдена."
+            )
+        else:
+            lines.append("В файле нет колонки неоплаченного остатка или суммы заказов.")
         lines.append(f"Количество уникальных заказчиков: {unique_cust}.")
         
-        # Adding some generic logic to include top insights
         if insights:
             lines.append("\nКлючевые факты:")
             for i, ins in enumerate(insights, 1):
@@ -58,11 +75,21 @@ def generate_summary(report_type: str, kpis: list[dict], insights: list[str]) ->
         return "\n".join(lines)
         
     elif report_type == "sales_pipeline":
-        total_rev = next((k["formatted"] for k in kpis if k["name"] == "total_revenue"), "0")
-        avg_check = next((k["formatted"] for k in kpis if k["name"] == "average_check"), "0")
+        total_rev = _kpi_text(kpis, "total_revenue") or "0"
+        won_rev = _kpi_text(kpis, "won_revenue")
+        avg_check = _kpi_text(kpis, "average_check") or "0"
         
         lines = []
-        lines.append(f"Общая выручка составила {total_rev} рублей.")
+        if won_rev:
+            lines.append(
+                f"Сумма сделок в воронке составила {total_rev} рублей. "
+                f"Выиграно {won_rev} рублей."
+            )
+            cancelled = _kpi_text(kpis, "cancelled_share")
+            if cancelled:
+                lines.append(f"Доля отменённых: {cancelled}.")
+        else:
+            lines.append(f"Общая выручка составила {total_rev} рублей.")
         lines.append(f"Средний чек составил {avg_check} рублей.")
         
         if insights:

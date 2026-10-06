@@ -231,24 +231,17 @@ class TestCsvSupport:
 
 
 class TestCompoundQuestions:
-    def test_compound_goes_to_llm_first(self, sales_df, monkeypatch):
-        calls = []
+    def test_compound_keyword_parts_skip_llm(self, sales_df, monkeypatch):
+        def fail_classify(*a, **kw):
+            raise AssertionError("две keyword-части не должны идти в роутер")
 
-        def fake_classify(question, df, history=None, **kwargs):
-            calls.append(question)
-            return [
-                {"action": "stat", "operation": "row_count"},
-                {"action": "stat", "operation": "sum"},
-            ]
-
-        monkeypatch.setattr(chat_service, "_llm_classify", fake_classify)
-        monkeypatch.setattr(chat_service, "ask_llm", lambda p: "")
+        monkeypatch.setattr(chat_service, "_llm_classify", fail_classify)
         result = chat_service.handle_question(
             sales_df, "Сколько строк и какая общая выручка?"
         )
-        assert calls, "составной вопрос должен сначала уйти в LLM-разбор"
-        assert "строк" in result["answer"]
-        assert "Сумма" in result["answer"]
+        digits = "".join(ch for ch in result["answer"] if ch.isdigit())
+        assert "2394" in digits
+        assert "18254222243" in digits
 
     def test_compound_falls_back_to_keywords_without_llm(self, sales_df, monkeypatch):
         monkeypatch.setattr(chat_service, "_llm_classify", lambda *a, **kw: None)

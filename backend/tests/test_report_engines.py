@@ -1,5 +1,6 @@
 """Прямые тесты kpi_engine, report_engine и summary_service."""
 import pandas as pd
+import pytest
 
 from services.kpi_engine import run_kpis
 from services.profile_registry import get_profile
@@ -51,17 +52,60 @@ class TestReportEngine:
         df = _sales_df()
         kpis = engine.get_kpis(df)
         labels = [k["label"] for k in kpis]
-        assert "Общая выручка" in labels
+        assert labels == [
+            "Количество сделок",
+            "Потенциальная сумма сделок",
+            "Сделки в работе",
+            "Сделки выиграны",
+            "Сделки проиграны",
+            "Сделки отменены",
+        ]
         insights = engine.get_insights(df)
         assert any("Альфа" in text or "Иванов" in text for text in insights)
         spec = engine.get_dashboard_spec(df)
         assert spec.tabs
+
+    def test_sales_won_kpi_when_status_present(self):
+        config = get_profile("sales_pipeline")
+        engine = ReportEngine(config)
+        df = pd.DataFrame(
+            {
+                "компания": ["Альфа", "Бета", "Альфа"],
+                "ответственный": ["Иванов", "Петров", "Иванов"],
+                "сумма по сделке": [100.0, 50.0, 25.0],
+                "статус": ["Выиграна", "Отменена", "В работе"],
+                "дата начала сделки": ["2024-01-01", "2024-02-01", "2024-03-01"],
+            }
+        )
+        kpis = {item["label"]: item["raw_value"] for item in engine.get_kpis(df)}
+        assert kpis["Количество сделок"] == pytest.approx(3.0)
+        assert kpis["Потенциальная сумма сделок"] == pytest.approx(175.0)
+        assert kpis["Сделки выиграны"] == pytest.approx(1.0)
+        assert kpis["Сделки отменены"] == pytest.approx(1.0)
+        assert kpis["Сделки в работе"] == pytest.approx(1.0)
+        assert kpis["Сделки проиграны"] == pytest.approx(0.0)
 
     def test_deficit_top_department(self):
         config = get_profile("deficit_report")
         engine = ReportEngine(config)
         insights = engine.get_insights(_deficit_df())
         assert any("Б" in text for text in insights)
+
+    def test_deficit_top_customer_separates_unpaid_and_order_sum(self):
+        config = get_profile("deficit_report")
+        engine = ReportEngine(config)
+        df = pd.DataFrame(
+            {
+                "заказчик": ["АЛАБУГА МАШИНЕРИ ООО", "РОБЕЛ ООО"],
+                "подразделение": ["А", "Б"],
+                "менеджер": ["Иванов", "Петров"],
+                "сумма по заказу в рублях": [256.0, 156.0],
+                "неоплаченный остаток": [38.0, 156.0],
+            }
+        )
+        text = "\n".join(engine.get_insights(df))
+        assert "Топ клиент по неоплаченному остатку: РОБЕЛ ООО" in text
+        assert "Топ клиент по сумме заказов: АЛАБУГА МАШИНЕРИ ООО" in text
 
     def test_deficit_all_nan_group_is_empty(self):
         config = get_profile("deficit_report")

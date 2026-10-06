@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 class DefaultProfile(ReportProfile):
+    def __init__(self, report_type: str = "unknown"):
+        self.report_type = report_type
     def get_kpis(self, df: pd.DataFrame) -> list[dict[str, Any]]:
         from services.generic_dashboard import generic_kpis
         return generic_kpis(df)
@@ -50,9 +52,10 @@ class DefaultProfile(ReportProfile):
 
     def get_dashboard_spec(self, df: pd.DataFrame):
         from services.generic_dashboard import build_generic_spec
-        return build_generic_spec(df)
+        from services.report_detector import detect_report_type
 
-_default_profile = DefaultProfile()
+        kind = self.report_type if self.report_type != "unknown" else detect_report_type(df)
+        return build_generic_spec(df, kind=kind)
 
 
 def get_profile_for_df(
@@ -70,7 +73,7 @@ def get_profile_for_df(
         return report_type, ReportEngine(config)
 
     logger.info("YAML-профиль не найден, универсальный DefaultProfile.")
-    return report_type, _default_profile
+    return report_type, DefaultProfile(report_type)
 
 
 # ---------------------------------------------------------------------------

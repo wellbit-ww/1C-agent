@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 
 SEMANTIC_ALIASES: dict[str, list[str]] = {
@@ -121,6 +123,125 @@ SEMANTIC_TO_DTYPES: dict[str, str] = {
 }
 
 _MONEY_HINTS = ("руб", "₽", "rub")
+
+
+_LEXICAL_STOP = {"руб", "рублей", "рублях", "the", "and"}
+_MONEY_STEMS = (
+    "сумм",
+    "долг",
+    "оплат",
+    "стоим",
+    "выручк",
+    "дефицит",
+    "остат",
+    "задолжен",
+    "цена",
+)
+_ENTITY_Q_STEMS = (
+    "заказчик",
+    "клиент",
+    "компани",
+    "менеджер",
+    "ответствен",
+    "подразделен",
+    "отдел",
+    "поставщик",
+    "контрагент",
+)
+
+
+def _column_bare_name(col: str) -> str:
+    text = _normalize(col).replace("ё", "е")
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _question_words(question_norm: str) -> list[str]:
+    text = question_norm.replace("ё", "е")
+    text = re.sub(r"[^\w\s]", " ", text)
+    return [tok for tok in text.split() if len(tok) >= 3]
+
+
+def _is_entity_word(word: str) -> bool:
+    return any(word.startswith(stem) for stem in _ENTITY_Q_STEMS if len(word) >= 5)
+
+
+def _has_money_stem(text: str) -> bool:
+    return any(stem in text for stem in _MONEY_STEMS)
+
+
+def _column_looks_like_deficit(col: str) -> bool:
+    name = _normalize(col)
+    return any(alias in name for alias in SEMANTIC_ALIASES["deficit"])
+
+
+def _token_in_question(token: str, words: list[str]) -> bool:
+    if not token or len(token) < 3:
+        return False
+    stem = token[:5] if len(token) >= 5 else token
+    for word in words:
+        if _is_entity_word(word):
+            continue
+        if token == word or token in word or (len(word) >= 4 and word in token):
+            return True
+        if len(stem) >= 5 and len(word) >= 5 and (
+            word.startswith(stem) or token.startswith(word[:5])
+        ):
+            return True
+    return False
+
+
+def _lexical_column_score(question_norm: str, col: str) -> int:
+    """Имя денежной колонки буквально звучит в вопросе. 0 — не похоже."""
+    col_bare = _column_bare_name(col)
+    if len(col_bare) < 4 or not _has_money_stem(col_bare):
+        return 0
+    q_words = _question_words(question_norm)
+    q_bare = " ".join(q_words)
+    col_norm = _normalize(col).replace("ё", "е")
+    if col_norm in question_norm or col_bare in q_bare:
+        return 100 + len(col_bare)
+    tokens = [
+        tok
+        for tok in col_bare.split()
+        if len(tok) > 2 and tok not in _LEXICAL_STOP
+    ]
+    if not tokens:
+        return 0
+    hits = [tok for tok in tokens if _token_in_question(tok, q_words)]
+    distinctive = [
+        tok for tok in hits if not _has_money_stem(tok) and tok not in _LEXICAL_STOP
+    ]
+    if not distinctive and not (hits and any(_has_money_stem(tok) for tok in hits)):
+        return 0
+    if hits == tokens:
+        return 50 + 10 * len(tokens) + sum(len(tok) for tok in distinctive)
+    if distinctive and any(_has_money_stem(tok) for tok in hits):
+        return 40 + 8 * len(distinctive)
+    if distinctive:
+        return 25 + 6 * len(distinctive)
+    return 0
+
+
+def best_lexical_column(
+    df: pd.DataFrame,
+    question: str,
+    dtype: str = "numeric",
+) -> str | None:
+    """Колонка, чьё имя почти целиком есть в вопросе — важнее семантики профиля."""
+    q = _normalize(question)
+    if not q:
+        return None
+    candidates = _get_columns_by_dtype(df, dtype)
+    ranked = [
+        (_lexical_column_score(q, col), idx, col)
+        for idx, col in enumerate(candidates)
+    ]
+    ranked = [item for item in ranked if item[0] > 0]
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    return ranked[0][2]
 
 
 def _tiebreak_matches(
@@ -261,6 +382,12 @@ def resolve_semantic_column(
     dtype: str | None = None,
 ) -> str | None:
     resolved_dtype = dtype or SEMANTIC_TO_DTYPES.get(semantic, "categorical")
+    if resolved_dtype == "numeric":
+        lexical = best_lexical_column(df, question, resolved_dtype)
+        if lexical and (
+            semantic != "deficit" or _column_looks_like_deficit(lexical)
+        ):
+            return lexical
     aliases = _aliases_for_semantic(semantic)
     question_norm = _normalize(question)
     candidates = _get_columns_by_dtype(df, resolved_dtype)
@@ -368,6 +495,10 @@ def resolve_column(
 
     if not candidates:
         return None
+
+    lexical = best_lexical_column(df, question, dtype)
+    if lexical and dtype == "numeric":
+        return lexical
 
     for col in candidates:
         col_norm = _normalize(col)

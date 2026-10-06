@@ -108,6 +108,21 @@ class TestDashboardAndTable:
         assert "attachment" in response.headers.get("content-disposition", "")
         assert b"/XObject" in response.content or b"/Image" in response.content
 
+    def test_report_pdf_cyrillic_filename(self, client, deficit_file_id):
+        response = client.post(
+            "/report/pdf",
+            json={
+                "file_id": deficit_file_id,
+                "filename": "08.06.2026_Дефицит по КС.xlsx",
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert response.content.startswith(b"%PDF")
+        disp = response.headers.get("content-disposition", "")
+        assert "attachment" in disp
+        assert "filename*=UTF-8''" in disp
+        assert "report.pdf" in disp
+
     def test_unknown_file_id_404(self, client):
         response = client.post("/dashboard", json={"file_id": "nope"})
         assert response.status_code == 404

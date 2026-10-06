@@ -3,7 +3,6 @@ import pandas as pd
 from services.data_tools import (
     detect_date_columns,
     get_duplicates_count,
-    get_null_count,
     get_sum,
     get_top_n,
     group_sum,
@@ -44,8 +43,6 @@ def _get_date_period(df: pd.DataFrame) -> str | None:
 def get_basic_insights(df: pd.DataFrame) -> list[str]:
     insights: list[str] = []
 
-    insights.append(f"В таблице {len(df)} строк и {len(df.columns)} колонок")
-
     revenue_result = get_sum(df, "общая выручка")
 
     if "value" in revenue_result:
@@ -83,15 +80,6 @@ def get_basic_insights(df: pd.DataFrame) -> list[str]:
 
     if period:
         insights.append(f"Период данных: {period}")
-
-    null_result = get_null_count(df)
-
-    if null_result.get("value", 0) > 0:
-        insights.append(
-            f"Обнаружено {null_result['value']} пропусков"
-        )
-    else:
-        insights.append("Пропуски в данных не обнаружены")
 
     duplicates_result = get_duplicates_count(df)
 

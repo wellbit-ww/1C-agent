@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview --host 127.0.0.1 --port 8501"
+    "preview": "vite preview --host 0.0.0.0 --port 8501"
   },
   "dependencies": {
     "plotly.js-dist-min": "^4.0.0",

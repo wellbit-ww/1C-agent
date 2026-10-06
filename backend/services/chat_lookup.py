@@ -1,0 +1,891 @@
+"""Поиск конкретного заказа в выгрузке: комментарий и карточка строки.
+
+Срабатывает на вопросы вроде «Что с заказом Алабуги», «Что с заказом САУП-000450»,
+«Что с заказом от 29.12». Цифры и текст берём из строки pandas, не из LLM.
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime, date
+
+import pandas as pd
+
+from services.chat_answers import format_chat_number
+
+_ORDER_WORD = re.compile(r"\bзаказ(?:а|у|ом|е|ы|ов)?\b", re.I)
+_CODE_RE = re.compile(
+    r"[A-Za-zА-Яа-яЁё]{2,}\d*[-_/][0-9A-Za-zА-Яа-яЁё._/-]*\d[0-9A-Za-zА-Яа-яЁё._/-]*"
+)
+_DATE_RE = re.compile(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b")
+_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]{3,}")
+
+_ENTITY_SKIP_STEMS = (
+    "остат",
+    "остал",
+    "неоплач",
+    "дефицит",
+    "задолжен",
+    "долг",
+    "долж",
+    "сумм",
+    "выручк",
+    "оплат",
+    "скольк",
+    "какая",
+    "какой",
+    "какое",
+    "каков",
+    "каких",
+    "общ",
+    "всег",
+    "колонк",
+    "таблиц",
+    "данн",
+    "заказчик",
+    "клиент",
+    "контрагент",
+    "менеджер",
+    "ответственн",
+    "подразделен",
+    "отдел",
+    "рубл",
+    "строк",
+    "запис",
+    "сделк",
+    "договор",
+    "больш",
+    "меньш",
+    "заказал",
+    "происход",
+    "целом",
+    "обзор",
+    "файл",
+    "служб",
+    "разбив",
+    "кругов",
+    "диаграмм",
+    "динамик",
+    "месяц",
+    "квартал",
+    "наглядн",
+    "основн",
+    "компани",
+    "виде",
+    "сравни",
+    "сравнен",
+    "шкаф",
+    "издел",
+    "номенклатур",
+    "перв",
+    "втор",
+    "трет",
+    "четверт",
+    "подраздел",
+    "департамент",
+    "отдел",
+    "контрол",
+    "соверш",
+    "промежут",
+    "период",
+    "текущ",
+    "январ",
+    "феврал",
+    "март",
+    "апрел",
+    "август",
+    "сентябр",
+    "октябр",
+    "ноябр",
+    "декабр",
+    "недел",
+    "числ",
+)
+
+_YEAR_STEMS = {"год", "года", "году", "годе", "годом"}
+_CYR_LAT = str.maketrans(
+    {
+        "а": "a",
+        "в": "b",
+        "е": "e",
+        "к": "k",
+        "м": "m",
+        "н": "h",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "т": "t",
+        "у": "y",
+        "х": "x",
+    }
+)
+
+# Полное имя и код — одна служба. Короткие коды (СС, СМ) только целиком.
+_DEPARTMENT_ALIASES: dict[str, tuple[str, ...]] = {
+    "аплис": ("аплис", "оаплис", "отдел аплис"),
+    "овк": ("овк", "внутрисхемн"),
+    "онк": ("онк", "неразрушающ"),
+    "офк": ("офк", "функциональн"),
+    "сс": ("сс", "сервисная служба", "сервисн"),
+    "сио": ("сио", "испытательн"),
+    "смэ": ("смэ", "см", "микроэлектрон"),
+    "соок": ("соок", "cook", "обработки кабел"),
+}
+_DEPT_SHORT_CODES = tuple(
+    sorted(
+        {
+            alias
+            for aliases in _DEPARTMENT_ALIASES.values()
+            for alias in aliases
+            if 2 <= len(alias) <= 3 and " " not in alias
+        }
+    )
+)
+
+_STOP = {
+    "что", "как", "дела", "дело", "там", "этот", "эта", "это", "эти",
+    "расскажи", "скажи", "покажи", "подскажи", "статус", "состояние",
+    "состоянии", "комментарий", "комментарии", "пожалуйста", "про",
+    "заказ", "заказа", "заказу", "заказом", "заказе", "заказы", "заказов",
+    "клиент", "клиента", "клиенту", "номер", "номера", "номеру",
+    "договор", "договора", "сделка", "сделки", "сделке", "сделок",
+    "наш", "наша", "наше", "нас", "мне", "его", "её", "ее",
+    "какая", "какой", "какое", "каких", "каков", "какова",
+    "сумма", "суммы", "сумме", "сумму",
+    "было", "были", "была", "был",
+    "совершено", "совершили", "совершил",
+    "промежуток", "промежутка", "промежутке",
+    "неделя", "неделю", "недели", "неделе",
+    "день", "дня", "дне", "дню",
+    "месяц", "месяца", "месяце", "месяцем",
+    "январь", "января", "январе",
+    "февраль", "февраля", "феврале",
+    "март", "марта", "марте",
+    "апрель", "апреля", "апреле",
+    "май", "мая", "мае",
+    "июнь", "июня", "июне",
+    "июль", "июля", "июле",
+    "август", "августа", "августе",
+    "сентябрь", "сентября", "сентябре",
+    "октябрь", "октября", "октябре",
+    "ноябрь", "ноября", "ноябре",
+    "декабрь", "декабря", "декабре",
+}
+_ACRONYM_SKIP = {"ооо", "пао", "оао", "зао", "ао"}
+
+_LOOKUP_HINTS = (
+    "что с",
+    "что по",
+    "как дела",
+    "комментар",
+    "статус",
+    "состояни",
+    "расскажи",
+    "подробн",
+    "что там",
+)
+
+_STEM_SUFFIXES = (
+    "ами", "ями", "ого", "его", "ому", "ему", "ыми", "ими",
+    "ах", "ях", "ой", "ей", "ий", "ый", "ая", "ое", "ые", "ие",
+    "ов", "ев", "ам", "ям", "ом", "ем", "ую", "юю", "ии",
+    "ы", "и", "а", "я", "у", "ю", "о", "е", "ь",
+)
+
+_COMMENT_MARKERS = ("комментар", "примечан")
+_SKIP_DISPLAY = ("unnamed", "№ п/п", "№")
+_ID_COL_MARKERS = ("заказ клиента", "объект расчет", "номер заказа", "номер договор")
+_CLIENT_MARKERS = ("заказчик", "клиент", "контрагент", "компани", "наименование заказ")
+_DEAL_MARKERS = ("сделка", "оборудован")
+_DATE_COL_MARKERS = ("дата", "срок")
+
+_DISPLAY_ORDER = (
+    "заказ клиента",
+    "объект расчет",
+    "заказчик",
+    "наименование заказчика",
+    "сделка",
+    "ответственн",
+    "подразделение",
+    "номер договора",
+    "договор",
+    "категория",
+    "дата поставки",
+    "дата отгрузки",
+    "дата реализации",
+    "дата пнр",
+    "срок аттестации",
+    "сумма по заказу в рублях",
+    "сумма заказа",
+    "сумма всего",
+    "валюта",
+    "сумма по заказу в валюте",
+    "к оплате",
+    "оплачен",
+    "неоплачен",
+    "не оплачен",
+    "остаток",
+    "сумма долга",
+)
+
+
+def _norm(text: str) -> str:
+    return (
+        str(text)
+        .lower()
+        .replace("ё", "е")
+        .replace("—", "-")
+        .replace("–", "-")
+        .strip()
+    )
+
+
+def _stem(word: str) -> str:
+    w = _norm(word)
+    for suffix in _STEM_SUFFIXES:
+        if len(w) > len(suffix) + 3 and w.endswith(suffix):
+            return w[: -len(suffix)]
+    return w
+
+
+def _is_blank(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and pd.isna(value):
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return text == "" or text.lower() in {"nan", "none", "nat", "-"}
+
+
+def _comment_column(df: pd.DataFrame) -> str | None:
+    for col in df.columns:
+        name = str(col).lower()
+        if any(m in name for m in _COMMENT_MARKERS):
+            return col
+    return None
+
+
+def _col_matches(col, markers: tuple[str, ...]) -> bool:
+    name = str(col).lower()
+    return any(m in name for m in markers)
+
+
+def extract_order_clues(question: str) -> dict[str, list[str]]:
+    """Номер документа, дата и текстовый хвост («Алабуги») из вопроса."""
+    codes_raw = [
+        m.group(0).rstrip(".,;:)")
+        for m in _CODE_RE.finditer(question)
+        if sum(ch.isdigit() for ch in m.group(0)) >= 3
+    ]
+    codes = [_norm(c) for c in codes_raw]
+    dates = [m.group(0) for m in _DATE_RE.finditer(question)]
+    leftover = question
+    for raw in codes_raw + dates:
+        leftover = leftover.replace(raw, " ")
+    words = []
+    for token in _WORD_RE.findall(leftover):
+        n = _norm(token)
+        if n in _STOP:
+            continue
+        stem = _stem(n)
+        if len(stem) < 4:
+            if _is_dept_short(n):
+                words.append(token)
+                continue
+            if not token.isupper() or len(token) < 3 or n in _ACRONYM_SKIP:
+                continue
+        words.append(token)
+    for code in _DEPT_SHORT_CODES:
+        if not re.search(
+            rf"(?<![A-Za-zА-Яа-яЁё0-9]){re.escape(code)}(?![A-Za-zА-Яа-яЁё0-9])",
+            leftover,
+            flags=re.I,
+        ):
+            continue
+        if not any(_norm(existing) == _norm(code) for existing in words):
+            words.append(code)
+    return {"codes": codes, "dates": dates, "words": words}
+
+
+def _skip_entity_word(word: str) -> bool:
+    n = _norm(word)
+    if n in _ACRONYM_SKIP:
+        return True
+    stem = _stem(n)
+    if stem in _YEAR_STEMS:
+        return True
+    if _is_dept_short(n):
+        return False
+    if len(stem) < 4:
+        return not (word.isupper() and len(word) >= 3)
+    return any(stem == marker or stem.startswith(marker) for marker in _ENTITY_SKIP_STEMS)
+
+
+def _fold_lookalike(text: str) -> str:
+    """СООК и COOK — одно подразделение: кириллица как латиница."""
+    return _norm(text).translate(_CYR_LAT)
+
+
+def _dept_plain(text: str) -> str:
+    return re.sub(r"[^a-zа-яё0-9]+", " ", _norm(text)).strip()
+
+
+def department_keys(text: str) -> set[str]:
+    """Канонические службы из текста: «COOK» и «обработки кабеля» → соок."""
+    plain = _dept_plain(text)
+    if not plain:
+        return set()
+    folded = _fold_lookalike(plain)
+    tokens_plain = set(plain.split())
+    tokens_fold = set(folded.split())
+    keys: set[str] = set()
+    for key, aliases in _DEPARTMENT_ALIASES.items():
+        for alias in aliases:
+            ap = _dept_plain(alias)
+            if not ap:
+                continue
+            af = _fold_lookalike(ap)
+            long = " " in ap or len(ap) >= 4
+            if long:
+                if ap in plain or af in folded:
+                    keys.add(key)
+            elif ap in tokens_plain or af in tokens_fold or ap == plain or af == folded:
+                keys.add(key)
+    return keys
+
+
+def _is_dept_short(word: str) -> bool:
+    plain = _dept_plain(word)
+    folded = _fold_lookalike(plain)
+    return plain in _DEPT_SHORT_CODES or folded in {
+        _fold_lookalike(code) for code in _DEPT_SHORT_CODES
+    }
+
+
+def entity_name_words(question: str) -> list[str]:
+    """Слова из вопроса, похожие на имя заказчика / менеджера, а не на метрику."""
+    return [word for word in extract_order_clues(question)["words"] if not _skip_entity_word(word)]
+
+
+def _entity_columns(df: pd.DataFrame, question: str = "") -> list[str]:
+    from services.column_resolver import resolve_semantic_column
+
+    q = _norm(question)
+    semantics = ("client", "manager", "department")
+    if any(marker in q for marker in ("подраздел", "отдел", "департамент", "служб")) or department_keys(question):
+        semantics = ("department", "client", "manager")
+    cols: list[str] = []
+    for semantic in semantics:
+        col = resolve_semantic_column(df, "", semantic, dtype="categorical")
+        if col and col not in cols:
+            cols.append(col)
+    for col in df.columns:
+        if col not in cols and _col_matches(col, _CLIENT_MARKERS):
+            cols.append(col)
+    return cols
+
+
+def match_entity_slice(df: pd.DataFrame, question: str) -> dict | None:
+    """Выборка строк по имени из вопроса. None — имени нет, пустые names — не нашли."""
+    words = entity_name_words(question)
+    if not words and not department_keys(question):
+        return None
+    q_keys = department_keys(question)
+    if not words and q_keys:
+        words = list(q_keys)
+    for col in _entity_columns(df, question):
+        names: list[str] = []
+        seen: set[str] = set()
+        for raw in df[col].dropna().unique():
+            if _is_blank(raw):
+                continue
+            label = str(raw).strip()
+            hit = any(_text_matches(word, label) for word in words)
+            if not hit and q_keys and q_keys & department_keys(label):
+                hit = True
+            if not hit:
+                continue
+            key = _norm(label)
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(label)
+        if not names:
+            continue
+        wanted = set(names)
+        mask = df[col].map(
+            lambda value: False if _is_blank(value) else str(value).strip() in wanted
+        )
+        return {"column": col, "names": names, "words": words, "frame": df.loc[mask]}
+    return {"column": None, "names": [], "words": words, "frame": None}
+
+
+def match_entities_separately(df: pd.DataFrame, question: str) -> list[dict]:
+    """Отдельный срез на каждое имя из вопроса (для сравнения, не сумма вместе)."""
+    words = entity_name_words(question)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for word in words:
+        found = match_entity_slice(df, word)
+        if not found or not found["names"] or found["frame"] is None or found["frame"].empty:
+            continue
+        col = found["column"]
+        for name in found["names"]:
+            key = _norm(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            mask = found["frame"][col].map(
+                lambda value: False if _is_blank(value) else str(value).strip() == name
+            )
+            frame = found["frame"].loc[mask]
+            if frame.empty:
+                continue
+            out.append({"column": col, "name": name, "word": word, "frame": frame})
+    return out
+
+
+_CHART_SKIP = (
+    "график",
+    "диаграмм",
+    "построй",
+    "нарисуй",
+    "визуализ",
+    "кругов",
+    "разбивк",
+    "гистограм",
+    "столбик",
+    "наглядн",
+)
+_GROUP_ALL_SKIP = (
+    "по заказчик",
+    "по клиент",
+    "по менеджер",
+    "по ответственн",
+    "по подразделен",
+    "по отдел",
+    "топ-",
+    "топ ",
+)
+_MONEY_ASK = (
+    "скольк",
+    "сумм",
+    "оплат",
+    "остал",
+    "остат",
+    "неоплач",
+    "дефицит",
+    "долг",
+    "задолжен",
+    "выручк",
+)
+
+
+def wants_entity_metrics(question: str, df: pd.DataFrame | None = None) -> bool:
+    """Именованный заказчик/менеджер + «сколько оплатил / осталось» — не группировка."""
+    if wants_order_lookup(question):
+        return False
+    q = _norm(question)
+    if any(marker in q for marker in _CHART_SKIP):
+        return False
+    if any(marker in q for marker in _GROUP_ALL_SKIP):
+        return False
+    if not entity_name_words(question):
+        return False
+    if not any(marker in q for marker in _MONEY_ASK):
+        return False
+    if df is None:
+        return True
+    found = match_entity_slice(df, question)
+    return bool(found and found.get("names") and found.get("frame") is not None)
+
+
+def _paid_asked(q: str) -> bool:
+    cleaned = q.replace("неоплач", " ").replace("не оплач", " ")
+    return any(
+        m in cleaned
+        for m in ("оплатил", "оплатила", "оплатили", "оплачено", "оплачен")
+    )
+
+
+def _unpaid_asked(q: str) -> bool:
+    return any(
+        m in q
+        for m in ("остал", "остат", "неоплач", "не оплач", "дефицит", "долг", "задолжен")
+    )
+
+
+def _count_asked(q: str) -> bool:
+    if any(m in q for m in ("сумм", "оплат", "остал", "остат", "неоплач", "дефицит", "долг")):
+        return False
+    return bool(re.search(r"скольк\w*\s+заказ", q)) or "число заказ" in q
+
+
+def _also_count_asked(q: str) -> bool:
+    return bool(re.search(r"скольк\w*\s+заказ", q)) or "число заказ" in q
+
+
+def _order_asked(q: str) -> bool:
+    return ("сумм" in q and "заказ" in q) or "по заказу" in q
+
+
+def _who_label(names: list[str]) -> str:
+    if len(names) == 1:
+        return f"«{names[0]}»"
+    shown = ", ".join(f"«{name}»" for name in names[:3])
+    extra = len(names) - 3
+    if extra > 0:
+        shown += f" и ещё {extra}"
+    return shown
+
+
+def exec_entity_metrics(df: pd.DataFrame, question: str) -> dict:
+    """Суммы по выбранному заказчику: оплачено, остаток, сумма заказа."""
+    from services.report_profiles.deficit_profile import (
+        _col_sum,
+        detect_deficit_money_layout,
+    )
+
+    found = match_entity_slice(df, question)
+    if found is None:
+        return {
+            "answer": "Не понял, по кому считать. Укажите заказчика, как в файле."
+        }
+    if not found["names"] or found["frame"] is None or found["frame"].empty:
+        hint = " ".join(found["words"])
+        return {
+            "answer": (
+                f"Не нашёл «{hint}» среди заказчиков, ответственных "
+                "и подразделений. Уточните название как в файле."
+            )
+        }
+
+    frame = found["frame"]
+    who = _who_label(found["names"])
+    q = _norm(question)
+    if _count_asked(q):
+        return {
+            "answer": f"У {who} в файле **{len(frame)}** заказ(ов)."
+        }
+    layout = detect_deficit_money_layout(df)
+    wanted: list[tuple[str, str]] = []
+    if _paid_asked(q) and layout.paid:
+        wanted.append(("Оплачено", layout.paid))
+    if _unpaid_asked(q) and layout.unpaid:
+        wanted.append(("Неоплаченный остаток", layout.unpaid))
+    if _order_asked(q) and layout.order_sum:
+        wanted.append(("Сумма заказов", layout.order_sum))
+    if not wanted:
+        if layout.paid:
+            wanted.append(("Оплачено", layout.paid))
+        if layout.unpaid:
+            wanted.append(("Неоплаченный остаток", layout.unpaid))
+        elif layout.order_sum:
+            wanted.append(("Сумма заказов", layout.order_sum))
+
+    if not wanted:
+        from services import data_tools
+
+        result = data_tools.get_sum(frame, question)
+        if "error" in result:
+            from services.chat_answers import count_breakdown_answer
+
+            return {"answer": count_breakdown_answer(frame, who)}
+        from services.chat_answers import format_chat_number
+
+        return {
+            "answer": (
+                f"Сумма «{result['column']}» у {who} "
+                f"({len(frame)} строк): **{format_chat_number(result['value'], money=True)}**"
+            )
+        }
+
+    n = len(frame)
+    from services.chat_answers import format_entity_answer, money_title
+    from services.report_profiles.deficit_profile import _col_sum
+
+    items: list[tuple[str, str, float]] = []
+    for title, col in wanted:
+        items.append((title, col, _col_sum(frame, col)))
+    # titles already set; if order used generic "Сумма заказов", fix via money_title
+    fixed = []
+    for title, col, val in items:
+        if title == "Сумма заказов":
+            title = money_title("order", col)
+        fixed.append((title, col, val))
+    return {
+        "answer": format_entity_answer(
+            who=who,
+            n=n,
+            items=fixed,
+            frame=frame,
+            layout=layout,
+            also_count=_also_count_asked(q),
+        )
+    }
+
+
+def wants_order_lookup(question: str) -> bool:
+    q = _norm(question)
+    clues = extract_order_clues(question)
+    has_clue = bool(clues["codes"] or clues["dates"] or clues["words"])
+    if not has_clue:
+        return False
+    if clues["codes"]:
+        return True
+    hinted = any(h in q for h in _LOOKUP_HINTS)
+    has_order = bool(_ORDER_WORD.search(q))
+    if (
+        not hinted
+        and not clues["dates"]
+        and any(
+            marker in q
+            for marker in (
+                "скольк",
+                "сумм",
+                "оплат",
+                "остал",
+                "неоплач",
+                "дефицит",
+                "выручк",
+            )
+        )
+    ):
+        return False
+    if has_order and (hinted or clues["dates"] or clues["words"]):
+        return True
+    return False
+
+
+def _parse_date_tuple(text: str) -> tuple[int, int, int | None] | None:
+    match = _DATE_RE.search(str(text))
+    if not match:
+        return None
+    day, month = int(match.group(1)), int(match.group(2))
+    if not (1 <= day <= 31 and 1 <= month <= 12):
+        return None
+    year = match.group(3)
+    if year:
+        y = int(year)
+        if y < 100:
+            y += 2000
+        return day, month, y
+    return day, month, None
+
+
+def _dates_in_value(value) -> list[tuple[int, int, int | None]]:
+    found: list[tuple[int, int, int | None]] = []
+    if isinstance(value, datetime):
+        found.append((value.day, value.month, value.year))
+        return found
+    if isinstance(value, date):
+        found.append((value.day, value.month, value.year))
+        return found
+    if _is_blank(value) or isinstance(value, (int, float, bool)):
+        return found
+    parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+    if not pd.isna(parsed):
+        ts = pd.Timestamp(parsed)
+        found.append((int(ts.day), int(ts.month), int(ts.year)))
+    for match in _DATE_RE.finditer(str(value)):
+        item = _parse_date_tuple(match.group(0))
+        if item and item not in found:
+            found.append(item)
+    return found
+
+
+def _date_matches(query: str, value) -> bool:
+    wanted = _parse_date_tuple(query)
+    if not wanted:
+        return False
+    qd, qm, qy = wanted
+    for d, m, y in _dates_in_value(value):
+        if d == qd and m == qm and (qy is None or y == qy):
+            return True
+    return False
+
+
+def _text_matches(query: str, value) -> bool:
+    if _is_blank(value):
+        return False
+    cell = _norm(value)
+    qn = _norm(query)
+    q_keys = department_keys(query)
+    v_keys = department_keys(value)
+    if q_keys and v_keys and q_keys & v_keys:
+        return True
+    if len(qn) <= 3:
+        tokens = set(_dept_plain(cell).split())
+        return bool(qn and qn in tokens)
+    if qn and qn in cell:
+        return True
+    folded_q = _fold_lookalike(qn)
+    folded_cell = _fold_lookalike(cell)
+    if folded_q and folded_q in folded_cell:
+        return True
+    qs = _stem(qn)
+    if len(qs) < 4:
+        return False
+    for token in _WORD_RE.findall(cell):
+        ts = _stem(token)
+        if not ts:
+            continue
+        if qs == ts:
+            return True
+        if len(qs) >= 5 and (ts.startswith(qs) or qs.startswith(ts)):
+            return True
+    return False
+
+
+def _code_matches(code: str, value) -> bool:
+    if _is_blank(value):
+        return False
+    return _norm(code) in _norm(value)
+
+
+def _score_row(row: pd.Series, clues: dict[str, list[str]]) -> int:
+    score = 0
+    for col, value in row.items():
+        name = str(col).lower()
+        in_id = _col_matches(col, _ID_COL_MARKERS)
+        in_client = _col_matches(col, _CLIENT_MARKERS)
+        in_deal = _col_matches(col, _DEAL_MARKERS)
+        in_comment = _col_matches(col, _COMMENT_MARKERS)
+        for code in clues["codes"]:
+            if _code_matches(code, value):
+                score += 120 if in_id else 70 if not in_comment else 20
+        for word in clues["words"]:
+            if _text_matches(word, value):
+                if in_client:
+                    score += 80
+                elif in_deal:
+                    score += 50
+                elif in_id:
+                    score += 40
+                elif in_comment:
+                    score += 15
+                else:
+                    score += 25
+        for raw_date in clues["dates"]:
+            if _date_matches(raw_date, value):
+                if in_id or "заказ" in name:
+                    score += 90
+                elif _col_matches(col, _DATE_COL_MARKERS):
+                    score += 25
+                else:
+                    score += 40
+    return score
+
+
+def find_order_rows(df: pd.DataFrame, question: str, limit: int = 5) -> pd.DataFrame:
+    clues = extract_order_clues(question)
+    if not (clues["codes"] or clues["dates"] or clues["words"]):
+        return df.iloc[0:0]
+    scores = df.apply(lambda row: _score_row(row, clues), axis=1)
+    ranked = df.assign(_lookup_score=scores)
+    ranked = ranked[ranked["_lookup_score"] > 0].sort_values(
+        "_lookup_score", ascending=False
+    )
+    return ranked.head(limit).drop(columns=["_lookup_score"])
+
+
+def _fmt_cell(value) -> str:
+    if _is_blank(value):
+        return ""
+    if isinstance(value, (datetime, date)) and not isinstance(value, bool):
+        try:
+            return pd.Timestamp(value).strftime("%d.%m.%Y")
+        except Exception:
+            return str(value)
+    if isinstance(value, bool):
+        return "да" if value else "нет"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        from services.chat_answers import format_chat_number
+
+        return format_chat_number(float(value))
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+(?:[.,]\d+)?", text.replace(" ", "").replace("\xa0", "")):
+        try:
+            from services.chat_answers import format_chat_number
+
+            return format_chat_number(
+                float(text.replace(" ", "").replace("\xa0", "").replace(",", "."))
+            )
+        except ValueError:
+            return text
+    return text
+
+
+def _display_columns(df: pd.DataFrame, comment_col: str | None) -> list[str]:
+    ordered: list[str] = []
+    for marker in _DISPLAY_ORDER:
+        for col in df.columns:
+            if col == comment_col or col in ordered:
+                continue
+            if marker in str(col).lower():
+                ordered.append(col)
+    for col in df.columns:
+        if col == comment_col or col in ordered:
+            continue
+        name = str(col).lower()
+        if name in _SKIP_DISPLAY or name.startswith("unnamed"):
+            continue
+        ordered.append(col)
+    return ordered
+
+
+def _title_for_row(row: pd.Series) -> str:
+    for markers in (_ID_COL_MARKERS, _DEAL_MARKERS, _CLIENT_MARKERS):
+        for col in row.index:
+            if _col_matches(col, markers) and not _is_blank(row[col]):
+                return str(row[col]).strip()
+    return "Заказ"
+
+
+def format_order_card(row: pd.Series, comment_col: str | None) -> str:
+    lines = [f"**{_title_for_row(row)}**", ""]
+    comment = ""
+    if comment_col and comment_col in row.index and not _is_blank(row[comment_col]):
+        comment = str(row[comment_col]).strip()
+    if comment:
+        lines.append("**Комментарий**")
+        lines.append(comment)
+        lines.append("")
+    else:
+        lines.append("В колонке комментария по этой строке пусто.")
+        lines.append("")
+
+    lines.append("**Основное**")
+    dummy = pd.DataFrame([row])
+    for col in _display_columns(dummy, comment_col):
+        text = _fmt_cell(row[col])
+        if not text:
+            continue
+        lines.append(f"• {col}: {text}")
+    return "\n".join(lines).rstrip()
+
+
+def exec_order_lookup(df: pd.DataFrame, question: str) -> dict:
+    matches = find_order_rows(df, question)
+    comment_col = _comment_column(df)
+    if matches.empty:
+        clues = extract_order_clues(question)
+        hint = ", ".join(
+            clues["codes"] or clues["words"] or clues["dates"] or [question.strip()]
+        )
+        return {
+            "answer": (
+                f"Не нашёл заказ по запросу «{hint}». "
+                "Уточните номер (например САУП-000450), заказчика или дату."
+            )
+        }
+
+    cards = [format_order_card(row, comment_col) for _, row in matches.iterrows()]
+    if len(cards) == 1:
+        return {"answer": cards[0]}
+    header = f"Нашёл {len(cards)} заказ(а) по запросу. Карточки ниже."
+    return {"answer": header + "\n\n" + "\n\n---\n\n".join(cards)}

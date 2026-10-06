@@ -10,8 +10,9 @@ from services.chart_service import (
     create_pie_chart,
 )
 from services.chat_keywords import _PERIOD_FUNCS, _PERIOD_LABELS
+from services.chat_lookup import match_entity_slice
 from services.column_resolver import resolve_semantic_column, _canonical_semantic
-from services.insights_service import _format_number, get_basic_insights
+from services.insights_service import get_basic_insights
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,36 @@ def _match_column(df: pd.DataFrame, name) -> str | None:
             return col
     return None
 
-def _fmt(value) -> str:
+def _fmt(value, money: bool = False) -> str:
     if isinstance(value, (int, float)):
-        return _format_number(value)
+        from services.chat_answers import format_chat_number
+
+        return format_chat_number(value, money=money)
     return str(value)
+
+
+def _who_label(names: list[str]) -> str:
+    if len(names) == 1:
+        return f"«{names[0]}»"
+    shown = ", ".join(f"«{name}»" for name in names[:3])
+    extra = len(names) - 3
+    if extra > 0:
+        shown += f" и ещё {extra}"
+    return shown
+
+
+def _rows_ru(n: int) -> str:
+    n_abs = abs(int(n)) % 100
+    n1 = n_abs % 10
+    if 11 <= n_abs <= 14:
+        word = "строк"
+    elif n1 == 1:
+        word = "строка"
+    elif 2 <= n1 <= 4:
+        word = "строки"
+    else:
+        word = "строк"
+    return f"{int(n)} {word}"
 
 
 def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
@@ -71,11 +98,40 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
     }
     if op in simple_ops:
         label, func = simple_ops[op]
-        result = func(df, q)
+        frame = df
+        who = ""
+        found = match_entity_slice(df, q) if op in {"sum", "mean", "max", "min"} else None
+        if found is not None:
+            if found["frame"] is None or found["frame"].empty:
+                hint = " ".join(found["words"])
+                return {
+                    "answer": (
+                        f"Не нашёл «{hint}» среди заказчиков, ответственных "
+                        "и подразделений. Уточните название как в файле."
+                    )
+                }
+            frame = found["frame"]
+            who = _who_label(found["names"])
+        result = func(frame, q)
         if "error" in result:
-            return {"answer": f"Не удалось посчитать: {result['error']}"}
+            if found is not None:
+                from services.chat_answers import count_breakdown_answer
+
+                return {"answer": count_breakdown_answer(frame, who)}
+            return {"answer": f"В файле нет числовой колонки, чтобы посчитать {label.lower()}."}
+        if who:
+            extra = f" ({_rows_ru(len(frame))})" if op == "sum" else ""
+            return {
+                "answer": (
+                    f"{label} «{result['column']}» у {who}{extra}: "
+                    f"**{_fmt(result['value'], money=op != 'unique_count')}**"
+                )
+            }
         return {
-            "answer": f"{label} по колонке «{result['column']}»: **{_fmt(result['value'])}**"
+            "answer": (
+                f"{label} по колонке «{result['column']}»: "
+                f"**{_fmt(result['value'], money=op != 'unique_count')}**"
+            )
         }
 
     if op == "top":
@@ -85,7 +141,7 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
         if "error" in result:
             return {"answer": f"Не удалось найти лидеров: {result['error']}"}
         lines = [
-            f"{i}. {name} — {_fmt(value)}"
+            f"{i}. {name} — {_fmt(value, money=True)}"
             for i, (name, value) in enumerate(result["groups"].items(), 1)
         ]
         return {
@@ -108,7 +164,7 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
         agg_label = {"sum": "сумма", "mean": "среднее", "count": "количество"}[agg]
         value_part = f" «{result['value_column']}»" if result.get("value_column") else ""
         lines = [
-            f"{i}. {name} — {_fmt(value)}"
+            f"{i}. {name} — {_fmt(value, money=True)}"
             for i, (name, value) in enumerate(result["groups"].items(), 1)
         ]
         return {
@@ -118,7 +174,12 @@ def _exec_stat(df: pd.DataFrame, action: dict) -> dict:
             )
         }
 
-    return {"answer": "Не удалось выполнить операцию."}
+    return {
+        "answer": (
+            "Не понял, что посчитать. Уточните: сколько строк, сумму, "
+            "топ заказчиков или какие изделия заказали."
+        )
+    }
 
 
 def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
@@ -253,7 +314,7 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
         "top_n": top_n,
     }
     leaders = ", ".join(
-        f"{name} ({_fmt(value)})" for name, value in list(grouped.items())[:3]
+        f"{name} ({_fmt(value, money=True)})" for name, value in list(grouped.items())[:3]
     )
     return {
         "answer": f"Построил диаграмму «{title}». Лидеры: {leaders}.",

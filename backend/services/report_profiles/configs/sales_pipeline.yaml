@@ -6,6 +6,8 @@ required_entities:
 
 kpis:
   - total_revenue
+  - won_revenue
+  - cancelled_share
   - average_check
   - unique_customers
   - unique_managers
