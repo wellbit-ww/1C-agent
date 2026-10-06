@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { copyExcelMarkup } from "./clipboard";
 import * as api from "./api";
 import { ChatPanel } from "./ChatPanel";
-import { FileBrief } from "./FileBrief";
+import { chartTitleCaps, chartTitleCapsFiltered, type DepartmentChartFilter } from "./chartTitle";
+import { COMPANY_CHART_COLOR, departmentChartColor } from "./deptColors";
+import { formatStageLabel } from "./stageLabel";
+import { BriefSummary } from "./BriefSummary";
 import { PlotChart } from "./PlotChart";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
@@ -13,6 +16,7 @@ import type {
   FileContext,
   MoneyBoard,
   MoneyMetric,
+  MoneyRow,
   PivotTable,
   Report,
   ReportChart,
@@ -35,6 +39,8 @@ const TYPE_NAMES: Record<string, string> = {
 function typeName(t?: string) {
   return TYPE_NAMES[t ?? ""] ?? "Отчёт";
 }
+
+const STAGES_PERIOD_KINDS = new Set(["deal_statuses", "in_work_stages"]);
 
 const DYNAMICS_PERIOD_KINDS = [
   "deals_dynamics",
@@ -328,9 +334,9 @@ function HalfYearTables({ sections }: { sections: SectionBlock[] }) {
                             row.row_role === "group" ? "font-semibold" : ""
                           }`}
                         >
-                          {row.label}
+                          {formatStageLabel(row.label)}
                         </th>
-                        {item.columns.map((col, i) => (
+                        {item.columns.map((_col, i) => (
                           <td
                             key={`${row.label}-${i}`}
                             className={`px-2 py-1.5 tabular-nums text-zinc-100 ${
@@ -379,7 +385,7 @@ function statusDealsOrdersFigure(block: SectionBlock) {
         marker: { color: "#5B9BD5" },
         text: deals.map((value) => String(value)),
         textposition: "outside",
-        textangle: -90,
+        textangle: 0,
         cliponaxis: false,
         hovertemplate: "Сделки<br>%{y:,.0f}<br>%{customdata:,.0f} р.<extra></extra>",
       },
@@ -392,18 +398,13 @@ function statusDealsOrdersFigure(block: SectionBlock) {
         marker: { color: "#ED7D31" },
         text: orders.map((value) => String(value)),
         textposition: "outside",
-        textangle: -90,
+        textangle: 0,
         cliponaxis: false,
         hovertemplate: "Заказы<br>%{y:,.0f}<br>%{customdata:,.0f} р.<extra></extra>",
       },
     ],
     layout: {
-      title: {
-        text: `СДЕЛКИ И ЗАКАЗЫ ${block.title.toUpperCase()}`,
-        x: 0.5,
-        xanchor: "center",
-        font: { size: 14 },
-      },
+      title: chartTitleCaps(`Сделки и заказы ${block.title}`),
       barmode: "group",
       bargap: 0.28,
       bargroupgap: 0.08,
@@ -413,32 +414,41 @@ function statusDealsOrdersFigure(block: SectionBlock) {
       height: 420,
       autosize: true,
       xaxis: { type: "category", categoryorder: "array", categoryarray: labels, tickangle: 0 },
-      yaxis: { visible: false, range: [0, peak * 1.35] },
+      yaxis: { visible: false, range: [0, peak * 1.42] },
     },
   });
 }
 
 function statusDealsPieFigure(block: SectionBlock) {
   const rows = block.tables[0].rows.filter((row) => row.label !== "Всего");
+  const values = rows.map((row) => Number(row.values[0] ?? 0));
+  const total = values.reduce((sum, value) => sum + value, 0) || 1;
+  const texttemplate = "%{label}<br>%{percent:.1%}";
+  const hasValue = (value: number) => value > 0;
   return JSON.stringify({
     data: [
       {
         type: "pie",
         labels: rows.map((row) => row.label),
-        values: rows.map((row) => Number(row.values[0] ?? 0)),
+        values,
         marker: { colors: rows.map((row) => STATUS_PIE_COLORS[row.label] ?? "#5B9BD5") },
-        textinfo: "label+percent",
-        textposition: "outside",
+        textinfo: values.map((value) => (hasValue(value) ? "text" : "none")),
+        texttemplate: values.map((value) => (hasValue(value) ? texttemplate : "")),
+        textposition: values.map((value) => (hasValue(value) ? "outside" : "none")),
+        outsidetextfont: { size: 11 },
+        pull: values.map((value) => (hasValue(value) && value / total < 0.03 ? 0.06 : 0)),
         sort: false,
-        hovertemplate: "%{label}<br>%{value:,.0f}<br>%{percent}<extra></extra>",
+        domain: { x: [0.12, 0.88], y: [0.14, 0.82] },
+        hovertemplate: "%{label}<br>%{value:,.0f}<br>%{percent:.1%}<extra></extra>",
       },
     ],
     layout: {
-      title: { text: "Сделки", x: 0.5, xanchor: "center", font: { size: 14 } },
+      title: chartTitleCaps("Сделки"),
       showlegend: true,
       legend: { orientation: "h", y: -0.08, x: 0.5, xanchor: "center" },
-      margin: { l: 16, r: 16, t: 48, b: 56 },
-      height: 420,
+      uniformtext: { mode: "show", minsize: 9 },
+      margin: { l: 56, r: 56, t: 56, b: 72 },
+      height: 440,
       autosize: true,
     },
   });
@@ -466,25 +476,34 @@ const IN_WORK_STAGE_BAR_YELLOW = "#FFC000";
 const IN_WORK_STAGE_BAR_PERIWINKLE = "#9DC3E6";
 const IN_WORK_STAGE_BAR_GREY = "#A5A5A5";
 
-function inWorkStageKey(label: string) {
-  return label.toLowerCase().replace(/ё/g, "е").trim();
+const IN_WORK_STAGE_TOP_COLORS = [
+  IN_WORK_STAGE_BAR_YELLOW,
+  IN_WORK_STAGE_BAR_PERIWINKLE,
+  IN_WORK_STAGE_BAR_GREY,
+];
+
+function inWorkStageTopRanks(labels: string[], values: number[]): Map<string, number> {
+  const ranked = labels
+    .map((label, index) => ({ label, value: values[index] ?? 0 }))
+    .filter((item) => item.value > 0)
+    .sort(
+      (left, right) =>
+        right.value - left.value || left.label.localeCompare(right.label, "ru"),
+    );
+  const ranks = new Map<string, number>();
+  ranked.slice(0, 3).forEach((item, index) => {
+    ranks.set(item.label, index);
+  });
+  return ranks;
 }
 
-function inWorkStageBarColor(label: string): string {
-  const low = inWorkStageKey(label);
-  if (low.includes("формирование предложения")) return IN_WORK_STAGE_BAR_YELLOW;
-  if (low.includes("согласование") && low.includes("контрагент")) return IN_WORK_STAGE_BAR_PERIWINKLE;
-  if (low.includes("ожидание финансирования")) return IN_WORK_STAGE_BAR_GREY;
-  return IN_WORK_STAGE_BAR_BLUE;
-}
-
-function inWorkStageHighlight(label: string): boolean {
-  const low = inWorkStageKey(label);
-  return (
-    low.includes("формирование предложения") ||
-    (low.includes("согласование") && low.includes("контрагент")) ||
-    low.includes("ожидание финансирования")
-  );
+function inWorkStageBarColors(labels: string[], values: number[]): string[] {
+  const ranks = inWorkStageTopRanks(labels, values);
+  return labels.map((label) => {
+    const rank = ranks.get(label);
+    if (rank == null) return IN_WORK_STAGE_BAR_BLUE;
+    return IN_WORK_STAGE_TOP_COLORS[rank] ?? IN_WORK_STAGE_BAR_BLUE;
+  });
 }
 
 function inWorkPeriodLabel(sectionTitle: string): string {
@@ -498,10 +517,11 @@ function inWorkStageRows(block: SectionBlock) {
 
 function inWorkStageHbarFigure(block: SectionBlock, metric: "count" | "money") {
   const rows = inWorkStageRows(block);
-  const labels = rows.map((row) => row.label);
+  const labels = rows.map((row) => formatStageLabel(row.label));
   const values = rows.map((row) => Number(row.values[metric === "count" ? 0 : 1] ?? 0));
-  const colors = labels.map((label) => inWorkStageBarColor(label));
-  const highlights = labels.map((label) => inWorkStageHighlight(label));
+  const ranks = inWorkStageTopRanks(labels, values);
+  const colors = inWorkStageBarColors(labels, values);
+  const highlights = labels.map((label) => ranks.has(label));
   const period = inWorkPeriodLabel(block.title);
   const suffix = metric === "count" ? "Количество" : "Сумма, р.";
   const text = values.map((value) =>
@@ -533,12 +553,7 @@ function inWorkStageHbarFigure(block: SectionBlock, metric: "count" | "money") {
       },
     ],
     layout: {
-      title: {
-        text: `Сделки В работе (${period}) — ${suffix}`,
-        x: 0.5,
-        xanchor: "center",
-        font: { size: 13 },
-      },
+      title: chartTitleCaps(`Сделки в работе (${period}) — ${suffix}`),
       showlegend: false,
       margin: { l: 8, r: 88, t: 48, b: 8 },
       height: barHeight,
@@ -554,6 +569,42 @@ function inWorkStageHbarFigure(block: SectionBlock, metric: "count" | "money") {
   });
 }
 
+function StageDeptBreakdownTableCard({ stage, table }: { stage: string; table: SectionTable }) {
+  const [copied, setCopied] = useState(false);
+
+  async function onCopy() {
+    const grid = sectionsToGrid([{ title: stage, tables: [{ ...table, title: "" }] }]);
+    await writeExcelTable(grid.plain, grid.html);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-line">
+      <div className="flex items-center justify-between gap-2 border-b border-line bg-panel px-3 py-1.5">
+        <div className="min-w-0 flex-1 text-center text-sm font-medium text-zinc-100">
+          {formatStageLabel(stage)}
+        </div>
+        <button
+          type="button"
+          className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
+          onClick={() => void onCopy().catch(() => setCopied(false))}
+        >
+          {copied ? "Скопировано" : "Скопировать"}
+        </button>
+      </div>
+      <HalfYearTables
+        sections={[
+          {
+            title: "",
+            tables: [{ ...table, title: "" }],
+          },
+        ]}
+      />
+    </div>
+  );
+}
+
 function StageDeptBreakdownGrid({
   title,
   items,
@@ -567,19 +618,7 @@ function StageDeptBreakdownGrid({
       <h4 className="text-xs font-semibold uppercase tracking-wide text-zinc-400">{title}</h4>
       <div className="grid gap-3 xl:grid-cols-3">
         {items.map((item) => (
-          <div key={item.stage} className="overflow-hidden rounded-lg border border-line">
-            <div className="border-b border-line bg-panel px-3 py-1.5 text-center text-sm font-medium text-zinc-100">
-              {item.stage}
-            </div>
-            <HalfYearTables
-              sections={[
-                {
-                  title: "",
-                  tables: [{ ...item.table, title: "" }],
-                },
-              ]}
-            />
-          </div>
+          <StageDeptBreakdownTableCard key={item.stage} stage={item.stage} table={item.table} />
         ))}
       </div>
     </div>
@@ -730,39 +769,44 @@ function PivotTableView({
   );
 }
 
-const COMPARE_BAR_COLORS = [
-  "#5B9BD5",
-  "#ED7D31",
-  "#70AD47",
-  "#FFC000",
-  "#A5A5A5",
-  "#1F4E79",
-  "#C00000",
-  "#7030A0",
-  "#00B0F0",
-  "#548235",
-  "#C65911",
-  "#833C0C",
-];
-
 const CONVERSION_COMPANY = "Совтест";
-const CONVERSION_COMPANY_COLOR = "#C00000";
 const CONVERSION_ABOVE_COLOR = "#548235";
 const CONVERSION_OTHER_COLOR = "#5B9BD5";
 
-function conversionSingleFigure(table: PivotTable, column: number, title: string) {
+/** Цвета периодов на групповых графиках (как на вкладке «Динамика»). */
+const PERIOD_BAR_COLORS = [
+  "#1F4E79",
+  "#ED7D31",
+  "#A5A5A5",
+  "#FFC000",
+  "#5B9BD5",
+  "#70AD47",
+  "#264478",
+  "#9E480E",
+  "#636363",
+  "#997300",
+];
+
+function conversionBarColor(label: string, value: number, companyValue: number | null): string {
+  if (label === CONVERSION_COMPANY) return COMPANY_CHART_COLOR;
+  if (companyValue != null && value > companyValue) return CONVERSION_ABOVE_COLOR;
+  return CONVERSION_OTHER_COLOR;
+}
+
+function conversionSingleFigure(
+  table: PivotTable,
+  column: number,
+  title: string,
+  deptFilter?: DepartmentChartFilter,
+) {
   const points = table.rows.map((row) => ({
     label: row.label,
     value: Number(row.values[column] ?? 0),
     company: row.label === CONVERSION_COMPANY,
   }));
   points.sort((a, b) => b.value - a.value);
-  const companyValue = points.find((item) => item.company)?.value;
-  const colors = points.map((item) => {
-    if (item.company) return CONVERSION_COMPANY_COLOR;
-    if (companyValue != null && item.value > companyValue) return CONVERSION_ABOVE_COLOR;
-    return CONVERSION_OTHER_COLOR;
-  });
+  const companyValue = points.find((item) => item.company)?.value ?? null;
+  const colors = points.map((item) => conversionBarColor(item.label, item.value, companyValue));
   const labels = points.map((item) => item.label);
   const values = points.map((item) => item.value);
   return JSON.stringify({
@@ -779,12 +823,7 @@ function conversionSingleFigure(table: PivotTable, column: number, title: string
       },
     ],
     layout: {
-      title: {
-        text: title,
-        x: 0.5,
-        xanchor: "center",
-        font: { size: 14 },
-      },
+      title: chartTitleCapsFiltered(title, deptFilter),
       barmode: "relative",
       autosize: false,
       width: Math.max(720, Math.min(88 * Math.max(labels.length, 1), 1500)),
@@ -798,8 +837,13 @@ function conversionSingleFigure(table: PivotTable, column: number, title: string
   });
 }
 
-function conversionGroupedFigure(table: PivotTable, columns: number[], title: string) {
-  if (columns.length === 1) return conversionSingleFigure(table, columns[0], title);
+function conversionGroupedFigure(
+  table: PivotTable,
+  columns: number[],
+  title: string,
+  deptFilter?: DepartmentChartFilter,
+) {
+  if (columns.length === 1) return conversionSingleFigure(table, columns[0], title, deptFilter);
   const ranked = [...table.rows].sort((a, b) => {
     const score = (row: (typeof table.rows)[number]) =>
       columns.reduce((total, index) => total + Number(row.values[index] ?? 0), 0);
@@ -808,27 +852,24 @@ function conversionGroupedFigure(table: PivotTable, columns: number[], title: st
   const labels = ranked.map((row) => row.label);
   const periodNames = columns.map((index) => table.columns[index] ?? "");
   const showText = columns.length * Math.max(labels.length, 1) <= 36;
-  const data = columns.map((index, seriesI) => ({
+  const data = columns.map((index, seriesI) => {
+    return {
     type: "bar",
     name: periodNames[seriesI],
     x: labels,
     y: ranked.map((row) => Number(row.values[index] ?? 0)),
-    marker: { color: COMPARE_BAR_COLORS[seriesI % COMPARE_BAR_COLORS.length] },
+    marker: { color: PERIOD_BAR_COLORS[seriesI % PERIOD_BAR_COLORS.length] },
     text: showText
       ? ranked.map((row) => `${Math.round(Number(row.values[index] ?? 0))}%`)
       : undefined,
     textposition: showText ? "outside" : undefined,
     cliponaxis: false,
-  }));
+  };
+  });
   return JSON.stringify({
     data,
     layout: {
-      title: {
-        text: title,
-        x: 0.5,
-        xanchor: "center",
-        font: { size: 14 },
-      },
+      title: chartTitleCapsFiltered(title, deptFilter),
       barmode: columns.length > 1 ? "group" : "relative",
       autosize: false,
       width: Math.max(720, Math.min(88 * Math.max(labels.length, 1) + 24 * columns.length, 1500)),
@@ -849,24 +890,38 @@ function conversionGroupedFigure(table: PivotTable, columns: number[], title: st
   });
 }
 
-function conversionCompareFigure(table: PivotTable, columns: number[]) {
+function conversionCompareFigure(
+  table: PivotTable,
+  columns: number[],
+  deptFilter?: DepartmentChartFilter,
+) {
   const periodNames = columns.map((index) => table.columns[index] ?? "");
   return conversionGroupedFigure(
     table,
     columns,
     `Конверсия сделок в заказы (${periodNames.join("/")})`,
+    deptFilter,
   );
 }
 
-function conversionOverviewFigure(table: PivotTable) {
+function conversionOverviewFigure(table: PivotTable, deptFilter?: DepartmentChartFilter) {
   return conversionGroupedFigure(
     table,
     table.columns.map((_, index) => index),
     "Конверсия сделок в заказы",
+    deptFilter,
   );
 }
 
-function ConversionCompareBlock({ table, columns }: { table: PivotTable; columns: number[] }) {
+function ConversionCompareBlock({
+  table,
+  columns,
+  deptFilter,
+}: {
+  table: PivotTable;
+  columns: number[];
+  deptFilter?: DepartmentChartFilter;
+}) {
   return (
     <div className="space-y-4 border-t border-line pt-4">
       <div className="overflow-auto rounded-lg border border-line">
@@ -912,7 +967,10 @@ function ConversionCompareBlock({ table, columns }: { table: PivotTable; columns
         </table>
       </div>
       <div className="flex justify-center overflow-x-auto">
-        <PlotChart json={conversionCompareFigure(table, columns)} className="h-[30rem] w-full min-w-[640px]" />
+        <PlotChart
+          json={conversionCompareFigure(table, columns, deptFilter)}
+          className="h-[30rem] w-full min-w-[640px]"
+        />
       </div>
     </div>
   );
@@ -928,9 +986,42 @@ function formatMoneyDelta(current: number, previous: number | null) {
   return pct > 0 ? `+${pct}%` : `${pct}%`;
 }
 
-const MONEY_PIE_COLORS = ["#2ee6a6", "#5b8def", "#f0b429", "#e05d5d", "#c084fc", "#67e8f9"];
+/** Доля подразделения в сумме по отделам (как на круговой диаграмме, без строки компании). */
+function moneyDepartmentPieTotal(rows: MoneyMetric["rows"], periodIndex: number) {
+  return rows
+    .filter((row) => !row.company)
+    .reduce((sum, row) => sum + Math.max(0, Number(row.values[periodIndex] ?? 0)), 0);
+}
 
-function moneyPieFigure(title: string, slices: { label: string; value: number }[]) {
+function formatMoneySharePercent(value: number, total: number) {
+  if (total <= 0 || value <= 0) return "—";
+  const pct = (100 * value) / total;
+  const maxDigits = pct >= 10 ? 1 : 2;
+  return `${pct.toLocaleString("ru-RU", { maximumFractionDigits: maxDigits })}%`;
+}
+
+function moneyRowSharePercent(row: MoneyRow, value: number, deptTotal: number) {
+  if (row.company) {
+    return value > 0 && deptTotal > 0 ? "100%" : "—";
+  }
+  return formatMoneySharePercent(value, deptTotal);
+}
+
+function moneyRowShareValue(row: MoneyRow, value: number, deptTotal: number): number | null {
+  if (row.company) {
+    return value > 0 && deptTotal > 0 ? 100 : null;
+  }
+  if (value > 0 && deptTotal > 0) {
+    return (100 * value) / deptTotal;
+  }
+  return null;
+}
+
+function moneyPieFigure(
+  title: string,
+  slices: { label: string; value: number }[],
+  deptFilter?: DepartmentChartFilter,
+) {
   return JSON.stringify({
     data: [
       {
@@ -938,21 +1029,22 @@ function moneyPieFigure(title: string, slices: { label: string; value: number }[
         labels: slices.map((item) => item.label),
         values: slices.map((item) => item.value),
         marker: {
-          colors: slices.map((_, index) => MONEY_PIE_COLORS[index % MONEY_PIE_COLORS.length]),
+          colors: slices.map((item) => departmentChartColor(item.label)),
         },
         textinfo: "percent",
         textposition: "inside",
         sort: false,
+        domain: { x: [0.08, 0.92], y: [0.12, 0.88] },
         hovertemplate: "%{label}<br>%{value:,.0f}<br>%{percent}<extra></extra>",
       },
     ],
     layout: {
-      title: { text: title, x: 0.5, xanchor: "center", font: { size: 14 } },
+      title: chartTitleCapsFiltered(title, deptFilter),
       showlegend: true,
-      legend: { orientation: "h", y: -0.08, font: { size: 11 } },
+      legend: { orientation: "h", y: -0.02, x: 0.5, xanchor: "center", font: { size: 11 } },
       height: 420,
       autosize: true,
-      margin: { l: 8, r: 8, t: 48, b: 72 },
+      margin: { l: 24, r: 24, t: 56, b: 80 },
     },
   });
 }
@@ -963,12 +1055,14 @@ function MoneyMetricBlock({
   previousIndex,
   currentLabel,
   previousLabel,
+  deptFilter,
 }: {
   metric: MoneyMetric;
   currentIndex: number;
   previousIndex: number | null;
   currentLabel: string;
   previousLabel: string | null;
+  deptFilter?: DepartmentChartFilter;
 }) {
   const rows = [...metric.rows].sort((a, b) => {
     if (a.company) return -1;
@@ -981,21 +1075,40 @@ function MoneyMetricBlock({
       .map((row) => ({ label: row.label, value: Number(row.values[index] ?? 0) }));
   const currentSlices = slices(currentIndex);
   const previousSlices = previousIndex == null ? [] : slices(previousIndex);
+  const currentDeptTotal = moneyDepartmentPieTotal(rows, currentIndex);
+  const previousDeptTotal =
+    previousIndex == null ? 0 : moneyDepartmentPieTotal(rows, previousIndex);
   const [copied, setCopied] = useState(false);
 
   async function onCopy() {
-    const header = ["Подразделение", currentLabel];
-    if (previousLabel) header.push(previousLabel, "Отклонение");
+    const header = ["Подразделение", currentLabel, "%"];
+    if (previousLabel) header.push(previousLabel, "%", "Отклонение");
     const plain: string[][] = [header];
     const html: HtmlCell[][] = [header.map((text) => ({ text }))];
     for (const row of rows) {
       const current = Number(row.values[currentIndex] ?? 0);
       const values: (number | null)[] = [current];
       const kinds = ["count"];
+      const currentShare = moneyRowShareValue(row, current, currentDeptTotal);
+      if (currentShare != null) {
+        values.push(currentShare);
+        kinds.push(row.company ? "percent" : "percent1");
+      } else {
+        values.push(null);
+        kinds.push("count");
+      }
       if (previousIndex != null) {
         const previous = Number(row.values[previousIndex] ?? 0);
         values.push(previous);
         kinds.push("count");
+        const previousShare = moneyRowShareValue(row, previous, previousDeptTotal);
+        if (previousShare != null) {
+          values.push(previousShare);
+          kinds.push(row.company ? "percent" : "percent1");
+        } else {
+          values.push(null);
+          kinds.push("count");
+        }
         values.push(previous === 0 ? null : Math.round((100 * (current - previous)) / previous));
         kinds.push("percent");
       }
@@ -1026,8 +1139,12 @@ function MoneyMetricBlock({
                 Подразделение
               </th>
               <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">{currentLabel}</th>
+              <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">%</th>
               {previousLabel ? (
                 <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">{previousLabel}</th>
+              ) : null}
+              {previousLabel ? (
+                <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">%</th>
               ) : null}
               {previousLabel ? (
                 <th className="px-3 py-1.5 font-medium whitespace-nowrap text-zinc-200">Отклонение</th>
@@ -1051,9 +1168,21 @@ function MoneyMetricBlock({
                   <td className={`px-3 py-1.5 tabular-nums ${row.company ? "text-red-400" : "text-zinc-100"}`}>
                     {formatMoney(current)}
                   </td>
+                  <td
+                    className={`px-3 py-1.5 tabular-nums ${row.company ? "text-red-400" : "text-zinc-400"}`}
+                  >
+                    {moneyRowSharePercent(row, current, currentDeptTotal)}
+                  </td>
                   {previousLabel ? (
                     <td className={`px-3 py-1.5 tabular-nums ${row.company ? "text-red-400" : "text-zinc-300"}`}>
                       {formatMoney(previous ?? 0)}
+                    </td>
+                  ) : null}
+                  {previousLabel ? (
+                    <td
+                      className={`px-3 py-1.5 tabular-nums ${row.company ? "text-red-400" : "text-zinc-400"}`}
+                    >
+                      {moneyRowSharePercent(row, previous ?? 0, previousDeptTotal)}
                     </td>
                   ) : null}
                   {previousLabel ? (
@@ -1071,21 +1200,29 @@ function MoneyMetricBlock({
           </tbody>
         </table>
       </div>
-      <div className={`grid gap-3 ${previousLabel ? "lg:grid-cols-2" : ""}`}>
+      <div
+        className={`grid gap-3 ${
+          previousLabel ? "lg:grid-cols-2" : "grid-cols-1 place-items-center"
+        }`}
+      >
         {currentSlices.length > 0 ? (
-          <PlotChart
-            json={moneyPieFigure(`${metric.title} (${currentLabel})`, currentSlices)}
-            className="h-[26rem] w-full"
-          />
+          <div className="flex w-full justify-center">
+            <PlotChart
+              json={moneyPieFigure(`${metric.title} (${currentLabel})`, currentSlices, deptFilter)}
+              className="h-[26rem] w-full max-w-md"
+            />
+          </div>
         ) : (
           <p className="py-8 text-center text-sm text-zinc-500">Нет сумм за {currentLabel}</p>
         )}
         {previousLabel && previousIndex != null ? (
           previousSlices.length > 0 ? (
-            <PlotChart
-              json={moneyPieFigure(`${metric.title} (${previousLabel})`, previousSlices)}
-              className="h-[26rem] w-full"
-            />
+            <div className="flex w-full justify-center">
+              <PlotChart
+                json={moneyPieFigure(`${metric.title} (${previousLabel})`, previousSlices, deptFilter)}
+                className="h-[26rem] w-full max-w-md"
+              />
+            </div>
           ) : (
             <p className="py-8 text-center text-sm text-zinc-500">Нет сумм за {previousLabel}</p>
           )
@@ -1095,7 +1232,13 @@ function MoneyMetricBlock({
   );
 }
 
-function MoneyBoardView({ board }: { board: MoneyBoard }) {
+function MoneyBoardView({
+  board,
+  deptFilter,
+}: {
+  board: MoneyBoard;
+  deptFilter?: DepartmentChartFilter;
+}) {
   const [index, setIndex] = useState(Math.max(0, board.periods.length - 1));
   const [compareIndex, setCompareIndex] = useState<number | null>(null);
   const currentIndex = Math.min(index, Math.max(0, board.periods.length - 1));
@@ -1156,6 +1299,7 @@ function MoneyBoardView({ board }: { board: MoneyBoard }) {
           previousIndex={previousIndex}
           currentLabel={current.label}
           previousLabel={previous?.label ?? null}
+          deptFilter={deptFilter}
         />
       ))}
     </div>
@@ -1261,7 +1405,6 @@ export function App() {
   const [comment, setComment] = useState("");
   const [comments, setComments] = useState<Record<string, string>>({});
   const [tab, setTab] = useState(0);
-  const [dashPrompt, setDashPrompt] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [conversionPeriod, setConversionPeriod] = useState<Record<string, number>>({});
   const [conversionCompare, setConversionCompare] = useState<
@@ -1271,7 +1414,6 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(() => !isNarrowViewport());
   const [chartEditor, setChartEditor] = useState<ChartEditorMode | null>(null);
-  const [specBackup, setSpecBackup] = useState<DashSpec | null>(null);
   const busyLabel = useBusyLabel(busy);
   const fileRef = useRef<HTMLInputElement>(null);
   const fileIdRef = useRef<string | null>(null);
@@ -1371,7 +1513,6 @@ export function App() {
     setError(null);
     setDashboard(null);
     setCtx(null);
-    setSpecBackup(null);
     setChartEditor(null);
     setFileId(null);
     setFilename(null);
@@ -1405,48 +1546,6 @@ export function App() {
     }
   }
 
-  async function onGenerate(edit: boolean) {
-    if (!fileId || !dashPrompt.trim()) return;
-    if (!edit && (dashboard?.tabs?.length ?? 0) > 0) {
-      const ok = window.confirm(
-        "Сгенерировать дашборд заново? Текущие вкладки и закреплённые графики будут заменены. После этого можно вернуть прежний дашборд.",
-      );
-      if (!ok) return;
-    }
-    const previousSpec = dashboard?.spec ?? null;
-    setBusy(edit ? "Правлю дашборд…" : "Собираю дашборд…");
-    setError(null);
-    try {
-      const fn = edit ? api.dashboardEdit : api.dashboardGenerate;
-      const patch = await fn(fileId, dashPrompt.trim());
-      setDashboard((cur) => ({ ...(cur ?? {}), ...patch, tabs: patch.tabs ?? cur?.tabs, spec: patch.spec ?? cur?.spec }));
-      if (patch.warning) setError(patch.warning);
-      setTab(0);
-      setChartEditor(null);
-      if (!edit && previousSpec) {
-        setSpecBackup(previousSpec);
-        setNotice("Дашборд собран заново. Можно вернуть прежний.");
-      }
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onComments() {
-    if (!fileId) return;
-    setBusy("Комментарии…");
-    try {
-      const res = await api.dashboardComments(fileId);
-      setComments(res.comments ?? {});
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   async function onPin(spec: Record<string, unknown>) {
     if (!fileId) return;
     setBusy("Закрепляю график…");
@@ -1460,29 +1559,6 @@ export function App() {
       if (idx >= 0) setTab(idx);
       const tabTitle = idx >= 0 ? dash.tabs?.[idx]?.title : undefined;
       setNotice(tabTitle ? `График закреплён на вкладке «${tabTitle}»` : "График закреплён на дашборде");
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onRestoreSpec() {
-    if (!fileId || !specBackup) return;
-    setBusy("Возвращаю дашборд…");
-    setError(null);
-    try {
-      const patch = await api.dashboardSaveSpec(fileId, specBackup);
-      setDashboard((cur) => ({
-        ...(cur ?? {}),
-        ...patch,
-        tabs: patch.tabs ?? cur?.tabs,
-        spec: patch.spec ?? specBackup,
-      }));
-      setSpecBackup(null);
-      setChartEditor(null);
-      setTab(0);
-      setNotice("Прежний дашборд возвращён");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -1532,6 +1608,7 @@ export function App() {
     const syncDynamics = DYNAMICS_PERIOD_KINDS.includes(
       kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
     );
+    const syncStages = STAGES_PERIOD_KINDS.has(kind);
     const next: DashSpec = {
       tabs: spec.tabs.map((t, ti) =>
         ti !== tabI
@@ -1547,6 +1624,9 @@ export function App() {
                     itemKind as (typeof DYNAMICS_PERIOD_KINDS)[number],
                   )
                 ) {
+                  return { ...item, source: { ...item.source, period } };
+                }
+                if (syncStages && itemKind && STAGES_PERIOD_KINDS.has(itemKind)) {
                   return { ...item, source: { ...item.source, period } };
                 }
                 if (ij !== tileI) return item;
@@ -1667,7 +1747,6 @@ export function App() {
     setReport(null);
     setReportCharts([]);
     setChartEditor(null);
-    setSpecBackup(null);
     setView("dash");
   }
 
@@ -1794,22 +1873,14 @@ export function App() {
               <EmptyState onPick={() => fileRef.current?.click()} />
             ) : (
               <>
-                {ctx?.summary && (
-                  <p className="mb-3 max-w-3xl text-sm text-zinc-400">{ctx.summary}</p>
-                )}
-                {dashboard?.summary && dashboard.summary !== ctx?.summary && (
-                  <p className="mb-3 max-w-3xl rounded-xl border border-line bg-card px-3 py-2 text-sm text-zinc-300">
-                    {dashboard.summary}
-                  </p>
-                )}
-                {ctx && <FileBrief ctx={ctx} />}
+                {dashboard?.summary && <BriefSummary text={dashboard.summary} />}
                 {meta && (
                   <p className="mb-4 text-xs text-zinc-500">
                     Период {meta.period ?? "—"} · {meta.rows ?? 0} строк · {meta.columns ?? 0} колонок
                   </p>
                 )}
                 {kpis.length > 0 && (
-                  <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+                  <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6">
                     {kpis.map((kpi) => (
                       <div key={kpi.label} className="rounded-xl border border-line bg-card px-4 py-3">
                         <div className="text-xs text-zinc-500">{kpi.label}</div>
@@ -1818,57 +1889,6 @@ export function App() {
                     ))}
                   </div>
                 )}
-                {dashboard?.insights && dashboard.insights.length > 0 && (
-                  <ul className="mb-5 space-y-1 text-sm text-zinc-300">
-                    {dashboard.insights.map((item) => (
-                      <li key={item}>· {item}</li>
-                    ))}
-                  </ul>
-                )}
-
-                <div className="mb-3 flex flex-wrap gap-2">
-                  <input
-                    value={dashPrompt}
-                    onChange={(e) => setDashPrompt(e.target.value)}
-                    placeholder="Собери дашборд по менеджерам…"
-                    className="min-w-56 flex-1 rounded-lg border border-line bg-card px-3 py-2 text-sm outline-none focus:border-accent/60"
-                  />
-                  <button
-                    type="button"
-                    className="rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg disabled:opacity-40"
-                    disabled={!dashPrompt.trim() || !!busy}
-                    onClick={() => void onGenerate(false)}
-                  >
-                    Сгенерировать
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-lg border border-line px-3 py-2 text-sm disabled:opacity-40"
-                    disabled={!dashPrompt.trim() || !!busy}
-                    onClick={() => void onGenerate(true)}
-                  >
-                    Правка
-                  </button>
-                  {specBackup && (
-                    <button
-                      type="button"
-                      className="rounded-lg border border-accent/40 px-3 py-2 text-sm text-accent disabled:opacity-40"
-                      disabled={!!busy}
-                      onClick={() => void onRestoreSpec()}
-                    >
-                      Вернуть прежний дашборд
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="rounded-lg border border-line px-3 py-2 text-sm"
-                    disabled={!!busy}
-                    onClick={() => void onComments()}
-                  >
-                    Комментарии
-                  </button>
-                </div>
-
                 {tabs.length > 0 && (
                   <>
                     <div className="mb-3 flex flex-wrap items-center gap-1">
@@ -1939,9 +1959,15 @@ export function App() {
                           conversionPeriod[id] != null && conversionPeriod[id] < periodCharts.length
                             ? conversionPeriod[id]
                             : Math.max(0, periodCharts.length - 1);
+                        const deptChartFilter: DepartmentChartFilter = {
+                          catalog: tile.departments,
+                          included: specTile?.source?.departments,
+                        };
                         const conversionChart = periodCharts[selectedPeriod] ?? tile.plotly_json;
                         const conversionOverview =
-                          conversionTile && tile.table ? conversionOverviewFigure(tile.table) : conversionChart;
+                          conversionTile && tile.table
+                            ? conversionOverviewFigure(tile.table, deptChartFilter)
+                            : conversionChart;
                         const conversionColumnsKey = (tile.table?.columns ?? []).join("|");
                         const storedCompare = conversionCompare[id];
                         const activeCompare =
@@ -2046,6 +2072,7 @@ export function App() {
                             <MoneyBoardView
                               key={`${tile.bucket_period ?? "half"}-${tile.money.periods.length}`}
                               board={tile.money}
+                              deptFilter={deptChartFilter}
                             />
                           ) : sideBySideTile && tile.sections ? (
                             <DealStatusView
@@ -2121,7 +2148,11 @@ export function App() {
                                 </div>
                               ) : null}
                               {conversionTile && tile.table && compareColumns.length > 0 ? (
-                                <ConversionCompareBlock table={tile.table} columns={compareColumns} />
+                                <ConversionCompareBlock
+                                  table={tile.table}
+                                  columns={compareColumns}
+                                  deptFilter={deptChartFilter}
+                                />
                               ) : null}
                             </div>
                           ) : tile.table ? (

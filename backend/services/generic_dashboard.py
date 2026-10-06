@@ -137,6 +137,7 @@ SALES_DYNAMICS_TAB_TITLE = "Динамика"
 SALES_CONVERSION_TAB_TITLE = "Конверсия"
 SALES_MONEY_TAB_TITLE = "Деньги"
 SALES_STAGES_TAB_TITLE = "Этапы продаж"
+SALES_HALFYEAR_TILE_TITLE = "Сделки и ЗК в заданный период"
 
 
 def build_deals_tab(df: pd.DataFrame) -> Tab | None:
@@ -176,7 +177,7 @@ def build_deals_tab(df: pd.DataFrame) -> Tab | None:
                 sort="none",
             ),
             Tile(
-                title="Сделки и ЗК по полугодиям",
+                title=SALES_HALFYEAR_TILE_TITLE,
                 chart_type="table",
                 source=TileSource(
                     kind="halfyear",

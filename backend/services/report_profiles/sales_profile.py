@@ -6,6 +6,7 @@ from services.generic_dashboard import (
     SALES_DATA_TAB_TITLE,
     SALES_DYNAMICS_TAB_TITLE,
     SALES_MONEY_TAB_TITLE,
+    SALES_HALFYEAR_TILE_TITLE,
     SALES_STAGES_TAB_TITLE,
 )
 from services.report_profiles.base_profile import ReportProfile
@@ -135,18 +136,32 @@ def _stages_tab() -> Tab:
     )
 
 
+def _stages_tab_period(tiles: list[Tile]) -> str:
+    """Период вкладки «Этапы продаж»: приоритет у «Статусы сделок», не у последнего тайла в списке."""
+    for tile in tiles:
+        if tile.source.kind != "deal_statuses" or tile.source.variant != "full":
+            continue
+        raw = tile.source.period
+        if raw in ("month", "quarter", "half"):
+            return raw
+    for tile in tiles:
+        if tile.source.kind not in ("deal_statuses", "in_work_stages"):
+            continue
+        raw = tile.source.period
+        if raw in ("month", "quarter", "half"):
+            return raw
+    return "quarter"
+
+
 def _normalize_stages_tab(stages_tab: Tab) -> None:
     """Только три тайла: статусы (полный/счётчики) и «В работе» по этапам.
 
     Старые спеки могли содержать лишний график «Сделки по этапам» с kind=current_stage
     или columns_pattern — он считал все 428 сделок, а не 327 «В работе».
     """
-    period = "quarter"
+    period = _stages_tab_period(stages_tab.tiles)
     titles: dict[str, str] = {}
     for tile in stages_tab.tiles:
-        raw_period = tile.source.period
-        if raw_period in ("month", "quarter", "half"):
-            period = raw_period
         kind = tile.source.kind
         if kind == "deal_statuses" and tile.source.variant == "full":
             titles["full"] = tile.title
@@ -370,6 +385,7 @@ def ensure_money_tile(spec: DashboardSpec) -> DashboardSpec:
 
 def enrich_deals_tab(spec: DashboardSpec, df: pd.DataFrame | None = None) -> DashboardSpec:
     """Вкладки «Данные», «Динамика» и «Конверсия» для этапов продаж."""
+    _migrate_halfyear_tile_titles(spec)
     spec = _sales_pipeline_tabs(spec, df)
     spec = _drop_legacy_deals_pie(spec)
     spec = ensure_status_summary_tile(ensure_halfyear_tile(ensure_outcome_tile(spec)))
@@ -402,8 +418,15 @@ def ensure_status_summary_tile(spec: DashboardSpec) -> DashboardSpec:
     return spec
 
 
+def _migrate_halfyear_tile_titles(spec: DashboardSpec) -> None:
+    for tab in spec.tabs:
+        for tile in tab.tiles:
+            if tile.source.kind == "halfyear":
+                tile.title = SALES_HALFYEAR_TILE_TITLE
+
+
 def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
-    """Третья таблица вкладки «Сделки»: сделки и ЗК по полугодиям."""
+    """Третья таблица вкладки «Данные»: сделки и ЗК за выбранный период."""
     for tab in spec.tabs:
         if not _is_sales_data_tab(tab):
             continue
@@ -413,7 +436,7 @@ def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
         if len(tab.tiles) >= 8:
             return spec
         tile = Tile(
-            title="Сделки и ЗК по полугодиям",
+            title=SALES_HALFYEAR_TILE_TITLE,
             chart_type="table",
             source=TileSource(
                 kind="halfyear",
@@ -428,6 +451,64 @@ def ensure_halfyear_tile(spec: DashboardSpec) -> DashboardSpec:
         tab.tiles.insert(len(tab.tiles) if after is None else after + 1, tile)
         return spec
     return spec
+
+
+def sales_pipeline_kpis(df: pd.DataFrame) -> list[dict]:
+    """Карточки над дашбордом воронки: сделки по статусам и потенциал."""
+    from services.dashboard_engine import (
+        _deal_count_in_frame,
+        _named_column,
+        _normalize_deal_status,
+        _status_column,
+        _sum_numeric,
+    )
+    from services.kpi_engine import _format_number
+
+    deal_n = _named_column(df, "количество сделок")
+    deal_s = _named_column(df, "сумма по сделке")
+    status_col = _status_column(df)
+
+    work = df.copy()
+    if status_col:
+        work["_status"] = work[status_col].map(_normalize_deal_status)
+
+    def count_frame(frame: pd.DataFrame) -> float:
+        return _deal_count_in_frame(frame, deal_n)
+
+    status_counts = {
+        "В работе": 0.0,
+        "Выиграна": 0.0,
+        "Проиграна": 0.0,
+        "Отменена": 0.0,
+    }
+    if status_col:
+        for label in status_counts:
+            part = work.loc[work["_status"] == label]
+            status_counts[label] = count_frame(part)
+
+    total_count = count_frame(work)
+    total_sum = _sum_numeric(work, deal_s) if deal_s else 0.0
+
+    def count_kpi(name: str, label: str, value: float) -> dict:
+        n = int(round(value))
+        return {"name": name, "label": label, "value": str(n), "raw_value": float(n)}
+
+    def money_kpi(name: str, label: str, value: float) -> dict:
+        return {
+            "name": name,
+            "label": label,
+            "value": _format_number(value),
+            "raw_value": float(value),
+        }
+
+    return [
+        count_kpi("deals_total", "Количество сделок", total_count),
+        money_kpi("deals_potential_sum", "Потенциальная сумма сделок", total_sum),
+        count_kpi("deals_in_progress", "Сделки в работе", status_counts["В работе"]),
+        count_kpi("deals_won", "Сделки выиграны", status_counts["Выиграна"]),
+        count_kpi("deals_lost", "Сделки проиграны", status_counts["Проиграна"]),
+        count_kpi("deals_cancelled", "Сделки отменены", status_counts["Отменена"]),
+    ]
 
 
 def build_sales_dashboard_spec(df):

@@ -68,6 +68,10 @@ class ReportEngine(ReportProfile):
             from services.report_profiles.deficit_profile import deficit_kpis
 
             return deficit_kpis(df)
+        if self.config.name == "sales_pipeline":
+            from services.report_profiles.sales_profile import sales_pipeline_kpis
+
+            return sales_pipeline_kpis(df)
         return self._translate_kpis(run_kpis(df, self.config.kpis), df)
 
     def get_charts(self, df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -189,6 +193,12 @@ class ReportEngine(ReportProfile):
         return insights
 
     def get_summary(self, df: pd.DataFrame) -> str:
+        if self.config.name == "sales_pipeline":
+            from services.sales_brief_summary import build_sales_brief_summary
+
+            brief = build_sales_brief_summary(df)
+            if brief:
+                return brief
         kpis = self.get_kpis(df)
         return generate_summary(self.config.name, kpis, self.get_insights(df))
 

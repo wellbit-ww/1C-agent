@@ -73,7 +73,7 @@ const INTENTS: { id: string; label: string; hint: string }[] = [
   },
   {
     id: "halfyear",
-    label: "Сделки и ЗК по полугодиям",
+    label: "Сделки и ЗК в заданный период",
     hint: "Компания и каждая служба: количество, сумма, конверсия",
   },
   {
@@ -151,7 +151,7 @@ function blankTile(intent: string, columns: string[]): TileSpec {
   }
   if (intent === "halfyear") {
     return {
-      title: "Сделки и ЗК по полугодиям",
+      title: "Сделки и ЗК в заданный период",
       chart_type: "table",
       agg: "sum",
       top_n: 50,

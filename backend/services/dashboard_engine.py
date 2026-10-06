@@ -4,12 +4,15 @@
 LLM может только генерировать/редактировать спеку — никогда не считает.
 """
 import logging
+import re
 
 import pandas as pd
 import plotly.graph_objects as go
 
 from models.dashboard_spec import DashboardSpec, Tab, Tile
 from services import data_tools
+from services.chart_style import chart_title_caps
+from services.dept_chart_colors import COMPANY_CHART_COLOR, department_chart_color
 from services.column_resolver import resolve_semantic_column
 
 logger = logging.getLogger(__name__)
@@ -145,8 +148,9 @@ def _column_chart_label(col: str, pattern: str = "") -> str:
         text = text[: -len(pattern)].strip() or text
     for sep in (" — ", " – ", " - "):
         if sep in text:
-            return text.split(sep)[-1].strip()
-    return text
+            text = text.split(sep)[-1].strip()
+            break
+    return _pretty_stage_label(text)
 
 
 def _aggregate_columns(df: pd.DataFrame, tile: Tile, columns: list, pattern: str = "") -> dict:
@@ -232,7 +236,10 @@ def _current_stage_data(df: pd.DataFrame, tile: Tile) -> dict:
 
     sum_cols = [c for c in matched if str(c).endswith("(сумма)")] or list(matched)
     stage_idx = _funnel_current_stage_index(df, sum_cols)
-    labels = _stage_labels(sum_cols, "(сумма)" if sum_cols else pattern)
+    labels = [
+        _pretty_stage_label(label)
+        for label in _stage_labels(sum_cols, "(сумма)" if sum_cols else pattern)
+    ]
     numeric = df[sum_cols].apply(pd.to_numeric, errors="coerce")
     valid = stage_idx >= 0
     groups = {label: 0.0 for label in labels}
@@ -550,7 +557,8 @@ _DEPT_SHORT = {
     "служба оборудования обработки кабеля": "СООК",
     "служба микроэлектроники": "СМЭ",
     "отдел аплис": "ОАПЛиС",
-    "сервисная служба": "СС",
+    "сервисная служба": "Сервис",
+    "сс": "Сервис",
     "служба тестового оборудования": "СТО",
     "отдел функционального контроля": "СТО",
     "отдел неразрушающего контроля": "СТО",
@@ -592,15 +600,11 @@ def _department_labels(names: pd.Series) -> pd.Series:
     return names.map(lambda value: department_short(str(value).strip()))
 
 
-_DEPT_BREAKDOWN_ORDER = ("СИО и АПЛиС", "СТО", "СМЭ", "СТЕ", "СООК", "Сервис")
+_DEPT_BREAKDOWN_ORDER = ("СИО", "ОАПЛиС", "СТО", "СМЭ", "СТЕ", "СООК", "Сервис")
 _STO_SUBDIVISION_ORDER = ("ОВК", "ОНК", "ОФК")
 
 
 def _dept_breakdown_group(short_label: str) -> str:
-    if short_label in ("СИО", "ОАПЛиС"):
-        return "СИО и АПЛиС"
-    if short_label == "СС":
-        return "Сервис"
     return short_label
 
 
@@ -759,6 +763,20 @@ def _limit_departments(df: pd.DataFrame, tile: Tile) -> pd.DataFrame:
         return df
     labels = _department_labels(df[group_col].astype(str).str.strip())
     return df.loc[labels.isin(selected)].copy()
+
+
+def _excluded_department_labels(catalog: list[str], tile: Tile) -> list[str]:
+    selected = _selected_department_labels(tile)
+    if not selected or not catalog:
+        return []
+    return [label for label in catalog if label not in selected]
+
+
+def _chart_title_with_departments(base: str, tile: Tile, catalog: list[str]) -> str:
+    excluded = _excluded_department_labels(catalog, tile)
+    if not excluded:
+        return base
+    return f"{base} (без {', '.join(excluded)})"
 
 
 def _status_column(df: pd.DataFrame) -> str | None:
@@ -1147,11 +1165,14 @@ def _funnel_current_stage_index(df: pd.DataFrame, sum_cols: list[str]) -> pd.Ser
     return _last_filled_stage_index(_funnel_stage_markers(df, sum_cols))
 
 
+_STAGE_KP_RE = re.compile(r"(?i)(?<![а-яёa-z])кп(?![а-яёa-z])")
+
+
 def _pretty_stage_label(label: str) -> str:
     text = str(label or "").strip()
     if text and text[0].islower():
-        return text[0].upper() + text[1:]
-    return text
+        text = text[0].upper() + text[1:]
+    return _STAGE_KP_RE.sub("КП", text)
 
 
 def _in_work_stages_data(df: pd.DataFrame, tile: Tile) -> dict:
@@ -1536,20 +1557,6 @@ def _deals_dynamics_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
-_DEPT_DYNAMICS_COLORS = (
-    "#1F4E79",
-    "#ED7D31",
-    "#A5A5A5",
-    "#FFC000",
-    "#5B9BD5",
-    "#70AD47",
-    "#264478",
-    "#9E480E",
-    "#636363",
-    "#997300",
-)
-
-
 def _deals_dynamics_departments_data(df: pd.DataFrame, tile: Tile) -> dict:
     """Таблица и серии для группового графика по подразделениям."""
     prep = _deals_dynamics_prepare(df, tile)
@@ -1739,7 +1746,7 @@ def _deals_dynamics_outcome_share_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
-def _render_deals_dynamics_chart(series: dict, tile: Tile) -> go.Figure:
+def _render_deals_dynamics_chart(series: dict, tile: Tile, catalog: list[str]) -> go.Figure:
     labels = list(series["categories"])
     values = [float(v) for v in series["values"]]
     n = len(labels)
@@ -1759,18 +1766,15 @@ def _render_deals_dynamics_chart(series: dict, tile: Tile) -> go.Figure:
             marker_color="#4472C4",
             text=texts,
             textposition="outside" if show_bar_text else None,
-            textangle=-90 if show_bar_text else 0,
+            textangle=0,
             cliponaxis=False,
             width=0.62,
         )
     )
     subtitle = str(series.get("label") or _COMPANY_ROW_LABEL)
     fig.update_layout(
-        title=dict(
-            text=f"ДИНАМИКА СДЕЛОК. {subtitle.upper()}",
-            x=0.5,
-            xanchor="center",
-            font=dict(size=13),
+        title=chart_title_caps(
+            _chart_title_with_departments(f"Динамика сделок. {subtitle}", tile, catalog)
         ),
         width=fig_width,
         height=520,
@@ -1787,11 +1791,31 @@ def _render_deals_dynamics_chart(series: dict, tile: Tile) -> go.Figure:
         automargin=True,
         tickfont=dict(size=10),
     )
-    fig.update_yaxes(visible=False, showgrid=False)
+    if show_bar_text and values:
+        peak = max(float(v) for v in values)
+        fig.update_yaxes(visible=False, showgrid=False, range=[0, peak * 1.18])
+    else:
+        fig.update_yaxes(visible=False, showgrid=False)
     return fig
 
 
-def _render_deals_dynamics_departments_chart(series: dict, tile: Tile) -> go.Figure:
+_PERIOD_BAR_COLORS = (
+    "#1F4E79",
+    "#ED7D31",
+    "#A5A5A5",
+    "#FFC000",
+    "#5B9BD5",
+    "#70AD47",
+    "#264478",
+    "#9E480E",
+    "#636363",
+    "#997300",
+)
+
+
+def _render_deals_dynamics_departments_chart(
+    series: dict, tile: Tile, catalog: list[str]
+) -> go.Figure:
     depts = list(series["categories"])
     period_series = list(series["series"])
     n_depts = len(depts)
@@ -1811,21 +1835,18 @@ def _render_deals_dynamics_departments_chart(series: dict, tile: Tile) -> go.Fig
                 name=period["label"],
                 x=depts,
                 y=values,
-                marker_color=_DEPT_DYNAMICS_COLORS[i % len(_DEPT_DYNAMICS_COLORS)],
+                marker_color=_PERIOD_BAR_COLORS[i % len(_PERIOD_BAR_COLORS)],
                 text=texts,
                 textposition="outside" if show_bar_text else None,
-                textangle=-90 if show_bar_text else 0,
+                textangle=0,
                 cliponaxis=False,
             )
         )
 
     fig_width = max(560, min(72 * n_depts + 40 * n_periods, 1400))
     fig.update_layout(
-        title=dict(
-            text="ДИНАМИКА СДЕЛОК. СЛУЖБЫ",
-            x=0.5,
-            xanchor="center",
-            font=dict(size=13),
+        title=chart_title_caps(
+            _chart_title_with_departments("Динамика сделок. Службы", tile, catalog)
         ),
         width=fig_width,
         height=560,
@@ -1846,11 +1867,19 @@ def _render_deals_dynamics_departments_chart(series: dict, tile: Tile) -> go.Fig
         template="plotly_white",
     )
     fig.update_xaxes(type="category", tickangle=-25 if n_depts > 4 else 0, automargin=True)
-    fig.update_yaxes(visible=False, showgrid=False)
+    if show_bar_text and period_series:
+        peak = max(
+            float(v)
+            for period in period_series
+            for v in period["values"]
+        )
+        fig.update_yaxes(visible=False, showgrid=False, range=[0, peak * 1.18])
+    else:
+        fig.update_yaxes(visible=False, showgrid=False)
     return fig
 
 
-def _render_deals_outcome_share_chart(series: dict, tile: Tile) -> go.Figure:
+def _render_deals_outcome_share_chart(series: dict, tile: Tile, catalog: list[str]) -> go.Figure:
     depts = [str(label) for label in series["categories"]]
     period_series = list(series["series"])
     n_depts = len(depts)
@@ -1868,21 +1897,18 @@ def _render_deals_outcome_share_chart(series: dict, tile: Tile) -> go.Figure:
                 name=period["label"],
                 x=depts,
                 y=values,
-                marker_color=_DEPT_DYNAMICS_COLORS[i % len(_DEPT_DYNAMICS_COLORS)],
+                marker_color=_PERIOD_BAR_COLORS[i % len(_PERIOD_BAR_COLORS)],
                 text=texts,
                 textposition="outside" if show_bar_text else None,
-                textangle=-90 if show_bar_text else 0,
+                textangle=0,
                 cliponaxis=False,
             )
         )
 
     fig_width = max(560, min(72 * n_depts + 40 * n_periods, 1400))
     fig.update_layout(
-        title=dict(
-            text="ДОЛЯ ОТМЕНЫ/ПРОИГРЫША СДЕЛОК",
-            x=0.5,
-            xanchor="center",
-            font=dict(size=13),
+        title=chart_title_caps(
+            _chart_title_with_departments("Доля отмены/проигрыша сделок", tile, catalog)
         ),
         width=fig_width,
         height=560,
@@ -1903,7 +1929,11 @@ def _render_deals_outcome_share_chart(series: dict, tile: Tile) -> go.Figure:
         template="plotly_white",
     )
     fig.update_xaxes(type="category", tickangle=-25 if n_depts > 4 else 0, automargin=True)
-    fig.update_yaxes(visible=False, showgrid=False, range=[0, 100])
+    ymax = 100.0
+    if show_bar_text and period_series:
+        peak = max(float(v) for period in period_series for v in period["values"])
+        ymax = max(100.0, peak * 1.18)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, ymax])
     return fig
 
 
@@ -2006,12 +2036,19 @@ def _deals_conversion_data(df: pd.DataFrame, tile: Tile) -> dict:
     }
 
 
-_CONVERSION_COMPANY_COLOR = "#C00000"
-_CONVERSION_HIGH_COLOR = "#548235"
+_CONVERSION_ABOVE_COLOR = "#548235"
 _CONVERSION_OTHER_COLOR = "#5B9BD5"
 
 
-def _render_deals_conversion_chart(series: dict, tile: Tile) -> go.Figure:
+def _conversion_bar_color(label: str, value: float, company_value: float | None) -> str:
+    if label == _COMPANY_ROW_LABEL:
+        return COMPANY_CHART_COLOR
+    if company_value is not None and value > company_value:
+        return _CONVERSION_ABOVE_COLOR
+    return _CONVERSION_OTHER_COLOR
+
+
+def _render_deals_conversion_chart(series: dict, tile: Tile, catalog: list[str]) -> go.Figure:
     points = sorted(series.get("points") or [], key=lambda item: -float(item["value"]))
     labels = [str(item["label"]) for item in points]
     values = [float(item["value"]) for item in points]
@@ -2019,14 +2056,10 @@ def _render_deals_conversion_chart(series: dict, tile: Tile) -> go.Figure:
         (float(item["value"]) for item in points if item.get("company")),
         None,
     )
-    colors = []
-    for item, value in zip(points, values):
-        if item.get("company"):
-            colors.append(_CONVERSION_COMPANY_COLOR)
-        elif company_value is not None and value > company_value:
-            colors.append(_CONVERSION_HIGH_COLOR)
-        else:
-            colors.append(_CONVERSION_OTHER_COLOR)
+    colors = [
+        _conversion_bar_color(str(item["label"]), value, company_value)
+        for item, value in zip(points, values)
+    ]
     texts = [f"{int(round(value))}%" for value in values]
     n = max(len(labels), 1)
     fig = go.Figure(
@@ -2045,7 +2078,7 @@ def _render_deals_conversion_chart(series: dict, tile: Tile) -> go.Figure:
     if period:
         title = f"{title} ({period})"
     fig.update_layout(
-        title=dict(text=title, x=0.5, xanchor="center", font=dict(size=14)),
+        title=chart_title_caps(_chart_title_with_departments(title, tile, catalog)),
         width=max(560, min(78 * n, 1280)),
         height=460,
         autosize=False,
@@ -2343,13 +2376,13 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 chart_type = tile.source.kind
                 try:
                     if chart_type == "deals_dynamics_departments":
-                        fig = _render_deals_dynamics_departments_chart(series, tile)
+                        fig = _render_deals_dynamics_departments_chart(series, tile, catalog)
                     elif chart_type == "deals_dynamics_outcome_share":
-                        fig = _render_deals_outcome_share_chart(series, tile)
+                        fig = _render_deals_outcome_share_chart(series, tile, catalog)
                     elif chart_type == "deals_conversion":
-                        fig = _render_deals_conversion_chart(series, tile)
+                        fig = _render_deals_conversion_chart(series, tile, catalog)
                     else:
-                        fig = _render_deals_dynamics_chart(series, tile)
+                        fig = _render_deals_dynamics_chart(series, tile, catalog)
                     plotly_json = fig.to_json()
                 except Exception as exc:
                     logger.warning("График динамики «%s» упал: %s", tile.title, exc)
@@ -2359,7 +2392,7 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                     for item in data.get("period_series") or []:
                         try:
                             period_charts.append(
-                                _render_deals_conversion_chart(item, tile).to_json()
+                                _render_deals_conversion_chart(item, tile, catalog).to_json()
                             )
                         except Exception as exc:
                             logger.warning("График конверсии «%s» упал: %s", tile.title, exc)

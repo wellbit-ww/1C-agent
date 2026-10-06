@@ -450,17 +450,18 @@ def test_in_work_stages_top_department_breakdowns():
     sum_stages = [item["stage"] for item in breakdown["by_sum"]]
     assert count_stages == [
         "Новая сделка",
-        "Согласование кп с контрагентом",
+        "Согласование КП с контрагентом",
         "Подготовка техрешения",
     ]
     assert sum_stages == [
         "Новая сделка",
-        "Согласование кп с контрагентом",
+        "Согласование КП с контрагентом",
         "Подготовка техрешения",
     ]
     new_deal = next(item for item in breakdown["by_count"] if item["stage"] == "Новая сделка")
     by_label = {row["label"]: row["values"] for row in new_deal["table"]["rows"]}
-    assert by_label["СИО и АПЛиС"][:2] == [9, 900]
+    assert by_label["ОАПЛиС"][:2] == [9, 900]
+    assert "СИО и АПЛиС" not in by_label
     assert by_label["Всего"][:2] == [9, 900]
 
 
@@ -598,6 +599,79 @@ def test_department_short_names():
     assert department_short("Служба микроэлектроники") == "СМЭ"
     assert department_short("Отдел АПЛиС") == "ОАПЛиС"
     assert department_short("СИО") == "СИО"
+    assert department_short("Сервисная служба") == "Сервис"
+    assert department_short("СС") == "Сервис"
+
+
+def test_stages_tab_period_prefers_statuses_tile_over_in_work():
+    from models.dashboard_spec import Tab, Tile, TileSource
+    from services.report_profiles.sales_profile import _normalize_stages_tab, _stages_tab_period
+
+    tiles = [
+        Tile(
+            title="Статусы сделок",
+            chart_type="table",
+            source=TileSource(kind="deal_statuses", period="half", variant="full"),
+            agg="sum",
+            top_n=50,
+            sort="none",
+        ),
+        Tile(
+            title="Сделки и заказы",
+            chart_type="table",
+            source=TileSource(kind="deal_statuses", period="quarter", variant="counts"),
+            agg="sum",
+            top_n=50,
+            sort="none",
+        ),
+        Tile(
+            title="В работе",
+            chart_type="table",
+            source=TileSource(kind="in_work_stages", period="quarter"),
+            agg="sum",
+            top_n=50,
+            sort="none",
+        ),
+    ]
+    assert _stages_tab_period(tiles) == "half"
+    tab = Tab(title="Этапы продаж", tiles=tiles)
+    _normalize_stages_tab(tab)
+    assert [t.source.period for t in tab.tiles] == ["half", "half", "half"]
+
+
+def test_enrich_migrates_halfyear_tile_title(sales_df):
+    from services.generic_dashboard import SALES_HALFYEAR_TILE_TITLE
+    from services.report_profiles.sales_profile import enrich_deals_tab
+
+    spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="Данные",
+                tiles=[
+                    Tile(
+                        title="Сделки и ЗК по полугодиям",
+                        chart_type="table",
+                        source={
+                            "kind": "halfyear",
+                            "group_semantic": "department",
+                            "period": "quarter",
+                        },
+                        agg="sum",
+                        top_n=50,
+                        sort="none",
+                    )
+                ],
+            )
+        ]
+    )
+    enrich_deals_tab(spec, sales_df)
+    halfyear = next(
+        tile
+        for tab in spec.tabs
+        for tile in tab.tiles
+        if tile.source.kind == "halfyear"
+    )
+    assert halfyear.title == SALES_HALFYEAR_TILE_TITLE
 
 
 def test_enrich_dynamics_replaces_pivot_tile(sales_df):
@@ -781,7 +855,7 @@ def test_deals_money_compares_same_period_last_year():
     by_label = {row["label"]: row["values"] for row in potential["rows"]}
     assert by_label["Совтест"] == [110, 240]
     assert by_label["СТЕ"] == [100, 200]
-    assert by_label["СС"] == [10, 40]
+    assert by_label["Сервис"] == [10, 40]
     orders = payload["money"]["metrics"][1]
     assert orders["rows"][0]["values"] == [60, 110]
 
@@ -820,17 +894,49 @@ def test_deals_conversion_includes_company_and_every_department():
     assert payload["chart_type"] == "deals_conversion"
     labels = [row["label"] for row in payload["table"]["rows"]]
     assert labels[0] == "Совтест"
-    assert set(labels) == {"Совтест", "СС", "СООК", "СМЭ"}
+    assert set(labels) == {"Совтест", "Сервис", "СООК", "СМЭ"}
     by_label = {row["label"]: row["values"][-1] for row in payload["table"]["rows"]}
     assert by_label["Совтест"] == 50
-    assert by_label["СС"] == 100
+    assert by_label["Сервис"] == 100
     assert by_label["СООК"] == 0
     assert payload["table"]["column_kinds"][0] == "percent"
     fig = json.loads(payload["plotly_json"])
-    assert fig["data"][0]["x"] == ["СС", "Совтест", "СООК", "СМЭ"]
+    assert fig["data"][0]["x"] == ["Сервис", "Совтест", "СООК", "СМЭ"]
     assert fig["data"][0]["marker"]["color"] == ["#548235", "#C00000", "#5B9BD5", "#5B9BD5"]
-    assert fig["layout"]["title"]["text"] == "Конверсия сделок в заказы (1 полуг. 2026)"
+    assert fig["layout"]["title"]["text"] == "КОНВЕРСИЯ СДЕЛОК В ЗАКАЗЫ (1 ПОЛУГ. 2026)"
     assert len(payload["period_charts"]) == len(payload["table"]["columns"])
+
+
+def test_chart_title_notes_excluded_departments():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба испытательного оборудования",
+                "Служба технологического оборудования",
+            ],
+            "дата начала сделки": pd.to_datetime(["2026-02-01", "2026-03-01"]),
+            "количество сделок": [2, 5],
+            "количество зк": [1, 1],
+        }
+    )
+    tile = Tile(
+        title="Конверсия",
+        chart_type="table",
+        source={
+            "kind": "deals_conversion",
+            "group_semantic": "department",
+            "period": "half",
+            "departments": ["СИО"],
+        },
+        agg="sum",
+        top_n=50,
+        sort="desc",
+    )
+    payload = render_spec(df, DashboardSpec(tabs=[Tab(title="T", tiles=[tile])]))["tabs"][0][
+        "tiles"
+    ][0]
+    fig = json.loads(payload["plotly_json"])
+    assert fig["layout"]["title"]["text"] == "КОНВЕРСИЯ СДЕЛОК В ЗАКАЗЫ (1 ПОЛУГ. 2026) (БЕЗ СТЕ)"
 
 
 def test_deals_dynamics_departments_grouped_chart():
@@ -978,9 +1084,9 @@ def test_outcome_share_chart_ranks_departments_by_share_desc():
     payload = render_spec(df, DashboardSpec(tabs=[Tab(title="Динамика", tiles=[tile])]))["tabs"][0][
         "tiles"
     ][0]
-    assert [row["label"] for row in payload["table"]["rows"]] == ["Совтест", "СМЭ", "СС"]
+    assert [row["label"] for row in payload["table"]["rows"]] == ["Совтест", "СМЭ", "Сервис"]
     fig = json.loads(payload["plotly_json"])
-    assert list(fig["data"][0]["x"]) == ["СС", "Совтест", "СМЭ"]
+    assert list(fig["data"][0]["x"]) == ["Сервис", "Совтест", "СМЭ"]
     by_label = {row["label"]: row["values"][-1] for row in payload["table"]["rows"]}
     assert [by_label[name] for name in fig["data"][0]["x"]] == [100, 9, 0]
 
@@ -1006,7 +1112,7 @@ def test_halfyear_splits_company_and_departments():
                 title="Сделки",
                 tiles=[
                     Tile(
-                        title="Сделки и ЗК по полугодиям",
+                        title="Сделки и ЗК в заданный период",
                         chart_type="table",
                         source={"kind": "halfyear", "group_semantic": "department"},
                         agg="sum",

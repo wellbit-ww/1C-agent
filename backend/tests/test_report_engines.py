@@ -52,7 +52,14 @@ class TestReportEngine:
         df = _sales_df()
         kpis = engine.get_kpis(df)
         labels = [k["label"] for k in kpis]
-        assert "Общая выручка" in labels
+        assert labels == [
+            "Количество сделок",
+            "Потенциальная сумма сделок",
+            "Сделки в работе",
+            "Сделки выиграны",
+            "Сделки проиграны",
+            "Сделки отменены",
+        ]
         insights = engine.get_insights(df)
         assert any("Альфа" in text or "Иванов" in text for text in insights)
         spec = engine.get_dashboard_spec(df)
@@ -71,13 +78,12 @@ class TestReportEngine:
             }
         )
         kpis = {item["label"]: item["raw_value"] for item in engine.get_kpis(df)}
-        assert kpis["Сумма сделок в воронке"] == pytest.approx(175.0)
-        assert kpis["Выиграно"] == pytest.approx(100.0)
-        assert kpis["Доля отменённых"] == pytest.approx(100.0 / 3)
-        assert "Общая выручка" not in kpis
-        text = engine.get_summary(df)
-        assert "Сумма сделок в воронке" in text
-        assert "Выиграно" in text
+        assert kpis["Количество сделок"] == pytest.approx(3.0)
+        assert kpis["Потенциальная сумма сделок"] == pytest.approx(175.0)
+        assert kpis["Сделки выиграны"] == pytest.approx(1.0)
+        assert kpis["Сделки отменены"] == pytest.approx(1.0)
+        assert kpis["Сделки в работе"] == pytest.approx(1.0)
+        assert kpis["Сделки проиграны"] == pytest.approx(0.0)
 
     def test_deficit_top_department(self):
         config = get_profile("deficit_report")

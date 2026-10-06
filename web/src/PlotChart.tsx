@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import Plotly from "plotly.js-dist-min";
 import { blobToDataUrl, copyImageBlobSync } from "./clipboard";
+import { CHART_TITLE_FONT_SIZE } from "./chartTitle";
 
 const DARK_TEMPLATE = {
   layout: {
@@ -29,6 +30,20 @@ type PlotlyFigure = {
   layout?: Record<string, unknown>;
 };
 
+function normalizeChartTitle(raw: unknown) {
+  if (raw == null || raw === "") return undefined;
+  const base: Record<string, unknown> =
+    typeof raw === "string" ? { text: raw } : { ...(raw as Record<string, unknown>) };
+  const prevFont =
+    base.font && typeof base.font === "object" ? (base.font as Record<string, unknown>) : {};
+  return {
+    x: 0.5,
+    xanchor: "center",
+    ...base,
+    font: { ...prevFont, size: CHART_TITLE_FONT_SIZE },
+  };
+}
+
 function chartLayout(fig: PlotlyFigure, theme: "dark" | "light") {
   const src = fig.layout || {};
   const srcMargin = (src.margin || {}) as Record<string, number>;
@@ -48,17 +63,42 @@ function chartLayout(fig: PlotlyFigure, theme: "dark" | "light") {
     ...(light
       ? { colorway: ["#c8102e", "#9f1239", "#e11d48", "#fb7185", "#7f1d1d", "#fda4af"] }
       : {}),
-    margin: {
-      l: Math.max(64, srcMargin.l ?? 0),
-      r: Math.max(16, srcMargin.r ?? 0),
-      t: Math.max(48, srcMargin.t ?? 0),
-      b: Math.max(110, srcMargin.b ?? 0),
-    },
   };
+  const normalizedTitle = normalizeChartTitle(src.title);
+  if (normalizedTitle) layout.title = normalizedTitle;
   const traces = Array.isArray(fig.data) ? fig.data : [];
   const isPie = traces.some(
     (t) => t && typeof t === "object" && (t as { type?: string }).type === "pie",
   );
+  if (isPie) {
+    layout.margin = {
+      l: Math.max(24, srcMargin.l ?? 0),
+      r: Math.max(24, srcMargin.r ?? 0),
+      t: Math.max(56, srcMargin.t ?? 0),
+      b: Math.max(96, srcMargin.b ?? 0),
+    };
+    const legend = (src.legend && typeof src.legend === "object" ? src.legend : {}) as Record<
+      string,
+      unknown
+    >;
+    layout.legend = {
+      ...legend,
+      orientation: "h",
+      x: 0.5,
+      xanchor: "center",
+      font: {
+        color: light ? "#1f2937" : "#c5cad3",
+        size: 11,
+      },
+    };
+  } else {
+    layout.margin = {
+      l: Math.max(64, srcMargin.l ?? 0),
+      r: Math.max(16, srcMargin.r ?? 0),
+      t: Math.max(48, srcMargin.t ?? 0),
+      b: Math.max(110, srcMargin.b ?? 0),
+    };
+  }
   if (!isPie) {
     const xaxis = (src.xaxis && typeof src.xaxis === "object" ? src.xaxis : {}) as Record<
       string,
@@ -73,12 +113,6 @@ function chartLayout(fig: PlotlyFigure, theme: "dark" | "light") {
       : {};
     layout.xaxis = { automargin: true, tickangle: -35, ...xaxis, ...axisInk };
     layout.yaxis = { automargin: true, ...yaxis, ...axisInk };
-  } else if (light) {
-    const legend = (src.legend && typeof src.legend === "object" ? src.legend : {}) as Record<
-      string,
-      unknown
-    >;
-    layout.legend = { ...legend, font: { color: "#1f2937", size: 11 } };
   }
   return { layout, isPie };
 }
