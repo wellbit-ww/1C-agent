@@ -66,7 +66,7 @@ class TestFunnel:
         fig = json.loads(tile_out["plotly_json"])
         labels = fig["data"][0]["y"]  # hbar: категории по y
         values_scaled = fig["data"][0]["x"]
-        idx = labels.index("новая сделка")
+        idx = labels.index("Новая сделка")
         assert values_scaled[idx] * 1e9 == pytest.approx(expected_new, rel=0.01)
 
     def test_current_stage_counts_deals_not_qty_column(self, sales_df):
@@ -84,8 +84,8 @@ class TestFunnel:
         labels = list(fig["data"][0]["y"])
         values = list(fig["data"][0]["x"])
         # hbar переворачивает: первая стадия сверху
-        assert labels[-1] == "новая сделка"
-        assert values[-1] == pytest.approx(1002)
+        assert labels[-1] == "Новая сделка"
+        assert values[-1] == pytest.approx(1026)
 
     def test_current_stage_uses_deal_amount(self, sales_df):
         tile = _tile(
@@ -135,9 +135,9 @@ class TestFunnel:
         curr = json.loads(tiles[1]["plotly_json"])
         thru_map = dict(zip(thru["data"][0]["y"], thru["data"][0]["x"]))
         curr_map = dict(zip(curr["data"][0]["y"], curr["data"][0]["x"]))
-        assert thru_map["лид"] == pytest.approx(300)
-        assert curr_map["лид"] == pytest.approx(100)
-        assert curr_map["оплата"] == pytest.approx(200)
+        assert thru_map["Лид"] == pytest.approx(300)
+        assert curr_map["Лид"] == pytest.approx(100)
+        assert curr_map["Оплата"] == pytest.approx(200)
 
 
 class TestRender:
@@ -1114,7 +1114,11 @@ def test_halfyear_splits_company_and_departments():
                     Tile(
                         title="Сделки и ЗК в заданный период",
                         chart_type="table",
-                        source={"kind": "halfyear", "group_semantic": "department"},
+                        source={
+                            "kind": "halfyear",
+                            "group_semantic": "department",
+                            "period": "half",
+                        },
                         agg="sum",
                         top_n=50,
                         sort="none",

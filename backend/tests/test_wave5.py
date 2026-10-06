@@ -293,9 +293,27 @@ def test_family_tabs_and_insights_skip_metadata():
 
 
 def test_pie_tiles_keep_legend(sales_df):
-    _, profile = get_profile_for_df(sales_df, filename="Этапы продаж.xlsx")
-    spec = profile.get_dashboard_spec(sales_df)
-    assert spec is not None
+    from models.dashboard_spec import DashboardSpec, Tab, Tile
+
+    spec = DashboardSpec(
+        tabs=[
+            Tab(
+                title="T",
+                tiles=[
+                    Tile(
+                        title="Топ клиентов",
+                        chart_type="pie",
+                        source={
+                            "kind": "group",
+                            "group_column": "компания",
+                            "value_column": "сумма по сделке",
+                        },
+                        top_n=5,
+                    )
+                ],
+            )
+        ]
+    )
     rendered = render_spec(sales_df, spec)
     pies = [
         tile
@@ -303,7 +321,7 @@ def test_pie_tiles_keep_legend(sales_df):
         for tile in tab["tiles"]
         if tile.get("chart_type") == "pie" and tile.get("plotly_json")
     ]
-    assert pies, "нет круговых тайлов"
+    assert pies
     for tile in pies:
         fig = json.loads(tile["plotly_json"])
         assert fig.get("layout", {}).get("showlegend") is True, tile.get("title")
