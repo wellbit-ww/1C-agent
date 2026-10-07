@@ -603,6 +603,106 @@ def test_department_short_names():
     assert department_short("СС") == "Сервис"
 
 
+def _stages_deal_list_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "номер сделки": ["УП-00000001", "УП-00000002", "УП-00000003"],
+            "статус": ["В работе", "Выиграна", "В работе"],
+            "ответственный": ["Иванов", "Петров", "Иванов"],
+            "подразделение": ["СТО", "СТЕ", "СТО"],
+            "компания": ["Альфа", "Бета", "Гамма"],
+            "сумма по сделке": [100.0, 50.0, 400.0],
+            "новая сделка (сумма)": [100.0, 50.0, 0.0],
+            "подготовка техрешения (сумма)": [0.0, 0.0, 400.0],
+        }
+    )
+
+
+def test_stages_deal_list_default_top_stage():
+    from services.dashboard_engine import default_top_stage_label, _named_column, _stage_amount_columns
+
+    df = _stages_deal_list_df()
+    deal_s = _named_column(df, "сумма по сделке")
+    cols = _stage_amount_columns(df)
+    assert default_top_stage_label(df, cols, deal_s) == "Подготовка техрешения"
+
+
+def test_stages_deal_list_filters():
+    df = _stages_deal_list_df()
+    tile = Tile(
+        title="Список сделок",
+        chart_type="table",
+        source={
+            "kind": "stages_deal_list",
+            "stages": ["Подготовка техрешения"],
+            "departments": ["СТО"],
+            "managers": ["Иванов"],
+            "min_potential": 200,
+        },
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    payload = render_spec(df, DashboardSpec(tabs=[Tab(title="Этапы продаж", tiles=[tile])]))[
+        "tabs"
+    ][0]["tiles"][0]
+    assert payload["chart_type"] == "stages_deal_list"
+    assert payload["deals_list"]["total_matched"] == 1
+    assert payload["deals_list"]["rows"][0]["cells"][0] == "УП-00000003"
+    assert payload["deals_list"]["rows"][0]["cells"][1] == "Гамма"
+    assert payload["deals_list"]["rows"][0]["cells"][6] == 400
+
+
+def test_stages_deal_list_status_filter_and_sort():
+    df = _stages_deal_list_df()
+    tile = Tile(
+        title="Список сделок",
+        chart_type="table",
+        source={
+            "kind": "stages_deal_list",
+            "stages": ["Новая сделка", "Подготовка техрешения"],
+            "statuses": ["Выиграна"],
+        },
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    payload = render_spec(df, DashboardSpec(tabs=[Tab(title="Этапы продаж", tiles=[tile])]))[
+        "tabs"
+    ][0]["tiles"][0]
+    assert payload["deals_list"]["total_matched"] == 1
+    assert payload["deals_list"]["rows"][0]["cells"][0] == "УП-00000002"
+    assert payload["deals_list"]["rows"][0]["cells"][1] == "Бета"
+
+    tile.source.list_sort_column = "Сделка"
+    tile.sort = "asc"
+    payload2 = render_spec(df, DashboardSpec(tabs=[Tab(title="Этапы продаж", tiles=[tile])]))[
+        "tabs"
+    ][0]["tiles"][0]
+    names = [row["cells"][1] for row in payload2["deals_list"]["rows"]]
+    assert names == sorted(names, key=lambda item: str(item).casefold())
+
+
+def test_ensure_stages_deal_list_tile_and_normalize_preserve_filters(sales_df):
+    from services.report_profiles.sales_profile import (
+        ensure_stages_deal_list_tile,
+        enrich_deals_tab,
+    )
+
+    spec = DashboardSpec(tabs=[Tab(title="Этапы продаж", tiles=[])])
+    ensure_stages_deal_list_tile(spec, sales_df)
+    assert len(spec.tabs[0].tiles) == 1
+    assert spec.tabs[0].tiles[0].source.kind == "stages_deal_list"
+    assert spec.tabs[0].tiles[0].source.stages
+
+    spec.tabs[0].tiles[0].source.min_potential = 1_000_000
+    enrich_deals_tab(spec, sales_df)
+    stages = next(tab for tab in spec.tabs if tab.title == "Этапы продаж")
+    deal_list = next(tile for tile in stages.tiles if tile.source.kind == "stages_deal_list")
+    assert deal_list.source.min_potential == 1_000_000
+    assert len(stages.tiles) == 4
+
+
 def test_stages_tab_period_prefers_statuses_tile_over_in_work():
     from models.dashboard_spec import Tab, Tile, TileSource
     from services.report_profiles.sales_profile import _normalize_stages_tab, _stages_tab_period

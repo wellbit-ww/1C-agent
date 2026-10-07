@@ -32,7 +32,8 @@ class TileSource(BaseModel):
     deals_conversion — вкладка «Конверсия»: заказы (ЗК) / сделки, % по компании и всем подразделениям;
     deals_money — вкладка «Деньги»: потенциал сделок и сумма заказов, сравнение с тем же периодом год назад;
     deal_statuses — вкладка «Этапы продаж»: статусы сделок и заказов по периодам;
-    in_work_stages — сделки со статусом «В работе» по текущему этапу.
+    in_work_stages — сделки со статусом «В работе» по текущему этапу;
+    stages_deal_list — список сделок на вкладке «Этапы продаж» с фильтрами по этапу, службе, ответственному, статусу и порогу потенциала; list_sort_column + sort задают сортировку таблицы.
     """
 
     kind: Literal[
@@ -52,6 +53,7 @@ class TileSource(BaseModel):
         "deals_money",
         "deal_statuses",
         "in_work_stages",
+        "stages_deal_list",
     ]
     group_semantic: str | None = None
     group_column: str | None = None
@@ -61,6 +63,11 @@ class TileSource(BaseModel):
     column_names: list[str] | None = None
     period: PeriodType | None = None
     departments: list[str] | None = None
+    stages: list[str] | None = None
+    managers: list[str] | None = None
+    statuses: list[str] | None = None
+    min_potential: float | None = None
+    list_sort_column: str | None = None
     variant: Literal["full", "counts"] | None = None
 
 
@@ -69,7 +76,7 @@ class Tile(BaseModel):
     chart_type: ChartType = "bar"
     source: TileSource
     agg: AggType = "sum"
-    top_n: int = Field(default=10, ge=1, le=50)
+    top_n: int = Field(default=10, ge=1, le=500)
     unit: UnitType = "auto"
     target_line: float | None = None
     sort: Literal["desc", "asc", "none"] = "desc"

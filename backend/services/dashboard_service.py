@@ -203,6 +203,7 @@ _VALID_KINDS = {
     "deals_money",
     "deal_statuses",
     "in_work_stages",
+    "stages_deal_list",
 }
 _VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
@@ -317,6 +318,7 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deals_dynamics_outcome_share",
         "deals_conversion",
         "deals_money",
+        "stages_deal_list",
     ):
         kind = "pivot"
 
@@ -364,20 +366,47 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deals_money",
         "deal_statuses",
         "in_work_stages",
+        "stages_deal_list",
     ):
+        if kind == "stages_deal_list":
+            src["kind"] = "stages_deal_list"
+            chart = "table"
+            for key in ("stages", "managers", "statuses"):
+                raw = source.get(key)
+                if isinstance(raw, list):
+                    cleaned = []
+                    for item in raw:
+                        text = str(item).strip()
+                        if text and text not in cleaned:
+                            cleaned.append(text[:80])
+                    if cleaned:
+                        src[key] = cleaned[:40]
+            sort_col = source.get("list_sort_column")
+            if isinstance(sort_col, str) and sort_col.strip():
+                src["list_sort_column"] = sort_col.strip()[:40]
+            try:
+                min_pot = source.get("min_potential")
+                if min_pot is not None and str(min_pot).strip() != "":
+                    src["min_potential"] = float(min_pot)
+            except (TypeError, ValueError):
+                pass
         group_column = _best_column(df, source.get("group_column"))
         if group_column:
             src["group_column"] = group_column
         elif source.get("group_semantic"):
             src["group_semantic"] = source["group_semantic"]
-        else:
+        elif kind != "stages_deal_list":
             src["group_semantic"] = "department"
-        default_period = "quarter"
-        period = str(source.get("period") or default_period).lower()
-        src["period"] = period if period in _VALID_PERIODS else default_period
+        if kind != "stages_deal_list":
+            default_period = "quarter"
+            period = str(source.get("period") or default_period).lower()
+            src["period"] = period if period in _VALID_PERIODS else default_period
         if source.get("variant") in ("full", "counts"):
             src["variant"] = source["variant"]
-        chart = "table"
+        if kind != "stages_deal_list":
+            chart = "table"
+        elif chart != "table":
+            chart = "table"
     elif kind == "pivot":
         group_column = _best_column(df, source.get("group_column"))
         if group_column:
@@ -451,7 +480,7 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "chart_type": chart,
         "source": src,
         "agg": agg,
-        "top_n": max(1, min(50, top_n)),
+        "top_n": max(1, min(500 if kind == "stages_deal_list" else 50, top_n)),
         "unit": unit,
         "sort": sort,
     }

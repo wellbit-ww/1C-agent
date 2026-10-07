@@ -125,6 +125,59 @@ def _in_work_stages_tile(period: str = "quarter") -> Tile:
     )
 
 
+def _stages_deal_list_tile() -> Tile:
+    return Tile(
+        title="Список сделок",
+        chart_type="table",
+        source=TileSource(kind="stages_deal_list"),
+        agg="sum",
+        top_n=200,
+        sort="none",
+    )
+
+
+def _seed_stages_deal_list_defaults(tile: Tile, df: pd.DataFrame) -> None:
+    if tile.source.kind != "stages_deal_list":
+        return
+    if tile.source.stages:
+        return
+    from services.dashboard_engine import (
+        _named_column,
+        _stage_amount_columns,
+        default_top_stage_label,
+    )
+
+    deal_s = _named_column(df, "сумма по сделке")
+    stage_cols = _stage_amount_columns(df)
+    if not deal_s or not stage_cols:
+        return
+    top = default_top_stage_label(df, stage_cols, deal_s)
+    if top:
+        tile.source.stages = [top]
+
+
+def ensure_stages_deal_list_tile(spec: DashboardSpec, df: pd.DataFrame | None = None) -> DashboardSpec:
+    for tab in spec.tabs:
+        if tab.title != SALES_STAGES_TAB_TITLE:
+            continue
+        existing = next(
+            (tile for tile in tab.tiles if tile.source.kind == "stages_deal_list"),
+            None,
+        )
+        if existing is not None:
+            if df is not None:
+                _seed_stages_deal_list_defaults(existing, df)
+            return spec
+        if len(tab.tiles) >= 8:
+            return spec
+        tile = _stages_deal_list_tile()
+        if df is not None:
+            _seed_stages_deal_list_defaults(tile, df)
+        tab.tiles.append(tile)
+        return spec
+    return spec
+
+
 def _stages_tab() -> Tab:
     return Tab(
         title=SALES_STAGES_TAB_TITLE,
@@ -169,8 +222,15 @@ def _normalize_stages_tab(stages_tab: Tab) -> None:
             titles["counts"] = tile.title
         elif kind == "in_work_stages":
             titles["in_work"] = tile.title
+        elif kind == "stages_deal_list":
+            titles["deal_list"] = tile.title
         elif tile.chart_type == "table" and "этап" in tile.title.lower():
             titles.setdefault("in_work", tile.title)
+
+    deal_list_tile = next(
+        (tile for tile in stages_tab.tiles if tile.source.kind == "stages_deal_list"),
+        None,
+    )
 
     full = _stages_status_tile(period, "full")
     counts = _stages_status_tile(period, "counts")
@@ -184,6 +244,10 @@ def _normalize_stages_tab(stages_tab: Tab) -> None:
         if custom.strip().lower() != "сделки по этапам":
             in_work.title = custom
     stages_tab.tiles = [full, counts, in_work]
+    if deal_list_tile is not None:
+        if "deal_list" in titles:
+            deal_list_tile.title = titles["deal_list"]
+        stages_tab.tiles.append(deal_list_tile)
 
 
 def _dynamics_tab() -> Tab:
@@ -391,7 +455,8 @@ def enrich_deals_tab(spec: DashboardSpec, df: pd.DataFrame | None = None) -> Das
     spec = ensure_status_summary_tile(ensure_halfyear_tile(ensure_outcome_tile(spec)))
     spec = ensure_dynamics_deals_tile(spec)
     spec = ensure_conversion_tile(spec)
-    return ensure_money_tile(spec)
+    spec = ensure_money_tile(spec)
+    return ensure_stages_deal_list_tile(spec, df)
 
 
 def ensure_status_summary_tile(spec: DashboardSpec) -> DashboardSpec:

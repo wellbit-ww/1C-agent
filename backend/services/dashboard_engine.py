@@ -887,6 +887,18 @@ def _named_column(df: pd.DataFrame, name: str) -> str | None:
     return None
 
 
+def _deal_number_column(df: pd.DataFrame) -> str | None:
+    """Колонка «Номер сделки» (УП-00001234) в выгрузке воронки 1С."""
+    exact = _named_column(df, "номер сделки")
+    if exact:
+        return exact
+    for col in df.columns:
+        text = str(col).lower().replace("ё", "е")
+        if "номер" in text and "сдел" in text:
+            return str(col)
+    return None
+
+
 def _half_percent(part: float, whole: float, digits: int) -> float | None:
     if whole <= 0:
         return None
@@ -1295,6 +1307,246 @@ def _in_work_stages_data(df: pd.DataFrame, tile: Tile) -> dict:
     if not sections:
         return {"error": "Нет сделок в выбранных периодах"}
     return {"sections": sections, "bucket_period": bucket_mode}
+
+
+def stage_catalog(df: pd.DataFrame) -> list[str]:
+    cols = _stage_amount_columns(df)
+    return [_pretty_stage_label(label) for label in _stage_labels(cols, "(сумма)")]
+
+
+def default_top_stage_label(df: pd.DataFrame, stage_cols: list[str], deal_s: str) -> str:
+    labels = [_pretty_stage_label(label) for label in _stage_labels(stage_cols, "(сумма)")]
+    if not labels:
+        return ""
+    stage_idx = _funnel_current_stage_index(df, stage_cols)
+    potential = pd.to_numeric(df[deal_s], errors="coerce").fillna(0)
+    totals: dict[str, float] = {label: 0.0 for label in labels}
+    for index, label in enumerate(labels):
+        mask = stage_idx == index
+        totals[label] = float(potential.loc[mask].sum())
+    return max(totals.items(), key=lambda item: item[1])[0]
+
+
+def status_catalog(df: pd.DataFrame) -> list[str]:
+    status_col = _status_column(df)
+    if not status_col or status_col not in df.columns:
+        return list(_STATUS_SUMMARY_ORDER)
+    normalized = df[status_col].map(_normalize_deal_status)
+    seen: list[str] = []
+    for label in _STATUS_SUMMARY_ORDER:
+        if (normalized == label).any():
+            seen.append(label)
+    for label in sorted({str(item) for item in normalized if str(item).strip()}, key=str.casefold):
+        if label not in seen:
+            seen.append(label)
+    return seen
+
+
+def manager_catalog(df: pd.DataFrame, department_labels: set[str] | None = None) -> list[str]:
+    from services.column_resolver import resolve_semantic_column
+
+    mgr_col = resolve_semantic_column(df, "", "manager", dtype="categorical")
+    dept_col = resolve_semantic_column(df, "", "department", dtype="categorical")
+    if not mgr_col or mgr_col not in df.columns:
+        return []
+    work = df
+    if department_labels and dept_col and dept_col in df.columns:
+        names = _department_labels(work[dept_col].astype(str).str.strip())
+        work = work.loc[names.isin(department_labels)]
+    managers = work[mgr_col].astype(str).str.strip()
+    blank = managers.str.lower().isin({"", "nan", "-", "none"})
+    seen: list[str] = []
+    for name in managers.loc[~blank]:
+        if name not in seen:
+            seen.append(name)
+    return sorted(seen, key=lambda item: item.casefold())
+
+
+def _selected_manager_labels(tile: Tile) -> set[str] | None:
+    raw = tile.source.managers
+    if not raw:
+        return None
+    labels = {str(item).strip() for item in raw if str(item).strip()}
+    return labels or None
+
+
+def _selected_status_labels(tile: Tile) -> set[str] | None:
+    raw = tile.source.statuses
+    if not raw:
+        return None
+    labels = {str(item).strip() for item in raw if str(item).strip()}
+    return labels or None
+
+
+_DEAL_LIST_COLUMNS = (
+    "УП",
+    "Сделка",
+    "Статус",
+    "Этап",
+    "Подразделение",
+    "Ответственный",
+    "Потенциал",
+)
+_DEAL_LIST_SORT_FIELDS = {
+    "УП": "_deal_no",
+    "Сделка": "_client",
+    "Статус": "_status",
+    "Этап": "_stage",
+    "Подразделение": "_dept",
+    "Ответственный": "_manager",
+    "Потенциал": "_potential",
+}
+
+
+def _sort_stages_deal_list(work: pd.DataFrame, tile: Tile) -> pd.DataFrame:
+    sort_col = tile.source.list_sort_column or "Потенциал"
+    if sort_col not in _DEAL_LIST_SORT_FIELDS:
+        sort_col = "Потенциал"
+    field = _DEAL_LIST_SORT_FIELDS[sort_col]
+    ascending = tile.sort == "asc"
+    if tile.sort == "none" and not tile.source.list_sort_column:
+        field = "_potential"
+        ascending = False
+    return work.sort_values(field, ascending=ascending, kind="mergesort")
+
+
+def _resolved_stage_filters(tile: Tile, catalog: list[str], df: pd.DataFrame, deal_s: str) -> list[str]:
+    stage_cols = _stage_amount_columns(df)
+    raw = tile.source.stages
+    if raw:
+        picked = [str(item).strip() for item in raw if str(item).strip()]
+        return [label for label in picked if label in catalog]
+    if stage_cols and deal_s:
+        top = default_top_stage_label(df, stage_cols, deal_s)
+        return [top] if top else []
+    return []
+
+
+def _stages_deal_list_data(df: pd.DataFrame, tile: Tile) -> dict:
+    """Строки сделок по текущему этапу воронки и фильтрам спеки."""
+    from services.column_resolver import resolve_semantic_column
+
+    status_col = _status_column(df)
+    deal_s = _named_column(df, "сумма по сделке")
+    stage_cols = _stage_amount_columns(df)
+    if not deal_s:
+        return {"error": "Нет колонки суммы по сделке"}
+    if not stage_cols:
+        return {"error": "Нет колонок этапов"}
+
+    catalog = stage_catalog(df)
+    resolved_stages = _resolved_stage_filters(tile, catalog, df, deal_s)
+    if not resolved_stages:
+        return {"error": "Не удалось определить этапы для фильтра"}
+
+    dept_col = resolve_semantic_column(df, "", "department", dtype="categorical")
+    mgr_col = resolve_semantic_column(df, "", "manager", dtype="categorical")
+    client_col = resolve_semantic_column(df, "", "client", dtype="categorical")
+    deal_no_col = _deal_number_column(df)
+
+    work = df.copy()
+    work["_stage_idx"] = _funnel_current_stage_index(work, stage_cols)
+    labels = [_pretty_stage_label(label) for label in _stage_labels(stage_cols, "(сумма)")]
+    work["_stage"] = work["_stage_idx"].map(
+        lambda idx: labels[int(idx)] if 0 <= int(idx) < len(labels) else "Не указан"
+    )
+    work["_potential"] = pd.to_numeric(work[deal_s], errors="coerce").fillna(0)
+    if status_col:
+        work["_status"] = work[status_col].map(_normalize_deal_status)
+    else:
+        work["_status"] = ""
+
+    if dept_col and dept_col in work.columns:
+        work["_dept"] = _department_labels(work[dept_col].astype(str).str.strip())
+    else:
+        work["_dept"] = ""
+
+    if mgr_col and mgr_col in work.columns:
+        work["_manager"] = work[mgr_col].astype(str).str.strip()
+    else:
+        work["_manager"] = ""
+
+    if client_col and client_col in work.columns:
+        work["_client"] = work[client_col].astype(str).str.strip()
+    else:
+        work["_client"] = ""
+
+    if deal_no_col and deal_no_col in work.columns:
+        work["_deal_no"] = work[deal_no_col].astype(str).str.strip()
+    else:
+        work["_deal_no"] = ""
+
+    work = work.loc[work["_stage"].isin(resolved_stages)]
+
+    selected_depts = _selected_department_labels(tile)
+    if selected_depts:
+        work = work.loc[work["_dept"].isin(selected_depts)]
+
+    selected_mgrs = _selected_manager_labels(tile)
+    if selected_mgrs:
+        work = work.loc[work["_manager"].isin(selected_mgrs)]
+
+    selected_statuses = _selected_status_labels(tile)
+    if selected_statuses:
+        work = work.loc[work["_status"].isin(selected_statuses)]
+
+    min_pot = tile.source.min_potential
+    if min_pot is not None and float(min_pot) > 0:
+        work = work.loc[work["_potential"] >= float(min_pot)]
+
+    work = _sort_stages_deal_list(work, tile)
+    total_matched = int(len(work))
+    limit = max(1, min(500, int(tile.top_n or 200)))
+    truncated = total_matched > limit
+    work = work.head(limit)
+
+    columns = list(_DEAL_LIST_COLUMNS)
+    rows = []
+    for _, row in work.iterrows():
+        deal_no = str(row["_deal_no"] or "").strip()
+        if deal_no.lower() in {"", "nan", "-", "none"}:
+            deal_no = "—"
+        client = str(row["_client"] or "").strip()
+        if client.lower() in {"", "nan", "-", "none"}:
+            client = "—"
+        rows.append(
+            {
+                "cells": [
+                    deal_no,
+                    client,
+                    str(row["_status"] or "—"),
+                    str(row["_stage"] or "—"),
+                    str(row["_dept"] or "—"),
+                    str(row["_manager"] or "—"),
+                    _json_number(row["_potential"]),
+                ]
+            }
+        )
+
+    dept_catalog = department_catalog(df)
+    mgr_catalog = manager_catalog(df, selected_depts)
+
+    top_default = default_top_stage_label(df, stage_cols, deal_s) if stage_cols else ""
+
+    return {
+        "groups": {},
+        "deals_list": {
+            "columns": columns,
+            "rows": rows,
+            "truncated": truncated,
+            "total_matched": total_matched,
+        },
+        "filter_meta": {
+            "stages": catalog,
+            "departments": dept_catalog,
+            "managers": mgr_catalog,
+            "statuses": status_catalog(df),
+            "default_stages": [top_default] if top_default else [],
+            "resolved_stages": resolved_stages,
+            "sort_column": tile.source.list_sort_column or "Потенциал",
+            "sort_dir": "asc" if tile.sort == "asc" else "desc",
+        },
+    }
 
 
 def _deals_zk_bucket_mode(tile: Tile) -> str:
@@ -2210,6 +2462,8 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _deal_statuses_data(df, tile)
     if kind == "in_work_stages":
         return _in_work_stages_data(df, tile)
+    if kind == "stages_deal_list":
+        return _stages_deal_list_data(df, tile)
     if kind == "deals_dynamics":
         return _deals_dynamics_data(df, tile)
     if kind == "deals_dynamics_departments":
@@ -2352,6 +2606,18 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 if data.get("bucket_period"):
                     payload["bucket_period"] = data["bucket_period"]
                 emit(payload)
+                continue
+
+            if tile.source.kind == "stages_deal_list" and data.get("deals_list"):
+                emit(
+                    {
+                        "title": tile.title,
+                        "chart_type": "stages_deal_list",
+                        "deals_list": data["deals_list"],
+                        "filter_meta": data.get("filter_meta"),
+                        "departments": catalog,
+                    }
+                )
                 continue
 
             if tile.source.kind == "deals_money" and data.get("money"):

@@ -57,6 +57,26 @@ export type MoneyRow = { label: string; company?: boolean; values: number[] };
 export type MoneyMetric = { title: string; rows: MoneyRow[] };
 export type MoneyBoard = { periods: MoneyPeriod[]; metrics: MoneyMetric[] };
 
+export type DealsListRow = { cells: (string | number)[] };
+
+export type DealsListPayload = {
+  columns: string[];
+  rows: DealsListRow[];
+  truncated: boolean;
+  total_matched: number;
+};
+
+export type DealsListFilterMeta = {
+  stages: string[];
+  departments: string[];
+  managers: string[];
+  statuses: string[];
+  default_stages: string[];
+  resolved_stages: string[];
+  sort_column?: string;
+  sort_dir?: "asc" | "desc";
+};
+
 export type Tile = {
   title: string;
   plotly_json?: string;
@@ -67,6 +87,8 @@ export type Tile = {
   period_charts?: string[];
   money?: MoneyBoard;
   departments?: string[];
+  deals_list?: DealsListPayload;
+  filter_meta?: DealsListFilterMeta;
   error?: string;
 };
 
@@ -95,6 +117,11 @@ export type TileSpec = {
     column_names?: string[];
     period?: string;
     departments?: string[];
+    stages?: string[];
+    managers?: string[];
+    statuses?: string[];
+    min_potential?: number | null;
+    list_sort_column?: string | null;
     variant?: "full" | "counts";
   };
 };

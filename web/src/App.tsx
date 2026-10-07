@@ -7,6 +7,7 @@ import { COMPANY_CHART_COLOR, departmentChartColor } from "./deptColors";
 import { formatStageLabel } from "./stageLabel";
 import { BriefSummary } from "./BriefSummary";
 import { PlotChart } from "./PlotChart";
+import { dealsListToGrid, StagesDealListView, type DealsListFiltersPatch } from "./StagesDealList";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
 import type {
@@ -1587,6 +1588,44 @@ export function App() {
     if (noticeText) setNotice(noticeText);
   }
 
+  async function onTileFiltersPatch(tabI: number, tileI: number, filters: DealsListFiltersPatch) {
+    const spec = dashboard?.spec;
+    if (!spec || !fileId) return;
+    const next: DashSpec = {
+      tabs: spec.tabs.map((t, ti) =>
+        ti !== tabI
+          ? t
+          : {
+              ...t,
+              tiles: t.tiles.map((item, ij) => {
+                if (ij !== tileI) return item;
+                const { sort, list_sort_column, ...sourcePatch } = filters;
+                const nextSource = { ...item.source, ...sourcePatch };
+                if (list_sort_column !== undefined) {
+                  if (list_sort_column) nextSource.list_sort_column = list_sort_column;
+                  else delete nextSource.list_sort_column;
+                }
+                return {
+                  ...item,
+                  ...(sort !== undefined ? { sort } : {}),
+                  source: nextSource,
+                };
+              }),
+            },
+      ),
+    };
+    setBusy("Обновляю список…");
+    setError(null);
+    try {
+      const patch = await api.dashboardSaveSpec(fileId, next);
+      await applyDashboardPatch(patch, next);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function onTilePeriodBucket(
     tabI: number,
     tileI: number,
@@ -1648,7 +1687,13 @@ export function App() {
   }
 
   async function onCopyTable(tile: Tile) {
-    const grid = tile.sections ? sectionsToGrid(tile.sections) : tile.table ? pivotToGrid(tile.table) : null;
+    const grid = tile.sections
+      ? sectionsToGrid(tile.sections)
+      : tile.deals_list
+        ? dealsListToGrid(tile.deals_list)
+        : tile.table
+          ? pivotToGrid(tile.table)
+          : null;
     if (!grid) return;
     setError(null);
     try {
@@ -1938,6 +1983,9 @@ export function App() {
                           tile.chart_type === "deals_conversion";
                         const moneyTile =
                           specTile?.source?.kind === "deals_money" || tile.chart_type === "deals_money";
+                        const stagesDealListTile =
+                          specTile?.source?.kind === "stages_deal_list" ||
+                          tile.chart_type === "stages_deal_list";
                         const periodBucketTile =
                           specTile?.source?.kind === "halfyear" ||
                           specTile?.source?.kind === "pivot" ||
@@ -1991,7 +2039,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${(tile.table || tile.sections || tile.money || dynamicsTile || conversionTile || moneyTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${(tile.table || tile.sections || tile.money || tile.deals_list || dynamicsTile || conversionTile || moneyTile || stagesDealListTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -2039,7 +2087,7 @@ export function App() {
                                   Настроить
                                 </button>
                               )}
-                              {(tile.table || tile.sections) && (
+                              {(tile.table || tile.sections || tile.deals_list) && (
                                 <button
                                   type="button"
                                   className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
@@ -2068,6 +2116,17 @@ export function App() {
                           </div>
                           {tile.error ? (
                             <p className="text-sm text-amber-300">{tile.error}</p>
+                          ) : stagesDealListTile && tile.deals_list && tile.filter_meta && specTile ? (
+                            <StagesDealListView
+                              key={`${tile.title}-${(specTile.source.stages ?? []).join("|")}-${(specTile.source.departments ?? []).join("|")}-${(specTile.source.managers ?? []).join("|")}-${specTile.source.min_potential ?? ""}`}
+                              dealsList={tile.deals_list}
+                              filterMeta={tile.filter_meta}
+                              deptCatalog={tile.departments ?? tile.filter_meta.departments}
+                              specSource={specTile.source}
+                              specSort={specTile.sort}
+                              busy={!!busy}
+                              onApply={(patch) => void onTileFiltersPatch(tab, tileI, patch)}
+                            />
                           ) : moneyTile && tile.money ? (
                             <MoneyBoardView
                               key={`${tile.bucket_period ?? "half"}-${tile.money.periods.length}`}
