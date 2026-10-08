@@ -14,12 +14,23 @@ FileId = Annotated[
     str,
     Field(min_length=1, max_length=MAX_FILE_ID_CHARS, pattern=r"^[a-zA-Z0-9_-]+$"),
 ]
+WorkspaceId = Annotated[
+    str,
+    Field(min_length=1, max_length=MAX_FILE_ID_CHARS, pattern=r"^[a-zA-Z0-9_-]+$"),
+]
 Question = Annotated[str, Field(min_length=1, max_length=MAX_QUESTION_CHARS)]
 
 
 class ChatRequest(BaseModel):
-    file_id: FileId
+    file_id: FileId | None = None
+    workspace_id: WorkspaceId | None = None
     question: Question
+
+    @model_validator(mode="after")
+    def _need_target(self):
+        if not self.file_id and not self.workspace_id:
+            raise ValueError("Нужен file_id или workspace_id")
+        return self
 
 
 class ChartRequest(BaseModel):
@@ -85,7 +96,23 @@ class ReportPdfRequest(BaseModel):
 
 
 class HistoryRequest(BaseModel):
+    file_id: FileId | None = None
+    workspace_id: WorkspaceId | None = None
+
+    @model_validator(mode="after")
+    def _need_target(self):
+        if not self.file_id and not self.workspace_id:
+            raise ValueError("Нужен file_id или workspace_id")
+        return self
+
+
+class WorkspaceAttachRequest(BaseModel):
     file_id: FileId
+    replace: bool = False
+
+
+class WorkspaceDashboardRequest(BaseModel):
+    workspace_id: WorkspaceId
 
 
 class DashboardGenerateRequest(BaseModel):

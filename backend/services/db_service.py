@@ -40,6 +40,13 @@ CREATE TABLE IF NOT EXISTS file_contexts (
     context_json TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    sales_file_id TEXT,
+    deficit_file_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -57,9 +64,22 @@ def init_db() -> None:
     try:
         with _connect() as conn:
             conn.executescript(_SCHEMA)
+            _migrate_chat_workspace(conn)
     except sqlite3.Error as exc:
         logger.error("Не удалось инициализировать БД %s: %s", DB_PATH, exc)
         raise
+
+
+def _migrate_chat_workspace(conn: sqlite3.Connection) -> None:
+    cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+    }
+    if "workspace_id" not in cols:
+        conn.execute("ALTER TABLE chat_messages ADD COLUMN workspace_id TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_messages_workspace"
+            " ON chat_messages(workspace_id, id)"
+        )
 
 
 # --- Файлы -----------------------------------------------------------------
@@ -113,23 +133,44 @@ def add_chat_message(
     role: str,
     content: str,
     charts: list[dict] | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     charts_json = json.dumps(charts, ensure_ascii=False) if charts else None
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (file_id, role, content, charts_json, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (file_id, role, content, charts_json, time.time()),
+            "INSERT INTO chat_messages"
+            " (file_id, workspace_id, role, content, charts_json, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (file_id, workspace_id, role, content, charts_json, time.time()),
         )
-        _trim_chat_messages(conn, file_id)
+        if workspace_id:
+            _trim_chat_messages_workspace(conn, workspace_id)
+        else:
+            _trim_chat_messages(conn, file_id)
 
 
 def _trim_chat_messages(conn: sqlite3.Connection, file_id: str) -> None:
     keep = max(1, int(config.CHAT_HISTORY_LIMIT))
     extra = conn.execute(
-        "SELECT id FROM chat_messages WHERE file_id = ?"
+        "SELECT id FROM chat_messages WHERE file_id = ? AND workspace_id IS NULL"
         " ORDER BY id DESC LIMIT -1 OFFSET ?",
         (file_id, keep),
+    ).fetchall()
+    if not extra:
+        return
+    ids = [row["id"] for row in extra]
+    conn.execute(
+        f"DELETE FROM chat_messages WHERE id IN ({','.join('?' * len(ids))})",
+        ids,
+    )
+
+
+def _trim_chat_messages_workspace(conn: sqlite3.Connection, workspace_id: str) -> None:
+    keep = max(1, int(config.CHAT_HISTORY_LIMIT))
+    extra = conn.execute(
+        "SELECT id FROM chat_messages WHERE workspace_id = ?"
+        " ORDER BY id DESC LIMIT -1 OFFSET ?",
+        (workspace_id, keep),
     ).fetchall()
     if not extra:
         return
@@ -145,10 +186,24 @@ def get_chat_history(file_id: str, limit: int = 50) -> list[dict]:
     with _connect() as conn:
         rows = conn.execute(
             "SELECT role, content, charts_json FROM chat_messages"
-            " WHERE file_id = ? ORDER BY id DESC LIMIT ?",
+            " WHERE file_id = ? AND workspace_id IS NULL ORDER BY id DESC LIMIT ?",
             (file_id, limit),
         ).fetchall()
 
+    return _rows_to_messages(rows)
+
+
+def get_workspace_chat_history(workspace_id: str, limit: int = 50) -> list[dict]:
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT role, content, charts_json FROM chat_messages"
+            " WHERE workspace_id = ? ORDER BY id DESC LIMIT ?",
+            (workspace_id, limit),
+        ).fetchall()
+    return _rows_to_messages(rows)
+
+
+def _rows_to_messages(rows) -> list[dict]:
     messages = []
     for row in reversed(rows):
         messages.append(
@@ -159,6 +214,66 @@ def get_chat_history(file_id: str, limit: int = 50) -> list[dict]:
             }
         )
     return messages
+
+
+# --- Рабочие пространства (сделки + дефицит) --------------------------------
+
+def create_workspace() -> str:
+    import uuid
+
+    workspace_id = uuid.uuid4().hex
+    now = time.time()
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO workspaces"
+            " (workspace_id, sales_file_id, deficit_file_id, created_at, updated_at)"
+            " VALUES (?, NULL, NULL, ?, ?)",
+            (workspace_id, now, now),
+        )
+    return workspace_id
+
+
+def get_workspace(workspace_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT workspace_id, sales_file_id, deficit_file_id, created_at, updated_at"
+            " FROM workspaces WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_workspace_files(
+    workspace_id: str,
+    *,
+    sales_file_id: str | None = None,
+    deficit_file_id: str | None = None,
+    clear_sales: bool = False,
+    clear_deficit: bool = False,
+) -> None:
+    row = get_workspace(workspace_id)
+    if not row:
+        raise KeyError(workspace_id)
+    sales = None if clear_sales else sales_file_id if sales_file_id is not None else row["sales_file_id"]
+    deficit = (
+        None
+        if clear_deficit
+        else deficit_file_id
+        if deficit_file_id is not None
+        else row["deficit_file_id"]
+    )
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE workspaces SET sales_file_id = ?, deficit_file_id = ?, updated_at = ?"
+            " WHERE workspace_id = ?",
+            (sales, deficit, time.time(), workspace_id),
+        )
+
+
+def delete_workspace(workspace_id: str) -> None:
+    with _connect() as conn:
+        conn.execute("DELETE FROM chat_messages WHERE workspace_id = ?", (workspace_id,))
+        conn.execute("DELETE FROM workspaces WHERE workspace_id = ?", (workspace_id,))
 
 
 # --- Спеки дашбордов --------------------------------------------------------

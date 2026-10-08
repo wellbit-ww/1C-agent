@@ -607,6 +607,7 @@ def _stages_deal_list_df() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "номер сделки": ["УП-00000001", "УП-00000002", "УП-00000003"],
+            "дата начала сделки": pd.to_datetime(["2025-01-10", "2025-02-11", "2025-03-12"]),
             "статус": ["В работе", "Выиграна", "В работе"],
             "ответственный": ["Иванов", "Петров", "Иванов"],
             "подразделение": ["СТО", "СТЕ", "СТО"],
@@ -650,7 +651,8 @@ def test_stages_deal_list_filters():
     assert payload["deals_list"]["total_matched"] == 1
     assert payload["deals_list"]["rows"][0]["cells"][0] == "УП-00000003"
     assert payload["deals_list"]["rows"][0]["cells"][1] == "Гамма"
-    assert payload["deals_list"]["rows"][0]["cells"][6] == 400
+    assert payload["deals_list"]["rows"][0]["cells"][2] == "12.03.2025"
+    assert payload["deals_list"]["rows"][0]["cells"][7] == 400
 
 
 def test_stages_deal_list_status_filter_and_sort():

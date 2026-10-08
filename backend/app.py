@@ -31,6 +31,9 @@ from services.exceptions import (
     EmptyDataFrameError,
     InvalidFileError,
     OllamaUnavailableError,
+    SlotOccupiedError,
+    UnsupportedReportError,
+    WorkspaceNotFoundError,
 )
 from models.schemas import (
     ChatRequest,
@@ -47,6 +50,9 @@ from models.schemas import (
     TableRequest,
     ReportRequest,
     ReportPdfRequest,
+    WorkspaceAttachRequest,
+    WorkspaceDashboardRequest,
+    WorkspaceId,
 )
 
 logger = logging.getLogger("excel_agent")
@@ -265,10 +271,85 @@ def delete_uploaded_file(file_id: FileId):
     return {"ok": True}
 
 
+def _handle_workspace_chat(workspace_id: str, question: str) -> dict:
+    from services import workspace_service
+    from services.chat_workspace_router import pick_dataframe, route_workspace_question
+    from services.chat_service import handle_question
+    from services.file_context_service import get_context
+    from services.storage_service import get_original_name
+
+    meta = workspace_service.get_workspace_meta(workspace_id)
+    sales_id = meta["sales_file_id"]
+    deficit_id = meta["deficit_file_id"]
+    if not sales_id and not deficit_id:
+        raise HTTPException(status_code=422, detail="В workspace нет файлов")
+
+    sales_df = None
+    deficit_df = None
+    sales_name = ""
+    deficit_name = ""
+    if sales_id:
+        sales_path = _get_file_path_or_404(sales_id)
+        sales_df = agent._load_dataframe(sales_id, sales_path)
+        sales_name = get_original_name(sales_id) or sales_id
+    if deficit_id:
+        deficit_path = _get_file_path_or_404(deficit_id)
+        deficit_df = agent._load_dataframe(deficit_id, deficit_path)
+        deficit_name = get_original_name(deficit_id) or deficit_id
+
+    role, _reason = route_workspace_question(
+        question, sales_df, deficit_df, sales_name, deficit_name
+    )
+    df = pick_dataframe(role, sales_df, deficit_df)
+    routed_file_id = sales_id if role == workspace_service.SALES_REPORT else deficit_id
+    assert routed_file_id
+
+    history = db_service.get_workspace_chat_history(workspace_id, limit=CHAT_HISTORY_LIMIT)
+    result = handle_question(
+        df,
+        question,
+        history=history,
+        file_context=get_context(routed_file_id),
+    )
+    label = get_original_name(routed_file_id) or routed_file_id
+    answer = result.get("answer") or ""
+    if label and not answer.startswith("Ответ по файлу:"):
+        result["answer"] = f"Ответ по файлу: {label}\n\n{answer}"
+    result["routed_file_id"] = routed_file_id
+    result["routed_role"] = role
+    return result
+
+
 @app.post("/chat")
 def chat(
     request: ChatRequest,
 ):
+    if request.workspace_id:
+        result = _handle_service_errors(
+            _handle_workspace_chat,
+            request.workspace_id,
+            request.question,
+        )
+        if result is not None:
+            try:
+                routed = result.get("routed_file_id") or ""
+                db_service.add_chat_message(
+                    routed,
+                    "user",
+                    request.question,
+                    workspace_id=request.workspace_id,
+                )
+                db_service.add_chat_message(
+                    routed,
+                    "assistant",
+                    result["answer"],
+                    result.get("charts"),
+                    workspace_id=request.workspace_id,
+                )
+            except Exception as exc:
+                logger.warning("Не удалось сохранить сообщения чата: %s", exc)
+        return result
+
     file_path = _get_file_path_or_404(request.file_id)
 
     history = db_service.get_chat_history(
@@ -299,6 +380,12 @@ def chat(
 def chat_history(
     request: HistoryRequest,
 ):
+    if request.workspace_id:
+        return {
+            "messages": db_service.get_workspace_chat_history(
+                request.workspace_id, limit=CHAT_HISTORY_LIMIT
+            )
+        }
     _get_file_path_or_404(request.file_id)
     return {
         "messages": db_service.get_chat_history(
@@ -363,6 +450,58 @@ def dashboard(
     )
 
     return data
+
+
+@app.post("/workspace")
+def workspace_create():
+    from services import workspace_service
+
+    return {"workspace_id": workspace_service.create_workspace()}
+
+
+@app.get("/workspace/{workspace_id}")
+def workspace_get(workspace_id: WorkspaceId):
+    from services import workspace_service
+
+    try:
+        return workspace_service.get_workspace_meta(workspace_id)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/workspace/{workspace_id}/attach")
+def workspace_attach(workspace_id: WorkspaceId, request: WorkspaceAttachRequest):
+    from services import workspace_service
+
+    file_path = _get_file_path_or_404(request.file_id)
+    try:
+        return workspace_service.attach_file(
+            workspace_id,
+            request.file_id,
+            agent._load_dataframe,
+            file_path,
+            replace=request.replace,
+        )
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except UnsupportedReportError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SlotOccupiedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/dashboard/workspace")
+def dashboard_workspace(request: WorkspaceDashboardRequest):
+    from services import workspace_service
+
+    try:
+        return workspace_service.build_workspace_dashboard(
+            request.workspace_id,
+            agent._load_dataframe,
+            _get_file_path_or_404,
+        )
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/file-context")

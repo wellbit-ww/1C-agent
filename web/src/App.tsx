@@ -10,6 +10,11 @@ import { PlotChart } from "./PlotChart";
 import { dealsListToGrid, StagesDealListView, type DealsListFiltersPatch } from "./StagesDealList";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
 import { clearSession, readSession, writeSession, type SavedSession } from "./session";
+import {
+  flattenWorkspaceDashboard,
+  specForSourceFile,
+  tabSourceFileId,
+} from "./workspaceDashboard";
 import type {
   ChatMessage,
   Dashboard,
@@ -1394,6 +1399,7 @@ export function App() {
     document.documentElement.dataset.theme === "light" ? "light" : "dark",
   );
   const [view, setView] = useState<View>("dash");
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [fileId, setFileId] = useState<string | null>(null);
   const [filename, setFilename] = useState<string | null>(null);
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
@@ -1419,6 +1425,66 @@ export function App() {
   const fileRef = useRef<HTMLInputElement>(null);
   const fileIdRef = useRef<string | null>(null);
   const restoredRef = useRef(false);
+
+  const refreshWorkspace = useCallback(async (wsId: string, restore?: SavedSession) => {
+    fileIdRef.current = wsId;
+    setBusy("Читаю выгрузку…");
+    setError(null);
+    try {
+      const [payload, history] = await Promise.all([
+        api.getWorkspaceDashboard(wsId),
+        api.getWorkspaceHistory(wsId).catch(() => ({ messages: [] as ChatMessage[] })),
+      ]);
+      const dash = flattenWorkspaceDashboard(payload);
+      const primaryId = payload.sales_file_id ?? payload.deficit_file_id ?? null;
+      const primary =
+        payload.sources.find((s) => s.file_id === primaryId) ?? payload.sources[0];
+      const primaryName = primary?.filename ?? "Workspace";
+      if (fileIdRef.current !== wsId) return;
+      setWorkspaceId(wsId);
+      setDashboard(dash);
+      setCtx(dash.file_context ?? null);
+      setMessages(history.messages ?? []);
+      setFileId(primaryId);
+      setFilename(primaryName);
+      const tabCount = dash.tabs?.length ?? 0;
+      if (restore) {
+        setTab(tabCount ? Math.min(restore.tab, tabCount - 1) : 0);
+      } else {
+        setView("dash");
+        setTab(0);
+        setComments({});
+        setReport(null);
+        setReportCharts([]);
+      }
+      setBusy(null);
+      if (primaryId) {
+        void api
+          .enrichContext(primaryId)
+          .then((brief) => {
+            if (fileIdRef.current === wsId) setCtx(brief);
+          })
+          .catch(() => undefined);
+      }
+    } catch (exc) {
+      if (fileIdRef.current !== wsId) return;
+      const message = exc instanceof Error ? exc.message : String(exc);
+      if (restore) {
+        clearSession();
+        setWorkspaceId(null);
+        fileIdRef.current = null;
+        setFileId(null);
+        setFilename(null);
+        setDashboard(null);
+        setMessages([]);
+        setReportCharts([]);
+        setError("Сессия не найдена на сервере. Загрузите файл снова.");
+      } else {
+        setError(message);
+      }
+      setBusy(null);
+    }
+  }, []);
 
   const loadFile = useCallback(async (id: string, name: string, restore?: SavedSession) => {
     fileIdRef.current = id;
@@ -1494,12 +1560,17 @@ export function App() {
     if (!saved) return;
     setChatOpen(saved.chatOpen && !isNarrowViewport());
     setReportCharts(saved.reportCharts);
-    void loadFile(saved.fileId, saved.filename, saved);
-  }, [loadFile]);
+    if (saved.workspaceId) {
+      void refreshWorkspace(saved.workspaceId, saved);
+    } else {
+      void loadFile(saved.fileId, saved.filename, saved);
+    }
+  }, [loadFile, refreshWorkspace]);
 
   useEffect(() => {
     if (!fileId || !filename) return;
     writeSession({
+      workspaceId: workspaceId ?? undefined,
       fileId,
       filename,
       view,
@@ -1507,32 +1578,59 @@ export function App() {
       chatOpen,
       reportCharts,
     });
-  }, [fileId, filename, view, tab, chatOpen, reportCharts]);
+  }, [workspaceId, fileId, filename, view, tab, chatOpen, reportCharts]);
 
   async function onUpload(file: File) {
     setBusy("Загружаю файл…");
     setError(null);
-    setDashboard(null);
-    setCtx(null);
     setChartEditor(null);
-    setFileId(null);
-    setFilename(null);
-    fileIdRef.current = null;
     try {
       const { file_id } = await api.uploadFile(file);
-      await loadFile(file_id, file.name);
+      let wsId = workspaceId;
+      if (!wsId) {
+        const created = await api.createWorkspace();
+        wsId = created.workspace_id;
+        setWorkspaceId(wsId);
+        setDashboard(null);
+        setCtx(null);
+        setFileId(null);
+        setFilename(null);
+        fileIdRef.current = wsId;
+      }
+      try {
+        await api.attachWorkspaceFile(wsId, file_id);
+      } catch (attachExc) {
+        const message = attachExc instanceof Error ? attachExc.message : String(attachExc);
+        if (message.toLowerCase().includes("занят") || message.includes("replace")) {
+          await api.attachWorkspaceFile(wsId, file_id, true);
+        } else {
+          throw attachExc;
+        }
+      }
+      await refreshWorkspace(wsId);
+      setNotice(
+        workspaceId && workspaceId === wsId
+          ? "Файл добавлен в рабочее пространство"
+          : "Файл загружен",
+      );
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
       setBusy(null);
     }
   }
 
+  function fileIdForTab(tabIndex: number): string | null {
+    return tabSourceFileId(dashboard, tabIndex) ?? fileId;
+  }
+
   async function onSend(question: string) {
-    if (!fileId) return;
+    if (!fileId && !workspaceId) return;
     setMessages((m) => [...m, { role: "user", content: question }]);
     setBusy("Отвечаю…");
     try {
-      const result = await api.sendChat(fileId, question);
+      const result = workspaceId
+        ? await api.sendWorkspaceChat(workspaceId, question)
+        : await api.sendChat(fileId!, question);
       setMessages((m) => [
         ...m,
         { role: "assistant", content: result.answer, charts: result.charts },
@@ -1574,7 +1672,11 @@ export function App() {
   ) {
     let tabs = patch.tabs;
     let spec = patch.spec ?? specFallback;
-    if ((!tabs || !tabs.length) && fileId) {
+    if ((!tabs || !tabs.length) && workspaceId) {
+      const fresh = flattenWorkspaceDashboard(await api.getWorkspaceDashboard(workspaceId));
+      tabs = fresh.tabs ?? tabs;
+      spec = fresh.spec ?? spec;
+    } else if ((!tabs || !tabs.length) && fileId) {
       const fresh = await api.getDashboard(fileId);
       tabs = fresh.tabs ?? tabs;
       spec = fresh.spec ?? spec;
@@ -1590,7 +1692,8 @@ export function App() {
 
   async function onTileFiltersPatch(tabI: number, tileI: number, filters: DealsListFiltersPatch) {
     const spec = dashboard?.spec;
-    if (!spec || !fileId) return;
+    const targetFileId = fileIdForTab(tabI);
+    if (!spec || !targetFileId) return;
     const next: DashSpec = {
       tabs: spec.tabs.map((t, ti) =>
         ti !== tabI
@@ -1617,8 +1720,17 @@ export function App() {
     setBusy("Обновляю список…");
     setError(null);
     try {
-      const patch = await api.dashboardSaveSpec(fileId, next);
-      await applyDashboardPatch(patch, next);
+      const toSave =
+        workspaceId && dashboard
+          ? specForSourceFile(dashboard, targetFileId, next)
+          : next;
+      if (workspaceId) {
+        await api.dashboardSaveSpec(targetFileId, toSave);
+        await refreshWorkspace(workspaceId);
+      } else {
+        const patch = await api.dashboardSaveSpec(targetFileId, toSave);
+        await applyDashboardPatch(patch, next);
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -1643,7 +1755,8 @@ export function App() {
       | "in_work_stages",
   ) {
     const spec = dashboard?.spec;
-    if (!spec || !fileId) return;
+    const targetFileId = fileIdForTab(tabI);
+    if (!spec || !targetFileId) return;
     const syncDynamics = DYNAMICS_PERIOD_KINDS.includes(
       kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
     );
@@ -1677,8 +1790,17 @@ export function App() {
     setBusy("Обновляю таблицу…");
     setError(null);
     try {
-      const patch = await api.dashboardSaveSpec(fileId, next);
-      await applyDashboardPatch(patch, next);
+      const toSave =
+        workspaceId && dashboard
+          ? specForSourceFile(dashboard, targetFileId, next)
+          : next;
+      if (workspaceId) {
+        await api.dashboardSaveSpec(targetFileId, toSave);
+        await refreshWorkspace(workspaceId);
+      } else {
+        const patch = await api.dashboardSaveSpec(targetFileId, toSave);
+        await applyDashboardPatch(patch, next);
+      }
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
     } finally {
@@ -1705,12 +1827,31 @@ export function App() {
   }
 
   async function onSaveSpec(spec: DashSpec) {
-    if (!fileId) return;
+    if (!fileId && !workspaceId) return;
     setBusy("Сохраняю дашборд…");
     setError(null);
     try {
-      const patch = await api.dashboardSaveSpec(fileId, spec);
-      await applyDashboardPatch(patch, spec, "Дашборд сохранён");
+      if (workspaceId && dashboard?.sources?.length) {
+        for (const src of dashboard.sources) {
+          const base = src.spec;
+          if (!base?.tabs?.length) continue;
+          const nextSpec: DashSpec = {
+            tabs: base.tabs.map((tab, ti) => {
+              const flatIndex = dashboard.tabs?.findIndex(
+                (ft) => ft.source_file_id === src.file_id && ft.source_tab_index === ti,
+              );
+              if (flatIndex == null || flatIndex < 0) return tab;
+              return spec.tabs[flatIndex] ?? tab;
+            }),
+          };
+          await api.dashboardSaveSpec(src.file_id, nextSpec);
+        }
+        await refreshWorkspace(workspaceId);
+        setNotice("Дашборд сохранён");
+      } else if (fileId) {
+        const patch = await api.dashboardSaveSpec(fileId, spec);
+        await applyDashboardPatch(patch, spec, "Дашборд сохранён");
+      }
       setChartEditor(null);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -1732,11 +1873,14 @@ export function App() {
   }
 
   async function openReport() {
-    if (!fileId) return;
+    const reportFileId = dashboard?.sales_file_id ?? fileId;
+    if (!reportFileId) return;
+    const reportName =
+      dashboard?.sources?.find((s) => s.file_id === reportFileId)?.filename ?? filename;
     setBusy("Формирую отчёт…");
     setError(null);
     try {
-      const rep = await api.getReport(fileId, filename ?? undefined);
+      const rep = await api.getReport(reportFileId, reportName ?? undefined);
       setReport(rep);
       setNarrative(rep.narrative ?? "");
       const ins = rep.insights;
@@ -1784,6 +1928,7 @@ export function App() {
     }
     fileIdRef.current = null;
     clearSession();
+    setWorkspaceId(null);
     setFileId(null);
     setFilename(null);
     setDashboard(null);
@@ -1844,7 +1989,7 @@ export function App() {
             className="rounded-lg border border-line bg-card px-3 py-1.5 text-sm hover:border-accent/50"
             onClick={() => fileRef.current?.click()}
           >
-            Загрузить
+            {workspaceId ? "Добавить файл" : "Загрузить"}
           </button>
           <input
             ref={fileRef}
@@ -1858,14 +2003,29 @@ export function App() {
             }}
           />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm">
-              {filename ?? "Файл не выбран"}
+            <div className="flex flex-wrap items-center gap-2 text-sm">
+              {dashboard?.sources?.length
+                ? dashboard.sources.map((src) => (
+                    <span
+                      key={src.file_id}
+                      className="max-w-[14rem] truncate rounded-md border border-line bg-card px-2 py-0.5 text-xs text-zinc-200"
+                      title={src.filename}
+                    >
+                      {src.role === "deficit_report" ? "Дефицит" : "Сделки"}: {src.filename}
+                    </span>
+                  ))
+                : <span className="truncate">{filename ?? "Файл не выбран"}</span>}
             </div>
             <div className="text-xs text-zinc-500">
-              {busyLabel ?? (fileId ? typeName(dashboard?.report_type) : "Excel Agent")}
+              {busyLabel ??
+                (workspaceId
+                  ? "Сделки и дефицит"
+                  : fileId
+                    ? typeName(dashboard?.report_type)
+                    : "Excel Agent")}
             </div>
           </div>
-          {fileId && (
+          {(fileId || workspaceId) && (
             <button
               type="button"
               className="rounded-lg border border-line px-3 py-1.5 text-sm text-zinc-300 hover:border-red-400/50 hover:text-red-200"

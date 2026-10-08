@@ -74,11 +74,46 @@ export async function getHistory(fileId: string): Promise<{ messages: ChatMessag
   return postJson("/history", { file_id: fileId });
 }
 
+export async function getWorkspaceHistory(
+  workspaceId: string,
+): Promise<{ messages: ChatMessage[] }> {
+  return postJson("/history", { workspace_id: workspaceId });
+}
+
 export async function sendChat(
   fileId: string,
   question: string,
 ): Promise<{ answer: string; charts: ChatMessage["charts"] }> {
   return postJson("/chat", { file_id: fileId, question });
+}
+
+export async function sendWorkspaceChat(
+  workspaceId: string,
+  question: string,
+): Promise<{ answer: string; charts: ChatMessage["charts"] }> {
+  return postJson("/chat", { workspace_id: workspaceId, question });
+}
+
+export async function createWorkspace(): Promise<{ workspace_id: string }> {
+  return postJson("/workspace", {});
+}
+
+export async function attachWorkspaceFile(
+  workspaceId: string,
+  fileId: string,
+  replace = false,
+): Promise<{
+  workspace_id: string;
+  file_id: string;
+  report_type: string;
+  role: string;
+  filename: string;
+}> {
+  return postJson(`/workspace/${workspaceId}/attach`, { file_id: fileId, replace });
+}
+
+export async function getWorkspaceDashboard(workspaceId: string): Promise<import("./workspaceDashboard").WorkspaceDashboardPayload> {
+  return postJson("/dashboard/workspace", { workspace_id: workspaceId });
 }
 
 export async function dashboardGenerate(fileId: string, request: string): Promise<Dashboard> {

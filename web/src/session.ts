@@ -5,6 +5,7 @@ const KEY = "excel-agent-session";
 export type AppView = "dash" | "report";
 
 export type SavedSession = {
+  workspaceId?: string;
   fileId: string;
   filename: string;
   view: AppView;
@@ -20,6 +21,7 @@ export function readSession(): SavedSession | null {
     const data = JSON.parse(raw) as Partial<SavedSession>;
     if (!data.fileId || !data.filename) return null;
     return {
+      workspaceId: data.workspaceId,
       fileId: data.fileId,
       filename: data.filename,
       view: data.view === "report" ? "report" : "dash",

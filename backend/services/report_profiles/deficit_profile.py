@@ -237,6 +237,17 @@ def _named_tile(title: str, columns: list[str], chart_type: str = "bar") -> Tile
     )
 
 
+def _deficit_sales_table_tile() -> Tile:
+    return Tile(
+        title="Продажи по подразделениям",
+        chart_type="table",
+        source=TileSource(kind="deficit_sales_by_department"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
 def _group_tile(
     title: str,
     group_semantic: str | None,
@@ -380,10 +391,11 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
         )
 
     tabs: list[Tab] = []
-    if payments:
-        tabs.append(Tab(title="Платежи", tiles=payments[:8]))
-    if structure:
-        tabs.append(Tab(title="Структура", tiles=structure[:8]))
+    # «Платежи» в workspace показывается как «Продажи».
+    tabs.append(Tab(title="Платежи", tiles=[_deficit_sales_table_tile()]))
+    combined = (payments + structure)[:8]
+    if combined:
+        tabs.append(Tab(title="Структура", tiles=combined))
     if not tabs:
         from services.generic_dashboard import build_generic_spec
 
@@ -402,4 +414,7 @@ class DeficitProfile(ReportProfile):
         return deficit_kpis(df)
 
     def get_dashboard_spec(self, df):
-        return build_deficit_dashboard_spec(df)
+        from services.workspace_service import normalize_deficit_dashboard_spec
+
+        spec = build_deficit_dashboard_spec(df)
+        return normalize_deficit_dashboard_spec(spec) if spec else spec

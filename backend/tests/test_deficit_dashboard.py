@@ -119,16 +119,21 @@ class TestDeficitDashboard:
     def test_spec_has_payment_charts(self):
         spec = build_deficit_dashboard_spec(_ks_df())
         assert [tab.title for tab in spec.tabs] == ["Платежи", "Структура"]
-        pay = spec.tabs[0]
-        titles = [tile.title for tile in pay.tiles]
+        assert len(spec.tabs[0].tiles) == 1
+        assert spec.tabs[0].tiles[0].source.kind == "deficit_sales_by_department"
+        structure = spec.tabs[1]
+        titles = [tile.title for tile in structure.tiles]
         assert "К оплате" in titles
         assert "Оплачено и неоплаченный остаток" in titles
-        to_pay = next(t for t in pay.tiles if t.title == "К оплате")
+        to_pay = next(t for t in structure.tiles if t.title == "К оплате")
         assert to_pay.source.kind == "named_columns"
         assert len(to_pay.source.column_names) == 3
 
         rendered = render_spec(_ks_df(), spec)
-        pay_out = rendered["tabs"][0]["tiles"]
+        sales_tile = rendered["tabs"][0]["tiles"][0]
+        assert sales_tile["chart_type"] == "table"
+        assert sales_tile["table"]["totals_label"] == "Всего"
+        pay_out = rendered["tabs"][1]["tiles"]
         assert all("plotly_json" in tile for tile in pay_out)
         k_oplate = next(t for t in pay_out if t["title"] == "К оплате")
         fig = json.loads(k_oplate["plotly_json"])
@@ -144,8 +149,8 @@ class TestDeficitDashboard:
         assert kpis["Неоплаченный остаток"] == pytest.approx(374_617_149.86, rel=1e-6)
         spec = profile.get_dashboard_spec(deficit_df)
         rendered = render_spec(deficit_df, spec)
-        pay = next(tab for tab in rendered["tabs"] if tab["title"] == "Платежи")
-        ok = [t for t in pay["tiles"] if "plotly_json" in t]
+        structure = next(tab for tab in rendered["tabs"] if tab["title"] == "Структура")
+        ok = [t for t in structure["tiles"] if "plotly_json" in t]
         assert len(ok) >= 3
 
 
@@ -162,5 +167,7 @@ def test_desktop_ks_file_if_present():
     assert kpis["Неоплаченный остаток"] > 0
     spec = build_deficit_dashboard_spec(df)
     rendered = render_spec(df, spec)
-    pay = next(tab for tab in rendered["tabs"] if tab["title"] == "Платежи")
-    assert all("error" not in t for t in pay["tiles"])
+    pay_tab = next(tab for tab in rendered["tabs"] if tab["title"] == "Платежи")
+    assert pay_tab["tiles"][0]["chart_type"] == "table"
+    structure = next(tab for tab in rendered["tabs"] if tab["title"] == "Структура")
+    assert all("error" not in t for t in structure["tiles"])

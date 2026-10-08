@@ -899,6 +899,31 @@ def _deal_number_column(df: pd.DataFrame) -> str | None:
     return None
 
 
+def _deal_start_date_column(df: pd.DataFrame) -> str | None:
+    exact = _named_column(df, "дата начала сделки")
+    if exact:
+        return exact
+    for col in df.columns:
+        text = str(col).lower().replace("ё", "е")
+        if "дат" in text and "начал" in text and "сдел" in text:
+            return str(col)
+    return None
+
+
+def _format_deal_start_date(value) -> str:
+    if value is None or (isinstance(value, float) and value != value):
+        return "—"
+    try:
+        if pd.isna(value):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+    if parsed is None or pd.isna(parsed):
+        return "—"
+    return parsed.strftime("%d.%m.%Y")
+
+
 def _half_percent(part: float, whole: float, digits: int) -> float | None:
     if whole <= 0:
         return None
@@ -1381,6 +1406,7 @@ def _selected_status_labels(tile: Tile) -> set[str] | None:
 _DEAL_LIST_COLUMNS = (
     "УП",
     "Сделка",
+    "Дата начала сделки",
     "Статус",
     "Этап",
     "Подразделение",
@@ -1390,6 +1416,7 @@ _DEAL_LIST_COLUMNS = (
 _DEAL_LIST_SORT_FIELDS = {
     "УП": "_deal_no",
     "Сделка": "_client",
+    "Дата начала сделки": "_deal_start",
     "Статус": "_status",
     "Этап": "_stage",
     "Подразделение": "_dept",
@@ -1443,6 +1470,7 @@ def _stages_deal_list_data(df: pd.DataFrame, tile: Tile) -> dict:
     mgr_col = resolve_semantic_column(df, "", "manager", dtype="categorical")
     client_col = resolve_semantic_column(df, "", "client", dtype="categorical")
     deal_no_col = _deal_number_column(df)
+    deal_start_col = _deal_start_date_column(df)
 
     work = df.copy()
     work["_stage_idx"] = _funnel_current_stage_index(work, stage_cols)
@@ -1475,6 +1503,11 @@ def _stages_deal_list_data(df: pd.DataFrame, tile: Tile) -> dict:
         work["_deal_no"] = work[deal_no_col].astype(str).str.strip()
     else:
         work["_deal_no"] = ""
+
+    if deal_start_col and deal_start_col in work.columns:
+        work["_deal_start"] = pd.to_datetime(work[deal_start_col], errors="coerce", dayfirst=True)
+    else:
+        work["_deal_start"] = pd.NaT
 
     work = work.loc[work["_stage"].isin(resolved_stages)]
 
@@ -1514,6 +1547,7 @@ def _stages_deal_list_data(df: pd.DataFrame, tile: Tile) -> dict:
                 "cells": [
                     deal_no,
                     client,
+                    _format_deal_start_date(row["_deal_start"]),
                     str(row["_status"] or "—"),
                     str(row["_stage"] or "—"),
                     str(row["_dept"] or "—"),
@@ -2474,6 +2508,10 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         return _deals_conversion_data(df, tile)
     if kind == "deals_money":
         return _deals_money_data(df, tile)
+    if kind == "deficit_sales_by_department":
+        from services.deficit_sales_table import build_deficit_sales_table
+
+        return build_deficit_sales_table(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)

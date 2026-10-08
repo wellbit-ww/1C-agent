@@ -34,6 +34,7 @@ class TileSource(BaseModel):
     deal_statuses — вкладка «Этапы продаж»: статусы сделок и заказов по периодам;
     in_work_stages — сделки со статусом «В работе» по текущему этапу;
     stages_deal_list — список сделок на вкладке «Этапы продаж» с фильтрами по этапу, службе, ответственному, статусу и порогу потенциала; list_sort_column + sort задают сортировку таблицы.
+    deficit_sales_by_department — сводка по службам на вкладке «Продажи» дефицита: прогноз, заказы в 1С, выполнение.
     """
 
     kind: Literal[
@@ -54,6 +55,7 @@ class TileSource(BaseModel):
         "deal_statuses",
         "in_work_stages",
         "stages_deal_list",
+        "deficit_sales_by_department",
     ]
     group_semantic: str | None = None
     group_column: str | None = None

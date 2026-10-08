@@ -156,6 +156,10 @@ class ExcelAgent:
         if spec is not None:
             from services.dashboard_engine import render_spec
 
+            if report_type == "deficit_report":
+                from services.workspace_service import normalize_deficit_dashboard_spec
+
+                spec = normalize_deficit_dashboard_spec(spec)
             if report_type == "sales_pipeline":
                 from services.report_profiles.sales_profile import enrich_deals_tab
 

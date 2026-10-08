@@ -18,7 +18,7 @@ export type PivotTable = {
   rows: { label: string; values: number[]; total?: number }[];
   totals?: number[];
   totals_label?: string;
-  column_kinds?: ("count" | "percent")[];
+  column_kinds?: ("count" | "percent" | "money")[];
 };
 
 export type SectionRow = {
@@ -95,6 +95,9 @@ export type Tile = {
 export type DashTab = {
   title: string;
   tiles: Tile[];
+  source_file_id?: string;
+  source_role?: string;
+  source_tab_index?: number;
 };
 
 export type Kpi = { label: string; value: string | number };
@@ -138,6 +141,16 @@ export type Dashboard = {
   tabs?: DashTab[];
   charts?: ChartPayload[];
   spec?: DashSpec;
+  workspace_id?: string;
+  sales_file_id?: string;
+  deficit_file_id?: string;
+  sources?: {
+    file_id: string;
+    filename: string;
+    role: string;
+    report_type: string;
+    spec?: DashSpec;
+  }[];
   metadata?: {
     rows?: number;
     columns?: number;
