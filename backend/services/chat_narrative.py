@@ -13,6 +13,32 @@ def _ask_llm(prompt, **kwargs):
 
     return chat_service.ask_llm(prompt, **kwargs)
 
+
+ANALYST_SYSTEM_PROMPT = """Ты — агент-аналитик коммерческих выгрузок 1С.
+Разбираешь файл, объясняешь цифры руководителю и даёшь практические советы.
+Типы файлов: воронка этапов продаж, дефицит/задолженность, отчёт ПДО, гарантия.
+
+Как отвечать
+1. Сразу ответь на вопрос: суть в 1–2 предложениях.
+2. Факты — только из блока «Посчитанные факты». Не выдумывай периоды, клиентов, службы и суммы. Не подменяй одну метрику другой.
+3. Смысл — что цифра значит для выручки, воронки, оплаты или производства.
+4. Советы — 2–4 конкретных шага: кого разобрать, какой риск, что проверить в данных. Каждый совет должен следовать из фактов. Если фактов мало — скажи, чего не хватает, и не строй план из догадок.
+
+Дашборды уже построены в интерфейсе. Опирайся на них и подсказывай, куда смотреть:
+- Воронка продаж: «Данные», «Динамика», «Конверсия», «Деньги», «Этапы продаж».
+- Дефицит: «Продажи» (прогноз и зарегистрированные заказы по службам), «Оплата» (структура задолженности).
+Если вопрос про динамику, конверсию, деньги, этапы, прогноз или оплату — назови вкладку и добавь то, чего на графике нет: концентрацию, причины, риск.
+
+Правила данных
+- Зерно строки бери из справки по файлу (сделка, заказ, строка дефицита). Витрины 1С на других листах не складывай с рабочим листом.
+- «Сумма по сделке» — потенциал воронки, не поступившие деньги.
+- Неоплаченный остаток не равен сумме заказа и не равен оплаченному.
+- Один период в файле — это не тренд и не «пик относительно других кварталов». Объясняй состав суммы: клиенты, менеджеры, службы.
+- Не копируй карточку файла, не перечисляй пустые колонки и не предлагай меню команд.
+- Запрещено копировать структуру «Отчёт / Динамика / Лидеры / Выводы» или отдавать готовый шаблон отчёта. Пиши связный анализ под вопрос.
+
+Пиши по-русски, коротко и по делу, языком для руководителя."""
+
 _HELP_MARKERS = (
     "что ты умеешь",
     "что умеешь",
@@ -45,12 +71,25 @@ _NARRATIVE_MARKERS = (
     "опиши продаж",
     "обзор продаж",
     "подробный анализ",
+    "проанализируй",
+    "проанализир",
+    "сделай вывод",
+    "дай вывод",
+    "сделай совет",
+    "дай совет",
+    "как увеличить",
+    "как вырастить",
+    "как поднять",
 )
 
 
 def _wants_narrative(q: str) -> bool:
     if any(marker in q for marker in _NARRATIVE_MARKERS):
         return True
+    if any(word in q for word in ("вывод", "совет", "рекоменд")) and any(
+        word in q for word in ("файл", "данн", "продаж", "доход", "выручк", "дефицит")
+    ):
+        return not any(marker in q for marker in _CHART_MARKERS)
     if ("отч" in q or "отчет" in q) and any(
         word in q for word in ("продаж", "выручк", "файл", "данн", "дефицит")
     ):
@@ -162,6 +201,27 @@ def _top_line(df: pd.DataFrame, question: str, semantic: str, label: str) -> str
     return f"По {label}: " + "; ".join(bits) + "."
 
 
+def _looks_like_template_report(text: str) -> bool:
+    """Старый шаблон отчёта: Динамика + Лидеры + Выводы."""
+    low = (text or "").lower()
+    hits = sum(
+        1
+        for marker in (
+            "динамика по",
+            "**лидеры**",
+            "лидеры\n",
+            "**выводы**",
+            "выводы\n",
+            "отчёт по продажам",
+            "отчет по продажам",
+            "отчёт по дефициту",
+            "отчет по дефициту",
+        )
+        if marker in low
+    )
+    return hits >= 2
+
+
 def _draft_deficit_narrative(df: pd.DataFrame) -> str:
     from services.chat_answers import deficit_meaning, layout_values, rub
     from services.column_resolver import resolve_semantic_column
@@ -169,18 +229,15 @@ def _draft_deficit_narrative(df: pd.DataFrame) -> str:
     from services.report_profiles.deficit_profile import deficit_kpis, detect_deficit_money_layout
 
     layout = detect_deficit_money_layout(df)
-    lines = ["**Отчёт по дефициту**", ""]
     span = _get_date_period(df)
-    opener = f"В выгрузке {len(df)} записей"
-    if span:
-        opener += f" за период {span}"
-    opener += ". Одна строка — заказ/позиция задолженности."
-    lines.append(opener)
-    lines.append("")
-    lines.append("**Деньги**")
+    lines = [
+        "ФАКТЫ ДЕФИЦИТА (для анализа, не копировать как отчёт):",
+        f"- строк: {len(df)}" + (f"; период: {span}" if span else ""),
+        "- зерно: одна строка = заказ/позиция задолженности",
+    ]
     for kpi in deficit_kpis(df)[:8]:
         unit = "" if kpi["name"] in {"unique_customers", "unique_departments"} else " руб."
-        lines.append(f"• {kpi['label']}: {_format_number(kpi['raw_value'])}{unit}")
+        lines.append(f"- {kpi['label']}: {_format_number(kpi['raw_value'])}{unit}")
     vals = layout_values(df, layout)
     meaning = deficit_meaning(
         unpaid=vals["unpaid"] if layout.unpaid else None,
@@ -189,39 +246,32 @@ def _draft_deficit_narrative(df: pd.DataFrame) -> str:
         order_col=layout.order_sum,
     )
     if meaning:
-        lines.append(meaning)
+        lines.append(f"- смысл: {meaning}")
     client = resolve_semantic_column(df, "", "client", dtype="categorical")
+    unpaid_top: list = []
     if client and layout.unpaid:
         unpaid_top = _top_sums(df, client, layout.unpaid, n=5)
         if unpaid_top:
-            lines.append("")
-            lines.append("**Кто больше должен**")
+            lines.append("- кто больше должен:")
             for name, value in unpaid_top:
-                lines.append(f"• {name}: {rub(value)}")
+                lines.append(f"  • {name}: {rub(value)}")
     if client and layout.order_sum:
         order_top = _top_sums(df, client, layout.order_sum, n=5)
         if order_top:
-            lines.append("")
-            lines.append("**Кто больше заказал**")
+            lines.append("- кто больше заказал:")
             for name, value in order_top:
-                lines.append(f"• {name}: {rub(value)}")
-            if layout.unpaid and unpaid_top and order_top:
-                if unpaid_top[0][0] != order_top[0][0]:
-                    lines.append(
-                        f"Лидеры разные: по остатку «{unpaid_top[0][0]}», "
-                        f"по сумме заказа «{order_top[0][0]}» — это разные колонки."
-                    )
-    lines.append("")
-    lines.append("**Выводы**")
-    lines.append(
-        "Остаток нельзя читать как объём заказов. Смотрите обе колонки, "
-        "иначе крупный заказчик с маленьким долгом выглядит «меньше», чем должник."
-    )
+                lines.append(f"  • {name}: {rub(value)}")
+            if layout.unpaid and unpaid_top and order_top and unpaid_top[0][0] != order_top[0][0]:
+                lines.append(
+                    f"- лидеры разные: остаток «{unpaid_top[0][0]}», "
+                    f"сумма заказа «{order_top[0][0]}»"
+                )
+    lines.append("- остаток ≠ объём заказов")
     return "\n".join(lines)
 
 
 def _draft_narrative(df: pd.DataFrame, question: str, file_context=None) -> str:
-    """Готовый отчёт для руководителя: цифры pandas, без карточки файла."""
+    """Сырые факты pandas для LLM — не готовый отчёт пользователю."""
     from services.chat_answers import report_kind_hint
 
     if report_kind_hint(file_context, df) == "deficit":
@@ -229,55 +279,42 @@ def _draft_narrative(df: pd.DataFrame, question: str, file_context=None) -> str:
     total = data_tools.get_sum(df, question)
     span = _get_date_period(df)
     metric = total.get("column") or "сумма"
-    lines: list[str] = []
-    lines.append("**Отчёт по продажам**")
-    lines.append("")
-    opener = f"В выгрузке {len(df)} записей"
-    if span:
-        opener += f" за период {span}"
-    opener += "."
+    lines: list[str] = [
+        "ФАКТЫ (для анализа, не копировать как отчёт):",
+        f"- строк в выгрузке: {len(df)}"
+        + (f"; период: {span}" if span else ""),
+    ]
     if "value" in total:
-        opener += (
-            f" Итого по колонке «{metric}»: {_format_number(total['value'])}."
-        )
-    lines.append(opener)
+        lines.append(f"- итог «{metric}»: {_format_number(total['value'])}")
 
     grouped = _period_groups(df, question)
     if grouped:
         label, items, value_col = grouped
-        adj = {
-            "кварталам": "квартальных",
-            "месяцам": "месячных",
-            "годам": "годовых",
-        }.get(label, "периодных")
-        lines.append("")
-        lines.append(f"**Динамика по {label}**")
         lines.append(
-            f"В файле {len(items)} {adj} срезов"
-            + (f" по «{value_col}»" if value_col else "")
-            + "."
+            f"- срезы по {label}"
+            + (f" («{value_col}»)" if value_col else "")
+            + f": {len(items)} шт."
         )
         asked = _asked_period_count(question)
         if asked and len(items) < asked:
             lines.append(
-                f"Запрошено {asked} срезов, в данных есть только {len(items)} — "
-                "ниже все доступные периоды, без домыслов."
+                f"- запрошено срезов: {asked}, в данных только {len(items)}"
             )
         previous = None
         for name, value in items:
             lines.append(
-                f"• {name}: {_format_number(value)}{_delta_phrase(previous, value)}"
+                f"  • {name}: {_format_number(value)}{_delta_phrase(previous, value)}"
             )
             previous = value
         peak_name, peak_value = max(items, key=lambda item: item[1])
         low_name, low_value = min(items, key=lambda item: item[1])
         lines.append(
-            f"Максимум — {peak_name} ({_format_number(peak_value)}), "
-            f"минимум — {low_name} ({_format_number(low_value)})."
+            f"- максимум: {peak_name} ({_format_number(peak_value)}); "
+            f"минимум: {low_name} ({_format_number(low_value)})"
         )
+    else:
+        lines.append("- разбивка по датам недоступна")
 
-    lines.append("")
-    lines.append("**Лидеры**")
     for semantic, label in (
         ("client", "клиентам"),
         ("manager", "менеджерам"),
@@ -285,32 +322,18 @@ def _draft_narrative(df: pd.DataFrame, question: str, file_context=None) -> str:
     ):
         line = _top_line(df, question, semantic, label)
         if line:
-            lines.append(line)
-    if lines[-1] == "**Лидеры**":
-        lines.append("В файле не удалось выделить топ по клиентам или менеджерам.")
-
-    lines.append("")
-    lines.append("**Выводы**")
-    if grouped:
-        _, items, _ = grouped
-        peak_name, _ = max(items, key=lambda item: item[1])
-        lines.append(
-            f"Продажи распределены неравномерно: основной вклад даёт {peak_name}. "
-            "Имеет смысл отдельно разобрать причины пика и просадки соседних периодов."
-        )
-        if len(items) >= 2:
-            last_name, last_value = items[-1]
-            prev_value = items[-2][1]
-            if last_value < prev_value:
-                lines.append(
-                    f"Последний срез ({last_name}) слабее предыдущего — "
-                    "проверьте, не обрезан ли период неполной выгрузкой."
-                )
-    else:
-        lines.append(
-            "По датам разбить продажи не удалось: в файле нет надёжной колонки периода."
-        )
+            lines.append(f"- {line.lstrip('• ').strip()}")
     return "\n".join(lines)
+
+
+def _facts_fallback_answer(facts: str, *, llm_down: bool = False) -> str:
+    """Если модель недоступна — краткие факты, без шаблона «Динамика/Лидеры/Выводы»."""
+    head = (
+        "Модель сейчас недоступна, ниже только посчитанные факты. "
+        if llm_down
+        else "Не удалось собрать развёрнутый анализ, ниже посчитанные факты. "
+    )
+    return head + "Задайте вопрос ещё раз или уточните срез.\n\n" + facts
 
 
 def _looks_like_file_card(text: str) -> bool:
@@ -506,61 +529,78 @@ def _exec_general(df: pd.DataFrame, action: dict, file_context=None) -> dict:
     kind = report_kind_hint(file_context, df)
     draft = typed_overview_draft(df, file_context)
     facts = build_answer_facts(df, question, file_context=file_context)
-    prompt = f"""Ты аналитик выгрузок 1С. Ответь на вопрос 2–5 предложениями на русском.
-{typed_frame_rules(kind)}
+    prompt = f"""{ANALYST_SYSTEM_PROMPT}
+
+Дополнительно для этого файла: {typed_frame_rules(kind)}
 
 Вопрос: {question}
 
-Посчитанные факты (опирайся ТОЛЬКО на них, не выдумывай цифры и колонки):
+Посчитанные факты:
 {facts}
 
-Черновик с верными цифрами (можно переписать живее, числа не менять):
+Краткая справка по файлу (только цифры, не копируй как ответ):
 {draft}
 
-Если в блоке «Срез по вопросу» есть цифры — отвечай по срезу, а не по итогам всего файла.
-Если фактов не хватает — скажи, чего не хватает. Не предлагай меню умений."""
+Ответь связным текстом под вопрос. Не используй заголовки «Динамика», «Лидеры», «Выводы»."""
 
     try:
         answer = _ask_llm(prompt)
     except OllamaUnavailableError:
-        return {"answer": draft or facts or "LLM недоступна, а посчитанных фактов по файлу нет."}
+        return {
+            "answer": _facts_fallback_answer(
+                facts or draft or "Фактов по файлу нет.", llm_down=True
+            )
+        }
 
     polished = (answer or "").strip()
-    if not polished or _looks_like_file_card(polished):
-        return {"answer": draft or facts}
+    if not polished or _looks_like_file_card(polished) or _looks_like_template_report(polished):
+        return {"answer": _facts_fallback_answer(facts or draft or "")}
     return {"answer": polished}
 
 
 def _exec_narrative(df: pd.DataFrame, question: str, file_context=None) -> dict:
-    draft = _draft_narrative(df, question, file_context)
+    facts = _draft_narrative(df, question, file_context)
     kind_line = (
         "Для дефицита сохрани разницу остатка и суммы заказа."
-        if "**Отчёт по дефициту**" in draft
-        else "Сохрани ВСЕ цифры и названия периодов. Можно чуть пояснить рост/падение."
+        if "неоплачен" in facts.lower() or "дефицит" in facts.lower()
+        else "Сохрани цифры и названия периодов из фактов."
     )
-    prompt = f"""Ты аналитик 1С. Ниже уже посчитанный отчёт с верными цифрами.
-Перепиши его живым языком для руководителя: 8–15 предложений, абзацы.
+    prompt = f"""{ANALYST_SYSTEM_PROMPT}
+
 {kind_line}
-Запрещено: копировать карточку файла, писать «понимание файла», перечислять колонки
-и долю пустых ячеек, выдумывать периоды и суммы, которых нет в тексте.
 
 Вопрос пользователя: {question}
 
-Готовый отчёт:
-{draft}"""
+Посчитанные факты:
+{facts}
+
+Напиши новый аналитический ответ: вывод, объяснение динамики/состава и 2–4 совета.
+Не копируй список фактов. Не используй заголовки «Отчёт по продажам», «Динамика», «Лидеры», «Выводы»."""
 
     try:
-        polished = (_ask_llm(prompt, num_predict=1800) or "").strip()
+        polished = (_ask_llm(prompt, num_predict=2500) or "").strip()
     except OllamaUnavailableError:
-        return {"answer": draft}
+        return {"answer": _facts_fallback_answer(facts, llm_down=True)}
 
-    if (
-        not polished
-        or _looks_like_file_card(polished)
-        or _drops_period_facts(polished, draft)
-        or len(polished) < max(280, len(draft) // 3)
-    ):
-        return {"answer": draft}
+    if not polished:
+        return {"answer": _facts_fallback_answer(facts)}
+    if _looks_like_file_card(polished) or _looks_like_template_report(polished):
+        # Второй проход: модель ушла в шаблон — запретить явно
+        retry = f"""{ANALYST_SYSTEM_PROMPT}
+
+Вопрос: {question}
+
+Факты:
+{facts}
+
+Прошлый ответ был шаблонным. Перепиши заново живым текстом без заголовков
+«Динамика / Лидеры / Выводы / Отчёт»."""
+        try:
+            polished = (_ask_llm(retry, num_predict=2500) or "").strip()
+        except OllamaUnavailableError:
+            return {"answer": _facts_fallback_answer(facts, llm_down=True)}
+        if not polished or _looks_like_template_report(polished) or _looks_like_file_card(polished):
+            return {"answer": _facts_fallback_answer(facts)}
     return {"answer": polished}
 
 

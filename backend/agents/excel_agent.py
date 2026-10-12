@@ -40,6 +40,16 @@ class ExcelAgent:
         if df is None:
             df = read_excel(file_path)
             set_dataframe(file_id, df)
+        elif not df.attrs.get("deficit_sales_forecast") or not df.attrs.get(
+            "deficit_sales_forecast_company"
+        ):
+            # parquet-кэш не хранит attrs — подтягиваем прогноз со 2-го листа заново
+            try:
+                from services.deficit_sales_table import attach_deficit_sales_forecast
+
+                attach_deficit_sales_forecast(df, file_path)
+            except Exception:
+                pass
 
         return df
 

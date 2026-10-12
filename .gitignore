@@ -9,3 +9,6 @@ backend/test_*.py
 backend/test_*.xlsx
 web/node_modules/
 web/dist/
+.venv/
+.cursor/
+.vscode/

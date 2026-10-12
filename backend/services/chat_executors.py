@@ -205,6 +205,10 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
                 f"{data.get('error', 'нет данных')}."
             }
         title = f"{data['value_column']} {_PERIOD_LABELS[period]}"
+        n_points = len(data["groups"])
+        # Один срез в файле — линейный «график» бессмысленен (одна точка и ломаная шкала).
+        if n_points < 2 and chart_type == "line":
+            chart_type = "bar"
         if chart_type == "pie":
             chart = create_pie_chart(data, title=title)
         elif chart_type == "bar":
@@ -226,6 +230,14 @@ def _exec_chart(df: pd.DataFrame, action: dict) -> dict:
         }
         best = max(data["groups"].items(), key=lambda x: x[1])
         total = sum(data["groups"].values())
+        if n_points < 2:
+            answer = (
+                f"В выгрузке один срез ({best[0]}): **{_fmt(best[1])}** "
+                f"по «{data['value_column']}». Сравнивать пики по периодам не с чем — "
+                "нужна выгрузка за несколько кварталов/месяцев. "
+                "Чтобы понять состав этой суммы, спросите топ заказчиков или менеджеров."
+            )
+            return {"answer": answer, "chart": chart}
         return {
             "answer": (
                 f"График «{title}». Всего за период: **{_fmt(total)}**, "

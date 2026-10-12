@@ -4,6 +4,7 @@ from langchain_ollama import ChatOllama
 
 from config import (
     LLM_NUM_PREDICT_DEFAULT,
+    LLM_TEMPERATURE,
     MAIN_MODEL,
     OLLAMA_BASE_URL,
     OLLAMA_CONNECT_TIMEOUT,
@@ -49,7 +50,12 @@ def make_chat_ollama(
     return ChatOllama(**kwargs)
 
 
-llm = make_chat_ollama(model=MAIN_MODEL, num_predict=LLM_NUM_PREDICT_DEFAULT)
+# Чат/анализ — живой текст; роутер ниже остаётся temperature=0.
+llm = make_chat_ollama(
+    model=MAIN_MODEL,
+    num_predict=LLM_NUM_PREDICT_DEFAULT,
+    temperature=LLM_TEMPERATURE,
+)
 
 _router_llm: ChatOllama | None = None
 _router_fallback_llm: ChatOllama | None = None

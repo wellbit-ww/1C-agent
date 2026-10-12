@@ -18,7 +18,7 @@
   backend `:8000`.
 - `ui/` — прежний Streamlit (запасной вариант, `start.*` его больше не
   запускает).
-- LLM — локальная Ollama (по умолчанию `qwen3:8b`). LLM не считает числа:
+- LLM — локальная Ollama (по умолчанию `qwen3.8`). LLM не считает числа:
   только классифицирует запросы, собирает/правит JSON-спеки и пишет
   комментарии к вкладкам.
 
@@ -26,7 +26,7 @@
 
 - Python 3.11+
 - Node.js 20+ (`npm` в PATH)
-- [Ollama](https://ollama.com) с моделью: `ollama pull qwen3:8b`
+- [Ollama](https://ollama.com) с моделью: `ollama pull qwen3.8`
 
 ## Установка
 

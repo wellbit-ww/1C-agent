@@ -248,6 +248,50 @@ def _deficit_sales_table_tile() -> Tile:
     )
 
 
+def _deficit_sales_forecast_vitrine_tile() -> Tile:
+    return Tile(
+        title="Прогноз продаж по службам",
+        chart_type="table",
+        source=TileSource(kind="deficit_sales_forecast_vitrine"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def _deficit_sales_fulfillment_board_tile() -> Tile:
+    return Tile(
+        title="Выполнение прогноза по подразделениям",
+        chart_type="table",
+        source=TileSource(kind="deficit_sales_fulfillment_board"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def _deficit_sales_share_tile() -> Tile:
+    return Tile(
+        title="Доля подразделений в продажах",
+        chart_type="table",
+        source=TileSource(kind="deficit_sales_share"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def _deficit_sales_summary_tile() -> Tile:
+    return Tile(
+        title="Выполнение прогноза",
+        chart_type="table",
+        source=TileSource(kind="deficit_sales_summary"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
 def _group_tile(
     title: str,
     group_semantic: str | None,
@@ -392,7 +436,18 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
 
     tabs: list[Tab] = []
     # «Платежи» в workspace показывается как «Продажи».
-    tabs.append(Tab(title="Платежи", tiles=[_deficit_sales_table_tile()]))
+    tabs.append(
+        Tab(
+            title="Платежи",
+            tiles=[
+                _deficit_sales_table_tile(),
+                _deficit_sales_summary_tile(),
+                _deficit_sales_forecast_vitrine_tile(),
+                _deficit_sales_fulfillment_board_tile(),
+                _deficit_sales_share_tile(),
+            ],
+        )
+    )
     combined = (payments + structure)[:8]
     if combined:
         tabs.append(Tab(title="Структура", tiles=combined))

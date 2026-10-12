@@ -63,6 +63,12 @@ const DEALS_ZK_BUCKETS: { id: string; label: string }[] = [
 function formatPivotNumber(value: number | null | undefined, kind?: string) {
   if (value == null || Number.isNaN(Number(value))) return "—";
   const n = Number(value);
+  if (kind === "percent1") {
+    return `${n.toLocaleString("ru-RU", {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    })}%`;
+  }
   const text = Number.isInteger(n)
     ? n.toLocaleString("ru-RU")
     : n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
@@ -731,35 +737,308 @@ function PivotTableView({
           </tr>
         </thead>
         <tbody>
-          {table.rows.map((row) => (
+          {table.rows.map((row) => {
+            const rowBg = row.highlight ? "bg-zinc-700/40" : "bg-card";
+            const labelClass = row.emphasis
+              ? "italic text-red-400"
+              : row.highlight
+                ? "font-semibold text-zinc-100"
+                : "font-medium text-zinc-200";
+            return (
+              <tr key={row.label} className={`border-t border-line ${rowBg}`}>
+                <th className={`sticky left-0 px-3 py-1.5 text-left ${rowBg} ${labelClass}`}>
+                  {row.label}
+                </th>
+                {table.columns.map((col, i) => {
+                    const kind = table.column_kinds?.[i];
+                  const strong =
+                    isYearTotalColumn(col) || kind === "percent" || kind === "percent1";
+                  let cellClass = "text-zinc-300";
+                  if (activeColumn === i) cellClass = "bg-accent/10 font-medium text-zinc-100";
+                  else if (row.emphasis) cellClass = "italic text-red-400";
+                  else if (strong && row.highlight) cellClass = "font-semibold text-zinc-100";
+                  else if (strong) cellClass = "font-medium text-zinc-100";
+                  return (
+                    <td
+                      key={`${row.label}-${i}`}
+                      className={`px-2 py-1.5 tabular-nums ${cellClass} ${
+                        breaks.has(i) ? quarterEdge : ""
+                      }`}
+                    >
+                      {formatPivotNumber(row.values[i], table.column_kinds?.[i])}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+        {table.totals && table.totals.length > 0 && (
+          <tfoot>
+            <tr className="border-t border-line bg-panel font-medium">
+              <th
+                className={`sticky left-0 bg-panel px-3 py-1.5 text-left ${
+                  table.totals_emphasis ? "italic text-red-400" : "text-zinc-100"
+                }`}
+              >
+                {table.totals_label || "Итого"}
+              </th>
+              {table.totals.map((value, i) => (
+                <td
+                  key={`total-${i}`}
+                  className={`px-2 py-1.5 tabular-nums ${
+                    table.totals_emphasis ? "italic text-red-400" : "text-accent"
+                  } ${breaks.has(i) ? quarterEdge : ""}`}
+                >
+                  {formatPivotNumber(value, table.column_kinds?.[i])}
+                </td>
+              ))}
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
+const DEFICIT_FORECAST_COL = 0;
+const DEFICIT_ORDER_SUM_COL = 2;
+const DEFICIT_FULFILL_COL = 3;
+
+function parseForecastInput(raw: string): number | null {
+  const text = raw.replace(/\s/g, "").replace(",", ".");
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function deficitFulfillmentPercent(
+  orderSum: number,
+  forecast: number | null | undefined,
+): number | null {
+  if (forecast == null || forecast <= 0) return null;
+  if (orderSum <= 0) return 0;
+  return Math.round((100 * orderSum) / forecast);
+}
+
+function applySalesForecasts(table: PivotTable, forecasts: Record<string, number>): PivotTable {
+  let totalForecast = 0;
+  let hasForecast = false;
+  let totalCount = 0;
+  let totalSum = 0;
+  const rows = table.rows.map((row) => {
+    const orderSum = Number(row.values[DEFICIT_ORDER_SUM_COL] ?? 0);
+    const count = row.values[1] ?? 0;
+    const serverForecast = Number(row.values[DEFICIT_FORECAST_COL] ?? 0);
+    const forecast = row.label in forecasts ? forecasts[row.label] : serverForecast;
+    if (forecast > 0) {
+      hasForecast = true;
+      totalForecast += forecast;
+    }
+    totalCount += Number(count);
+    totalSum += orderSum;
+    const pct = deficitFulfillmentPercent(orderSum, forecast);
+    return {
+      ...row,
+      values: [forecast, count, orderSum, pct],
+    };
+  });
+  const totals = table.totals ? [...table.totals] : [];
+  if (totals.length > DEFICIT_FULFILL_COL) {
+    totals[DEFICIT_FORECAST_COL] = hasForecast ? totalForecast : 0;
+    totals[1] = totalCount;
+    totals[DEFICIT_ORDER_SUM_COL] = totalSum;
+    totals[DEFICIT_FULFILL_COL] = deficitFulfillmentPercent(
+      totalSum,
+      hasForecast ? totalForecast : null,
+    );
+  }
+  return { ...table, rows, totals };
+}
+
+function DeficitSalesSummaryReadonly({
+  table,
+  plotlyJson,
+}: {
+  table: PivotTable;
+  plotlyJson?: string;
+}) {
+  const row = table.rows[0];
+  const values = row?.values ?? [];
+  return (
+    <div className="space-y-4">
+      <div className="overflow-auto rounded-lg border border-line">
+        <table className="min-w-full border-collapse text-right text-xs">
+          <thead className="bg-panel text-zinc-200">
+            <tr>
+              {table.columns.map((col) => (
+                <th key={col} className="border-b border-line px-3 py-2 font-medium whitespace-nowrap">
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              {values.map((value, i) => (
+                <td
+                  key={i}
+                  className={`border-t border-line px-3 py-2 tabular-nums ${
+                    table.column_kinds?.[i] === "percent"
+                      ? "font-medium text-zinc-100"
+                      : "text-zinc-300"
+                  }`}
+                >
+                  {formatPivotNumber(value as number, table.column_kinds?.[i])}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {plotlyJson ? <PlotChart json={plotlyJson} className="h-[26rem] w-full" /> : null}
+    </div>
+  );
+}
+
+function DeficitSalesBoardView({
+  table,
+  salesForecasts,
+  busy,
+  onSaveForecasts,
+}: {
+  table: PivotTable;
+  salesForecasts: Record<string, number>;
+  busy: boolean;
+  onSaveForecasts: (next: Record<string, number>) => void;
+}) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const spans = table.year_spans ?? [];
+  const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
+  const breaks = quarterStarts(spans);
+  const quarterEdge = "border-l border-zinc-400";
+  const forecastCol = table.forecast_column_index ?? DEFICIT_FORECAST_COL;
+
+  const liveForecasts = { ...salesForecasts };
+  for (const row of table.rows) {
+    const draft = drafts[row.label];
+    if (draft === undefined) continue;
+    const parsed = parseForecastInput(draft);
+    if (parsed != null) liveForecasts[row.label] = parsed;
+    else delete liveForecasts[row.label];
+  }
+  const view = applySalesForecasts(table, liveForecasts);
+
+  function forecastInputValue(label: string, serverForecast: number) {
+    if (label in drafts) return drafts[label];
+    const saved = salesForecasts[label];
+    const value = saved ?? serverForecast;
+    if (!value) return "";
+    return String(value);
+  }
+
+  function commitForecast(label: string, raw: string) {
+    const parsed = parseForecastInput(raw);
+    const next = { ...salesForecasts };
+    if (parsed == null) delete next[label];
+    else next[label] = parsed;
+    onSaveForecasts(next);
+    setDrafts((current) => {
+      const { [label]: _, ...rest } = current;
+      return rest;
+    });
+  }
+
+  return (
+    <div className="max-h-[28rem] overflow-auto rounded-lg border border-line">
+      <table className="min-w-full border-collapse text-right text-xs">
+        <thead className="sticky top-0 z-10 bg-panel">
+          {hasYears && (
+            <tr className="text-zinc-400">
+              <th
+                rowSpan={2}
+                className="sticky left-0 z-20 border-b border-r border-line bg-panel px-3 py-1.5 text-left font-medium text-zinc-300"
+              >
+                {table.index_label || "Подразделение"}
+              </th>
+              {spans.map((span, spanI) => (
+                <th
+                  key={span.label}
+                  colSpan={span.count}
+                  className={`border-b border-line px-2 py-1.5 text-center font-semibold text-zinc-200 ${
+                    spanI > 0 ? quarterEdge : ""
+                  }`}
+                >
+                  {span.label}
+                </th>
+              ))}
+            </tr>
+          )}
+          <tr className="text-zinc-500">
+            {!hasYears && (
+              <th className="sticky left-0 z-20 border-b border-r border-line bg-panel px-3 py-1.5 text-left font-medium text-zinc-300">
+                {table.index_label || "Подразделение"}
+              </th>
+            )}
+            {table.columns.map((col, i) => (
+              <th
+                key={`${i}-${col}`}
+                className={`border-b border-line px-2 py-1.5 font-medium whitespace-nowrap text-zinc-200 ${
+                  breaks.has(i) ? quarterEdge : ""
+                }`}
+              >
+                {hasYears && isYearTotalColumn(col) ? col : hasYears ? col.replace(/\s+\d{4}$/, "") : col}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {view.rows.map((row) => (
             <tr key={row.label} className="border-t border-line">
               <th className="sticky left-0 bg-card px-3 py-1.5 text-left font-medium text-zinc-200">
                 {row.label}
               </th>
-              {table.columns.map((col, i) => (
+              {row.values.map((value, i) => (
                 <td
                   key={`${row.label}-${i}`}
                   className={`px-2 py-1.5 tabular-nums ${
-                    activeColumn === i
-                      ? "bg-accent/10 font-medium text-zinc-100"
-                      : isYearTotalColumn(col) || table.column_kinds?.[i] === "percent"
-                        ? "font-medium text-zinc-100"
-                        : "text-zinc-300"
+                    table.column_kinds?.[i] === "percent"
+                      ? "font-medium text-zinc-100"
+                      : "text-zinc-300"
                   } ${breaks.has(i) ? quarterEdge : ""}`}
                 >
-                  {formatPivotNumber(row.values[i], table.column_kinds?.[i])}
+                  {i === forecastCol ? (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      disabled={busy}
+                      className="w-full min-w-[6rem] rounded border border-line bg-bg px-1.5 py-0.5 text-right text-zinc-100 outline-none focus:border-accent/60 disabled:opacity-60"
+                      placeholder="0"
+                      aria-label={`Прогноз продаж: ${row.label}`}
+                      value={forecastInputValue(row.label, Number(table.rows.find((r) => r.label === row.label)?.values[forecastCol] ?? 0))}
+                      onChange={(e) =>
+                        setDrafts((current) => ({ ...current, [row.label]: e.target.value }))
+                      }
+                      onBlur={(e) => commitForecast(row.label, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                      }}
+                    />
+                  ) : (
+                    formatPivotNumber(value as number, table.column_kinds?.[i])
+                  )}
                 </td>
               ))}
             </tr>
           ))}
         </tbody>
-        {table.totals && table.totals.length > 0 && (
+        {view.totals && view.totals.length > 0 && (
           <tfoot>
             <tr className="border-t border-line bg-panel font-medium">
               <th className="sticky left-0 bg-panel px-3 py-1.5 text-left text-zinc-100">
                 {table.totals_label || "Итого"}
               </th>
-              {table.totals.map((value, i) => (
+              {view.totals.map((value, i) => (
                 <td
                   key={`total-${i}`}
                   className={`px-2 py-1.5 tabular-nums text-accent ${breaks.has(i) ? quarterEdge : ""}`}
@@ -1738,6 +2017,52 @@ export function App() {
     }
   }
 
+  async function onDeficitSalesPatch(
+    tabI: number,
+    tileI: number,
+    salesForecasts: Record<string, number>,
+  ) {
+    const spec = dashboard?.spec;
+    const targetFileId = fileIdForTab(tabI);
+    if (!spec || !targetFileId) return;
+    const next: DashSpec = {
+      tabs: spec.tabs.map((t, ti) =>
+        ti !== tabI
+          ? t
+          : {
+              ...t,
+              tiles: t.tiles.map((item, ij) =>
+                ij !== tileI
+                  ? item
+                  : {
+                      ...item,
+                      source: { ...item.source, sales_forecasts: salesForecasts },
+                    },
+              ),
+            },
+      ),
+    };
+    setBusy("Сохраняю прогноз…");
+    setError(null);
+    try {
+      const toSave =
+        workspaceId && dashboard
+          ? specForSourceFile(dashboard, targetFileId, next)
+          : next;
+      if (workspaceId) {
+        await api.dashboardSaveSpec(targetFileId, toSave);
+        await refreshWorkspace(workspaceId);
+      } else {
+        const patch = await api.dashboardSaveSpec(targetFileId, toSave);
+        await applyDashboardPatch(patch, next);
+      }
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function onTilePeriodBucket(
     tabI: number,
     tileI: number,
@@ -2146,6 +2471,17 @@ export function App() {
                         const stagesDealListTile =
                           specTile?.source?.kind === "stages_deal_list" ||
                           tile.chart_type === "stages_deal_list";
+                        const deficitSalesTile =
+                          specTile?.source?.kind === "deficit_sales_by_department" ||
+                          tile.chart_type === "deficit_sales_by_department";
+                        const deficitSalesSummaryTile =
+                          specTile?.source?.kind === "deficit_sales_summary";
+                        const deficitSalesVitrineTile =
+                          specTile?.source?.kind === "deficit_sales_forecast_vitrine";
+                        const deficitSalesFulfillmentBoardTile =
+                          specTile?.source?.kind === "deficit_sales_fulfillment_board";
+                        const deficitSalesShareTile =
+                          specTile?.source?.kind === "deficit_sales_share";
                         const periodBucketTile =
                           specTile?.source?.kind === "halfyear" ||
                           specTile?.source?.kind === "pivot" ||
@@ -2199,7 +2535,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${(tile.table || tile.sections || tile.money || tile.deals_list || dynamicsTile || conversionTile || moneyTile || stagesDealListTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${(tile.table || tile.sections || tile.money || tile.deals_list || dynamicsTile || conversionTile || moneyTile || stagesDealListTile || deficitSalesTile || deficitSalesVitrineTile || deficitSalesFulfillmentBoardTile || deficitSalesShareTile || deficitSalesSummaryTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -2372,6 +2708,41 @@ export function App() {
                                   columns={compareColumns}
                                   deptFilter={deptChartFilter}
                                 />
+                              ) : null}
+                            </div>
+                          ) : deficitSalesTile && tile.table && specTile ? (
+                            <DeficitSalesBoardView
+                              table={tile.table}
+                              salesForecasts={specTile.source.sales_forecasts ?? {}}
+                              busy={!!busy}
+                              onSaveForecasts={(nextForecasts) =>
+                                void onDeficitSalesPatch(tab, tileI, nextForecasts)
+                              }
+                            />
+                          ) : deficitSalesSummaryTile && tile.table ? (
+                            <DeficitSalesSummaryReadonly
+                              table={tile.table}
+                              plotlyJson={tile.plotly_json}
+                            />
+                          ) : deficitSalesVitrineTile && tile.table ? (
+                            <div className="space-y-4">
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <PlotChart json={tile.plotly_json} className="h-[30rem] w-full" />
+                              ) : null}
+                            </div>
+                          ) : deficitSalesFulfillmentBoardTile && tile.table ? (
+                            <div className="space-y-4">
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <PlotChart json={tile.plotly_json} className="h-[26rem] w-full" />
+                              ) : null}
+                            </div>
+                          ) : deficitSalesShareTile && tile.table ? (
+                            <div className="space-y-4">
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <PlotChart json={tile.plotly_json} className="h-[28rem] w-full" />
                               ) : null}
                             </div>
                           ) : tile.table ? (

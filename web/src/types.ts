@@ -15,10 +15,18 @@ export type PivotTable = {
   index_label?: string;
   columns: string[];
   year_spans?: { label: string; count: number }[];
-  rows: { label: string; values: number[]; total?: number }[];
+  rows: {
+    label: string;
+    values: number[];
+    total?: number;
+    emphasis?: boolean;
+    highlight?: boolean;
+  }[];
   totals?: number[];
   totals_label?: string;
-  column_kinds?: ("count" | "percent" | "money")[];
+  totals_emphasis?: boolean;
+  column_kinds?: ("count" | "percent" | "percent1" | "money")[];
+  forecast_column_index?: number;
 };
 
 export type SectionRow = {
@@ -126,6 +134,7 @@ export type TileSpec = {
     min_potential?: number | null;
     list_sort_column?: string | null;
     variant?: "full" | "counts";
+    sales_forecasts?: Record<string, number>;
   };
 };
 

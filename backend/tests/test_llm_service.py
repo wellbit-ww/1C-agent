@@ -42,8 +42,8 @@ class TestFactory:
     def test_roles_keep_token_caps(self):
         assert ROUTER_NUM_PREDICT == 300
         assert BRIEF_NUM_PREDICT == 1800
-        assert LLM_NUM_PREDICT_DEFAULT == 800
-        assert ROUTER_NUM_PREDICT < LLM_NUM_PREDICT_DEFAULT < BRIEF_NUM_PREDICT
+        assert LLM_NUM_PREDICT_DEFAULT == 2000
+        assert ROUTER_NUM_PREDICT < BRIEF_NUM_PREDICT <= LLM_NUM_PREDICT_DEFAULT
         brief = file_context_service._get_brief_llm()
         spec = dashboard_service._get_spec_llm()
         fallback = llm_service._get_router_fallback_llm()

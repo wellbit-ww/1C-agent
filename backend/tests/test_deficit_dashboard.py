@@ -119,8 +119,13 @@ class TestDeficitDashboard:
     def test_spec_has_payment_charts(self):
         spec = build_deficit_dashboard_spec(_ks_df())
         assert [tab.title for tab in spec.tabs] == ["Платежи", "Структура"]
-        assert len(spec.tabs[0].tiles) == 1
-        assert spec.tabs[0].tiles[0].source.kind == "deficit_sales_by_department"
+        assert [t.source.kind for t in spec.tabs[0].tiles] == [
+            "deficit_sales_by_department",
+            "deficit_sales_summary",
+            "deficit_sales_forecast_vitrine",
+            "deficit_sales_fulfillment_board",
+            "deficit_sales_share",
+        ]
         structure = spec.tabs[1]
         titles = [tile.title for tile in structure.tiles]
         assert "К оплате" in titles

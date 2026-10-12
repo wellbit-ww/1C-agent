@@ -178,10 +178,11 @@ class TestNarrativeReport:
         assert result["charts"] == []
         assert "Понимание этого файла" not in result["answer"]
         assert "Пустых ячеек" not in result["answer"]
-        assert "Отчёт по продажам" in result["answer"]
+        # Шаблон «Динамика/Лидеры/Выводы» больше не отдаём как ответ
+        assert "**Лидеры**" not in result["answer"]
+        assert "**Выводы**" not in result["answer"]
         assert "2394" in result["answer"]
-        assert "Динамика" in result["answer"]
-        assert "Запрошено 7 срезов" in result["answer"]
+        assert "Запрошено" in result["answer"] or "срезов" in result["answer"]
 
     def test_quarter_report_without_ollama(self, sales_df, monkeypatch):
         def boom(*a, **k):
@@ -194,9 +195,10 @@ class TestNarrativeReport:
         )
         assert result["charts"] == []
         assert "Понимание этого файла" not in result["answer"]
-        assert "Отчёт по продажам" in result["answer"]
-        assert "Лидеры" in result["answer"]
-        assert "Выводы" in result["answer"]
+        assert "недоступна" in result["answer"].lower() or "факты" in result["answer"].lower()
+        assert "**Лидеры**" not in result["answer"]
+        assert "**Выводы**" not in result["answer"]
+        assert "2394" in result["answer"]
 
     def test_good_polish_is_kept(self, sales_df, monkeypatch):
         polished = (
@@ -209,6 +211,27 @@ class TestNarrativeReport:
             "Напиши подробный отчет по продажам за квартал",
         )
         assert result["answer"] == polished.strip()
+
+    def test_template_report_is_rejected(self, sales_df, monkeypatch):
+        template = (
+            "**Отчёт по продажам**\n\n**Динамика по кварталам**\n"
+            "• 1 кв 2025: 100\n\n**Лидеры**\nПо клиентам: А.\n\n**Выводы**\nПродажи неровные."
+        )
+        calls = {"n": 0}
+
+        def fake_llm(*a, **k):
+            calls["n"] += 1
+            return template
+
+        monkeypatch.setattr(chat_service, "ask_llm", fake_llm)
+        result = chat_service.handle_question(
+            sales_df,
+            "Проанализируй файл и дай советы",
+        )
+        assert calls["n"] >= 2  # повторный проход после шаблона
+        assert "**Лидеры**" not in result["answer"]
+        assert "**Выводы**" not in result["answer"]
+        assert "факты" in result["answer"].lower() or "2394" in result["answer"]
 
 
 class TestExtractJson:

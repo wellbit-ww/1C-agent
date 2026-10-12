@@ -204,6 +204,11 @@ _VALID_KINDS = {
     "deal_statuses",
     "in_work_stages",
     "stages_deal_list",
+    "deficit_sales_by_department",
+    "deficit_sales_forecast_vitrine",
+    "deficit_sales_fulfillment_board",
+    "deficit_sales_share",
+    "deficit_sales_summary",
 }
 _VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
@@ -319,6 +324,11 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deals_conversion",
         "deals_money",
         "stages_deal_list",
+        "deficit_sales_by_department",
+        "deficit_sales_forecast_vitrine",
+        "deficit_sales_fulfillment_board",
+        "deficit_sales_share",
+        "deficit_sales_summary",
     ):
         kind = "pivot"
 
@@ -356,6 +366,27 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
     elif kind == "status_summary":
         src["kind"] = "status_summary"
         chart = "table"
+    elif kind in (
+        "deficit_sales_by_department",
+        "deficit_sales_forecast_vitrine",
+        "deficit_sales_fulfillment_board",
+        "deficit_sales_share",
+        "deficit_sales_summary",
+    ):
+        src["kind"] = kind
+        chart = "table"
+        raw_fc = source.get("sales_forecasts") if isinstance(source, dict) else None
+        if isinstance(raw_fc, dict):
+            cleaned_fc: dict[str, float] = {}
+            for key, value in raw_fc.items():
+                label = str(key).strip()[:40]
+                if not label:
+                    continue
+                try:
+                    cleaned_fc[label] = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    continue
+            src["sales_forecasts"] = cleaned_fc
     elif kind in (
         "halfyear",
         "outcome",

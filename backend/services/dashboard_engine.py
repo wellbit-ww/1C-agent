@@ -2512,9 +2512,348 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         from services.deficit_sales_table import build_deficit_sales_table
 
         return build_deficit_sales_table(df, tile)
+    if kind == "deficit_sales_forecast_vitrine":
+        from services.deficit_sales_table import build_deficit_sales_forecast_vitrine
+
+        return build_deficit_sales_forecast_vitrine(df, tile)
+    if kind == "deficit_sales_fulfillment_board":
+        from services.deficit_sales_table import build_deficit_sales_fulfillment_board
+
+        return build_deficit_sales_fulfillment_board(df, tile)
+    if kind == "deficit_sales_share":
+        from services.deficit_sales_table import build_deficit_sales_share_table
+
+        return build_deficit_sales_share_table(df, tile)
+    if kind == "deficit_sales_summary":
+        from services.deficit_sales_table import build_deficit_sales_summary
+
+        return build_deficit_sales_summary(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)
+
+
+def _fmt_ru_int(value: float) -> str:
+    n = int(round(float(value)))
+    return f"{n:,}".replace(",", " ")
+
+
+def _render_deficit_sales_summary_chart(table: dict) -> go.Figure:
+    """Два столбца: прогноз и сумма заказов; % выполнения над вторым столбцом."""
+    row = (table.get("rows") or [{}])[0]
+    values = list(row.get("values") or [0, 0, None])
+    forecast = float(values[0] or 0)
+    order_sum = float(values[1] or 0)
+    pct = values[2] if len(values) > 2 else None
+
+    labels = ["ПРОГНОЗ ПРОДАЖ, Р.", "ОБЩАЯ СУММА ЗАКАЗОВ, Р."]
+    amounts = [forecast, order_sum]
+    texts = [_fmt_ru_int(v) for v in amounts]
+    bar_color = "#5B9BD5"
+    peak = max(amounts) if amounts else 0.0
+    y_top = peak * 1.18 if peak > 0 else 1.0
+
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=amounts,
+            marker_color=bar_color,
+            text=texts,
+            textposition="inside",
+            textangle=-90,
+            insidetextanchor="middle",
+            textfont=dict(color="white", size=14),
+            cliponaxis=False,
+            width=0.55,
+            hovertemplate="%{x}<br>%{text}<extra></extra>",
+        )
+    )
+    annotations = []
+    if pct is not None and forecast > 0:
+        annotations.append(
+            dict(
+                x=labels[1],
+                y=order_sum + peak * 0.06,
+                text=f"<b>{int(pct)}%</b>",
+                showarrow=False,
+                font=dict(color="#C00000", size=16),
+                bgcolor="rgba(255,255,255,0.95)",
+                bordercolor="#A0A0A0",
+                borderwidth=1,
+                borderpad=4,
+                xanchor="center",
+                yanchor="bottom",
+            )
+        )
+    fig.update_layout(
+        title=chart_title_caps("Прогноз и факт продаж"),
+        height=420,
+        margin=dict(l=24, r=24, t=64, b=72),
+        showlegend=False,
+        template="plotly_white",
+        bargap=0.35,
+        annotations=annotations,
+        shapes=[
+            dict(
+                type="line",
+                xref="x",
+                yref="paper",
+                x0=0.5,
+                x1=0.5,
+                y0=0,
+                y1=1,
+                line=dict(color="#D0D0D0", width=1),
+            )
+        ],
+    )
+    fig.update_xaxes(type="category", tickangle=0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
+    return fig
+
+
+def _fmt_ru_share_pct(value: float) -> str:
+    text = f"{float(value):.1f}".replace(".", ",")
+    return f"{text}%"
+
+
+def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
+    """Столбцы сумм заказов: компания первая красная, службы синие по убыванию суммы."""
+    company_label = str(table.get("totals_label") or "Совтест АТЕ")
+    totals = list(table.get("totals") or [0.0, 100.0])
+    company_sum = float(totals[0] or 0)
+    company_share = float(totals[1] if len(totals) > 1 else 100.0)
+
+    items: list[tuple[str, float, float, bool]] = [
+        (company_label, company_sum, company_share, True)
+    ]
+    for row in table.get("rows") or []:
+        values = list(row.get("values") or [0, 0])
+        items.append(
+            (
+                str(row.get("label") or ""),
+                float(values[0] or 0),
+                float(values[1] or 0) if len(values) > 1 else 0.0,
+                False,
+            )
+        )
+
+    # Компания всегда слева, остальные по убыванию суммы
+    company = items[0]
+    rest = sorted(items[1:], key=lambda item: (-item[1], item[0]))
+    ordered = [company, *rest]
+
+    labels = [label for label, _, _, _ in ordered]
+    amounts = [amount for _, amount, _, _ in ordered]
+    shares = [share for _, _, share, _ in ordered]
+    is_company = [flag for _, _, _, flag in ordered]
+    colors = ["#C00000" if flag else "#5B9BD5" for flag in is_company]
+    peak = max(amounts) if amounts else 0.0
+    y_top = peak * 1.35 if peak > 0 else 1.0
+
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=amounts,
+            marker_color=colors,
+            text=[f"{_fmt_ru_int(v)} ₽" for v in amounts],
+            textposition="outside",
+            textfont=dict(
+                color=["#C00000" if flag else "#2F2F2F" for flag in is_company],
+                size=11,
+            ),
+            cliponaxis=False,
+            width=0.92,
+            hovertemplate="%{x}<br>%{text}<extra></extra>",
+        )
+    )
+
+    annotations = []
+    for label, amount, share, flag in ordered:
+        annotations.append(
+            dict(
+                x=label,
+                y=amount + peak * 0.12,
+                text=f"<b>{_fmt_ru_share_pct(share)}</b>",
+                showarrow=False,
+                font=dict(color="#C00000" if flag else "#2F2F2F", size=12),
+                bgcolor="rgba(255,255,255,0.95)",
+                bordercolor="#A0A0A0",
+                borderwidth=1,
+                borderpad=3,
+                xanchor="center",
+                yanchor="bottom",
+            )
+        )
+
+    fig.update_layout(
+        title=chart_title_caps("Доля продаж коммерческих служб"),
+        height=460,
+        margin=dict(l=24, r=24, t=72, b=80),
+        showlegend=False,
+        template="plotly_white",
+        bargap=0.02,
+        plot_bgcolor="#F5F5F5",
+        annotations=annotations,
+    )
+    fig.update_xaxes(type="category", tickangle=0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
+    return fig
+
+
+def _render_deficit_sales_fulfillment_chart(table: dict) -> go.Figure:
+    """Столбцы % выполнения: компания красная, выше — зелёные, ниже — синие; сортировка по убыванию."""
+    items: list[tuple[str, int, bool]] = []
+    for row in table.get("rows") or []:
+        values = list(row.get("values") or [])
+        if not values or values[0] is None:
+            continue
+        items.append((str(row.get("label") or ""), int(values[0]), bool(row.get("emphasis"))))
+
+    items.sort(key=lambda item: (-item[1], 0 if item[2] else 1, item[0]))
+    if not items:
+        fig = go.Figure()
+        fig.update_layout(title=chart_title_caps("Выполнение прогноза продаж"), height=360)
+        return fig
+
+    company_pct = next((pct for _, pct, is_co in items if is_co), None)
+    labels = [label for label, _, _ in items]
+    pcts = [pct for _, pct, _ in items]
+    colors: list[str] = []
+    text_colors: list[str] = []
+    for _label, pct, is_company in items:
+        if is_company:
+            colors.append("#C00000")
+            text_colors.append("#C00000")
+        elif company_pct is not None and pct > company_pct:
+            colors.append("#70AD47")
+            text_colors.append("#2F2F2F")
+        else:
+            colors.append("#5B9BD5")
+            text_colors.append("#2F2F2F")
+
+    y_top = max(pcts) * 1.22 if max(pcts) > 0 else 10.0
+    fig = go.Figure(
+        go.Bar(
+            x=labels,
+            y=pcts,
+            marker_color=colors,
+            text=[f"{pct}%" for pct in pcts],
+            textposition="outside",
+            textfont=dict(color=text_colors, size=13),
+            cliponaxis=False,
+            width=0.78,
+            hovertemplate="%{x}<br>%{text}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=chart_title_caps("Выполнение прогноза продаж"),
+        height=420,
+        margin=dict(l=24, r=24, t=64, b=72),
+        showlegend=False,
+        template="plotly_white",
+        bargap=0.08,
+        plot_bgcolor="#F5F5F5",
+    )
+    fig.update_xaxes(type="category", tickangle=0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
+    return fig
+
+
+def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
+    """Сгруппированные столбцы: прогноз (синий) и суммы заказов (красный) по службам + итого."""
+    categories: list[str] = []
+    forecasts: list[float] = []
+    orders: list[float] = []
+    pcts: list[int | None] = []
+
+    for row in table.get("rows") or []:
+        values = list(row.get("values") or [0, 0, None])
+        categories.append(str(row.get("label") or ""))
+        forecasts.append(float(values[0] or 0))
+        orders.append(float(values[1] or 0))
+        pct = values[2] if len(values) > 2 else None
+        pcts.append(int(pct) if pct is not None else None)
+
+    totals = list(table.get("totals") or [])
+    if totals:
+        categories.append(str(table.get("totals_label") or "Совтест АТЕ"))
+        forecasts.append(float(totals[0] or 0))
+        orders.append(float(totals[1] or 0) if len(totals) > 1 else 0.0)
+        total_pct = totals[2] if len(totals) > 2 else None
+        pcts.append(int(total_pct) if total_pct is not None else None)
+
+    peak = max([*forecasts, *orders], default=0.0)
+    y_top = peak * 1.28 if peak > 0 else 1.0
+    company_i = len(categories) - 1 if totals else -1
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            name="Прогноз продаж, р.",
+            x=categories,
+            y=forecasts,
+            marker_color="#5B9BD5",
+            text=[_fmt_ru_int(v) for v in forecasts],
+            textposition="outside",
+            textangle=-90,
+            textfont=dict(color="#2F2F2F", size=10),
+            cliponaxis=False,
+            hovertemplate="%{x}<br>Прогноз: %{text}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Bar(
+            name="Суммы заказов, р.",
+            x=categories,
+            y=orders,
+            marker_color="#C00000",
+            text=[_fmt_ru_int(v) for v in orders],
+            textposition="outside",
+            textangle=-90,
+            textfont=dict(color="#2F2F2F", size=10),
+            cliponaxis=False,
+            hovertemplate="%{x}<br>Заказы: %{text}<extra></extra>",
+        )
+    )
+
+    annotations = []
+    for i, (label, forecast, order_sum, pct) in enumerate(
+        zip(categories, forecasts, orders, pcts)
+    ):
+        if pct is None or forecast <= 0:
+            continue
+        is_company = i == company_i
+        top = max(forecast, order_sum)
+        annotations.append(
+            dict(
+                x=label,
+                y=top + peak * 0.08,
+                text=f"<b>{pct}%</b>",
+                showarrow=False,
+                font=dict(color="#C00000" if is_company else "#2F2F2F", size=13),
+                bgcolor="rgba(255,255,255,0.95)",
+                bordercolor="#C00000" if is_company else "#A0A0A0",
+                borderwidth=1.5 if is_company else 1,
+                borderpad=3,
+                xanchor="center",
+                yanchor="bottom",
+            )
+        )
+
+    fig.update_layout(
+        title=chart_title_caps("План-фактный анализ продаж"),
+        barmode="group",
+        height=480,
+        margin=dict(l=24, r=24, t=72, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        template="plotly_white",
+        bargap=0.25,
+        bargroupgap=0.08,
+        annotations=annotations,
+    )
+    fig.update_xaxes(type="category", tickangle=0, automargin=True)
+    fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -2613,6 +2952,32 @@ def _tile_stats(tile: Tile, data: dict) -> dict:
 # Точка входа
 # ---------------------------------------------------------------------------
 
+def _with_department_sales_forecasts(tab: Tab, tile: Tile) -> Tile:
+    """Итог и витрина берут ручные прогнозы с тайла «по подразделениям»."""
+    if tile.source.kind not in (
+        "deficit_sales_summary",
+        "deficit_sales_forecast_vitrine",
+        "deficit_sales_fulfillment_board",
+        "deficit_sales_share",
+    ):
+        return tile
+    if tile.source.sales_forecasts:
+        return tile
+    donor = next(
+        (t for t in tab.tiles if t.source.kind == "deficit_sales_by_department"),
+        None,
+    )
+    if not donor or not donor.source.sales_forecasts:
+        return tile
+    return tile.model_copy(
+        update={
+            "source": tile.source.model_copy(
+                update={"sales_forecasts": dict(donor.source.sales_forecasts)}
+            )
+        }
+    )
+
+
 def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
     """Возвращает {"tabs": [{title, tiles: [{title, chart_type, plotly_json, stats} | {title, error}]}]}."""
     catalog = department_catalog(df)
@@ -2620,6 +2985,8 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
     for tab in spec.tabs:
         tiles = []
         for tile in tab.tiles:
+            tile = _with_department_sales_forecasts(tab, tile)
+
             def emit(payload: dict, tile=tile) -> None:
                 if tile.source.kind in _DEPT_FILTER_KINDS:
                     payload["departments"] = catalog
@@ -2713,6 +3080,70 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                     payload["plotly_json"] = period_charts[-1]
                 elif plotly_json:
                     payload["plotly_json"] = plotly_json
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_sales_summary" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                try:
+                    payload["plotly_json"] = _render_deficit_sales_summary_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning("График выполнения прогноза упал: %s", exc)
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_sales_forecast_vitrine" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                try:
+                    payload["plotly_json"] = _render_deficit_sales_plan_fact_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning("График план-факт продаж упал: %s", exc)
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_sales_fulfillment_board" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                try:
+                    payload["plotly_json"] = _render_deficit_sales_fulfillment_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning("График выполнения прогноза по службам упал: %s", exc)
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_sales_share" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                try:
+                    payload["plotly_json"] = _render_deficit_sales_share_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning("График доли продаж упал: %s", exc)
                 emit(payload)
                 continue
 

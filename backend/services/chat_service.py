@@ -79,6 +79,8 @@ group_column / value_column — точные имена из списка кол
 Имя из вопроса (КЭАЗ, Алабуга, Кусков) — action=entity, не group. Два имени («сравни Алабугу и Робел») — action=compare.
 Предпочитай action=general (ответ по фактам файла), а не help. help — только если спросили «что ты умеешь».
 Просьба написать отчёт, подробный анализ, обзор продаж — action=general, не chart.
+Вопросы «почему пик», «почему так», «в чём причина», «из‑за чего» — action=general
+(объяснение по фактам), НЕ chart и НЕ period-график.
 Если вопрос составной («и», «а также») — верни список команд: [{{...}}, {{...}}].
 Если вопрос-уточнение («а по менеджерам?», «а теперь круговая») — учитывай контекст диалога.
 Ответь строго одним JSON, без пояснений и без markdown.
@@ -89,6 +91,14 @@ _ALLOWED_ACTIONS = {"stat", "chart", "insights", "lookup", "entity", "compare", 
 
 _INTERPRET_HINT = re.compile(
     r"поясн|интерпрет|почему\s+так|что это знач|прокоммент",
+    re.I,
+)
+
+# «Почему такие пики?» — объяснение, а не линейный график по одному кварталу.
+_WHY_PEAK_HINT = re.compile(
+    r"(почему|отчего|из[- ]?за\s+чего|в\s+ч[её]м\s+причин|чем\s+объясн)"
+    r".{0,40}(пик|скач|рост|просад|упал|вырос|так\s+много|так\s+мало)"
+    r"|(причин|разбер).{0,30}(пик|скач|рост)",
     re.I,
 )
 
@@ -215,11 +225,15 @@ def _maybe_interpret(question: str, answer: str, file_context=None) -> str:
     return (note or "").strip()
 
 
+def _wants_why_peak(question: str) -> bool:
+    return bool(_WHY_PEAK_HINT.search(question or ""))
+
+
 def _normalize_actions(actions: list[dict] | None, question: str) -> list[dict]:
     if not actions:
         return [{"action": "general"}]
     q = question.lower()
-    if _wants_narrative(q):
+    if _wants_narrative(q) or _wants_why_peak(question):
         return [{"action": "general"}]
     out = []
     words = entity_name_words(question)
@@ -227,6 +241,9 @@ def _normalize_actions(actions: list[dict] | None, question: str) -> list[dict]:
         kind = action.get("action")
         op = action.get("operation")
         is_group = kind == "group" or (kind == "stat" and op == "group")
+        if kind == "chart" and _wants_why_peak(question):
+            out.append({"action": "general", "question": question})
+            continue
         if is_group and wants_named_compare(question):
             out.append({**action, "action": "compare"})
             continue
@@ -494,6 +511,12 @@ def handle_question(
 
     if _wants_narrative(q):
         result = _exec_narrative(df, question, file_context=file_context)
+        return {"answer": result["answer"], "charts": []}
+
+    if _wants_why_peak(question):
+        result = _exec_general(
+            df, {"action": "general", "question": question}, file_context=file_context
+        )
         return {"answer": result["answer"], "charts": []}
 
     chart_follow = _followup_chart_action(question, history)

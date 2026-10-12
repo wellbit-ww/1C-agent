@@ -56,6 +56,10 @@ class TileSource(BaseModel):
         "in_work_stages",
         "stages_deal_list",
         "deficit_sales_by_department",
+        "deficit_sales_forecast_vitrine",
+        "deficit_sales_fulfillment_board",
+        "deficit_sales_share",
+        "deficit_sales_summary",
     ]
     group_semantic: str | None = None
     group_column: str | None = None
@@ -71,6 +75,7 @@ class TileSource(BaseModel):
     min_potential: float | None = None
     list_sort_column: str | None = None
     variant: Literal["full", "counts"] | None = None
+    sales_forecasts: dict[str, float] | None = None
 
 
 class Tile(BaseModel):

@@ -36,7 +36,12 @@ def create_line_chart(data: dict, title: str = "Line Chart") -> dict:
     y_vals = list(groups.values())
 
     fig = go.Figure(data=[go.Scatter(x=x_vals, y=y_vals, mode="lines+markers")])
-    fig.update_layout(title=title)
+    layout = {"title": title}
+    # Одна точка или почти равные значения — Plotly сжимает ось и получается «мусор».
+    if len(y_vals) <= 2:
+        peak = max(float(v) for v in y_vals) if y_vals else 0.0
+        layout["yaxis"] = {"rangemode": "tozero", "range": [0, peak * 1.15 if peak > 0 else 1]}
+    fig.update_layout(**layout)
 
     return {"chart_type": "line", "plotly_json": fig.to_json()}
 

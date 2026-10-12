@@ -112,12 +112,32 @@ def attach_file(
     }
 
 
-_PAYMENTS_TAB_TILE_KINDS = frozenset({"deficit_sales_by_department"})
+_PAYMENTS_TAB_TILE_KINDS = frozenset(
+    {
+        "deficit_sales_by_department",
+        "deficit_sales_forecast_vitrine",
+        "deficit_sales_fulfillment_board",
+        "deficit_sales_share",
+        "deficit_sales_summary",
+    }
+)
+_PAYMENTS_TAB_TILE_ORDER = (
+    "deficit_sales_by_department",
+    "deficit_sales_summary",
+    "deficit_sales_forecast_vitrine",
+    "deficit_sales_fulfillment_board",
+    "deficit_sales_share",
+)
+
+
+def _order_payments_tab_tiles(tiles: list) -> list:
+    by_kind = {t.source.kind: t for t in tiles}
+    return [by_kind[k] for k in _PAYMENTS_TAB_TILE_ORDER if k in by_kind]
 
 
 def normalize_deficit_dashboard_spec(spec):
-    """Вкладка «Платежи» (Продажи в UI): таблица продаж; платёжные графики — на «Структура»."""
-    from models.dashboard_spec import DashboardSpec, Tab
+    """Вкладка «Платежи» (Продажи в UI): таблицы продаж; платёжные графики — на «Структура»."""
+    from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
 
     if not isinstance(spec, DashboardSpec):
         return spec
@@ -128,7 +148,81 @@ def normalize_deficit_dashboard_spec(spec):
     stay = [t for t in pay.tiles if t.source.kind in _PAYMENTS_TAB_TILE_KINDS]
     moved = [t for t in pay.tiles if t.source.kind not in _PAYMENTS_TAB_TILE_KINDS]
     moved.extend(list(structure.tiles) if structure else [])
-    pay.tiles = stay
+    if not any(t.source.kind == "deficit_sales_by_department" for t in stay):
+        stay.insert(
+            0,
+            Tile(
+                title="Продажи по подразделениям",
+                chart_type="table",
+                source=TileSource(kind="deficit_sales_by_department"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
+        )
+    if not any(t.source.kind == "deficit_sales_summary" for t in stay):
+        insert_at = next(
+            (
+                i + 1
+                for i, t in enumerate(stay)
+                if t.source.kind == "deficit_sales_by_department"
+            ),
+            len(stay),
+        )
+        stay.insert(
+            insert_at,
+            Tile(
+                title="Выполнение прогноза",
+                chart_type="table",
+                source=TileSource(kind="deficit_sales_summary"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
+        )
+    if not any(t.source.kind == "deficit_sales_forecast_vitrine" for t in stay):
+        insert_at = next(
+            (
+                i + 1
+                for i, t in enumerate(stay)
+                if t.source.kind == "deficit_sales_summary"
+            ),
+            len(stay),
+        )
+        stay.insert(
+            insert_at,
+            Tile(
+                title="Прогноз продаж по службам",
+                chart_type="table",
+                source=TileSource(kind="deficit_sales_forecast_vitrine"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            ),
+        )
+    if not any(t.source.kind == "deficit_sales_fulfillment_board" for t in stay):
+        stay.append(
+            Tile(
+                title="Выполнение прогноза по подразделениям",
+                chart_type="table",
+                source=TileSource(kind="deficit_sales_fulfillment_board"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            )
+        )
+    if not any(t.source.kind == "deficit_sales_share" for t in stay):
+        stay.append(
+            Tile(
+                title="Доля подразделений в продажах",
+                chart_type="table",
+                source=TileSource(kind="deficit_sales_share"),
+                agg="sum",
+                top_n=50,
+                sort="none",
+            )
+        )
+    pay.tiles = _order_payments_tab_tiles(stay)
     if structure is not None:
         structure.tiles = moved[:8]
     elif moved:
