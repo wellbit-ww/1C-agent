@@ -375,6 +375,8 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
     ):
         src["kind"] = kind
         chart = "table"
+        period = str(source.get("period") or "quarter").lower().strip()
+        src["period"] = period if period in {"half", "quarter", "month"} else "quarter"
         raw_fc = source.get("sales_forecasts") if isinstance(source, dict) else None
         if isinstance(raw_fc, dict):
             cleaned_fc: dict[str, float] = {}

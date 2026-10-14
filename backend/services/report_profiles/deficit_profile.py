@@ -241,7 +241,7 @@ def _deficit_sales_table_tile() -> Tile:
     return Tile(
         title="Продажи по подразделениям",
         chart_type="table",
-        source=TileSource(kind="deficit_sales_by_department"),
+        source=TileSource(kind="deficit_sales_by_department", period="quarter"),
         agg="sum",
         top_n=50,
         sort="none",
@@ -252,7 +252,7 @@ def _deficit_sales_forecast_vitrine_tile() -> Tile:
     return Tile(
         title="Прогноз продаж по службам",
         chart_type="table",
-        source=TileSource(kind="deficit_sales_forecast_vitrine"),
+        source=TileSource(kind="deficit_sales_forecast_vitrine", period="quarter"),
         agg="sum",
         top_n=50,
         sort="none",
@@ -263,7 +263,7 @@ def _deficit_sales_fulfillment_board_tile() -> Tile:
     return Tile(
         title="Выполнение прогноза по подразделениям",
         chart_type="table",
-        source=TileSource(kind="deficit_sales_fulfillment_board"),
+        source=TileSource(kind="deficit_sales_fulfillment_board", period="quarter"),
         agg="sum",
         top_n=50,
         sort="none",
@@ -274,7 +274,7 @@ def _deficit_sales_share_tile() -> Tile:
     return Tile(
         title="Доля подразделений в продажах",
         chart_type="table",
-        source=TileSource(kind="deficit_sales_share"),
+        source=TileSource(kind="deficit_sales_share", period="quarter"),
         agg="sum",
         top_n=50,
         sort="none",
@@ -285,7 +285,7 @@ def _deficit_sales_summary_tile() -> Tile:
     return Tile(
         title="Выполнение прогноза",
         chart_type="table",
-        source=TileSource(kind="deficit_sales_summary"),
+        source=TileSource(kind="deficit_sales_summary", period="quarter"),
         agg="sum",
         top_n=50,
         sort="none",

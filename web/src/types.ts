@@ -27,6 +27,9 @@ export type PivotTable = {
   totals_emphasis?: boolean;
   column_kinds?: ("count" | "percent" | "percent1" | "money")[];
   forecast_column_index?: number;
+  order_sum_column_index?: number;
+  order_count_column_index?: number;
+  fulfill_column_index?: number;
 };
 
 export type SectionRow = {

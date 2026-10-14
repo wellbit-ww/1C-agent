@@ -44,13 +44,20 @@ function normalizeChartTitle(raw: unknown) {
   };
 }
 
-function chartLayout(fig: PlotlyFigure, theme: "dark" | "light") {
+function chartLayout(
+  fig: PlotlyFigure,
+  theme: "dark" | "light",
+  opts?: { forExport?: boolean },
+) {
   const src = fig.layout || {};
   const srcMargin = (src.margin || {}) as Record<string, number>;
   const light = theme === "light";
+  const forExport = Boolean(opts?.forExport);
   const layout: Record<string, unknown> = {
     ...src,
-    autosize: light ? false : src.autosize !== false,
+    // Одинаковый autosize в обеих темах: иначе в light график остаётся ~700px
+    // и визуально «сжимается» относительно тёмной темы.
+    autosize: forExport ? false : src.autosize !== false,
     paper_bgcolor: light ? "#ffffff" : "rgba(0,0,0,0)",
     plot_bgcolor: light ? "#ffffff" : "rgba(0,0,0,0)",
     font: {
@@ -64,6 +71,12 @@ function chartLayout(fig: PlotlyFigure, theme: "dark" | "light") {
       ? { colorway: ["#c8102e", "#9f1239", "#e11d48", "#fb7185", "#7f1d1d", "#fda4af"] }
       : {}),
   };
+  // На экране размер задаёт контейнер (одинаково в light/dark).
+  // Фиксированные width/height из спеки оставляли график ~700×480 в светлой теме.
+  if (!forExport) {
+    delete layout.width;
+    delete layout.height;
+  }
   const normalizedTitle = normalizeChartTitle(src.title);
   if (normalizedTitle) layout.title = normalizedTitle;
   const traces = Array.isArray(fig.data) ? fig.data : [];
@@ -181,7 +194,7 @@ async function trimPaperMargins(blob: Blob, pad = 18): Promise<Blob> {
 
 async function renderChartPng(json: string) {
   const fig = JSON.parse(json) as PlotlyFigure;
-  const { layout } = chartLayout(fig, "light");
+  const { layout } = chartLayout(fig, "light", { forExport: true });
   const width = Number(layout.width) || 960;
   const height = Number(layout.height) || 540;
   const host = document.createElement("div");
@@ -262,7 +275,10 @@ export function PlotChart({ json, className }: { json: string; className?: strin
       responsive: true,
       displayModeBar: false,
     }).then(() => {
-      if (!cancelled) resize();
+      if (cancelled) return;
+      // Два кадра: после layout контейнера Plotly должен занять 100% ширины/высоты.
+      resize();
+      requestAnimationFrame(resize);
     });
     const ro = new ResizeObserver(() => {
       resize();

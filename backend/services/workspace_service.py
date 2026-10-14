@@ -154,7 +154,7 @@ def normalize_deficit_dashboard_spec(spec):
             Tile(
                 title="Продажи по подразделениям",
                 chart_type="table",
-                source=TileSource(kind="deficit_sales_by_department"),
+                source=TileSource(kind="deficit_sales_by_department", period="quarter"),
                 agg="sum",
                 top_n=50,
                 sort="none",
@@ -174,7 +174,7 @@ def normalize_deficit_dashboard_spec(spec):
             Tile(
                 title="Выполнение прогноза",
                 chart_type="table",
-                source=TileSource(kind="deficit_sales_summary"),
+                source=TileSource(kind="deficit_sales_summary", period="quarter"),
                 agg="sum",
                 top_n=50,
                 sort="none",
@@ -194,7 +194,7 @@ def normalize_deficit_dashboard_spec(spec):
             Tile(
                 title="Прогноз продаж по службам",
                 chart_type="table",
-                source=TileSource(kind="deficit_sales_forecast_vitrine"),
+                source=TileSource(kind="deficit_sales_forecast_vitrine", period="quarter"),
                 agg="sum",
                 top_n=50,
                 sort="none",
@@ -205,7 +205,7 @@ def normalize_deficit_dashboard_spec(spec):
             Tile(
                 title="Выполнение прогноза по подразделениям",
                 chart_type="table",
-                source=TileSource(kind="deficit_sales_fulfillment_board"),
+                source=TileSource(kind="deficit_sales_fulfillment_board", period="quarter"),
                 agg="sum",
                 top_n=50,
                 sort="none",
@@ -216,12 +216,29 @@ def normalize_deficit_dashboard_spec(spec):
             Tile(
                 title="Доля подразделений в продажах",
                 chart_type="table",
-                source=TileSource(kind="deficit_sales_share"),
+                source=TileSource(kind="deficit_sales_share", period="quarter"),
                 agg="sum",
                 top_n=50,
                 sort="none",
             )
         )
+    # Синхронизируем период на всех тайлах продаж
+    period = next(
+        (
+            t.source.period
+            for t in stay
+            if t.source.kind == "deficit_sales_by_department" and t.source.period
+        ),
+        "quarter",
+    )
+    if period not in {"half", "quarter", "month"}:
+        period = "quarter"
+    stay = [
+        t.model_copy(
+            update={"source": t.source.model_copy(update={"period": period})}
+        )
+        for t in stay
+    ]
     pay.tiles = _order_payments_tab_tiles(stay)
     if structure is not None:
         structure.tiles = moved[:8]

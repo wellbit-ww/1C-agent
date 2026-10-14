@@ -205,21 +205,6 @@ def _display_row_order(
     return _ROW_ORDER_SPLIT
 
 
-def _orders_for_display(
-    orders: dict[str, dict[str, float]], row_order: tuple[str, ...]
-) -> dict[str, dict[str, float]]:
-    if _COMBINED_SIO_APLIS not in row_order:
-        return orders
-    out = dict(orders)
-    sio = orders.get("СИО", {"count": 0.0, "sum": 0.0})
-    apl = orders.get("ОАПЛиС", {"count": 0.0, "sum": 0.0})
-    out[_COMBINED_SIO_APLIS] = {
-        "count": float(sio.get("count", 0) or 0) + float(apl.get("count", 0) or 0),
-        "sum": float(sio.get("sum", 0) or 0) + float(apl.get("sum", 0) or 0),
-    }
-    return out
-
-
 def _order_id_column(df: pd.DataFrame) -> str | None:
     for col in df.columns:
         name = _norm(col)
@@ -228,44 +213,215 @@ def _order_id_column(df: pd.DataFrame) -> str | None:
     return None
 
 
-def _aggregate_orders(df: pd.DataFrame) -> dict[str, dict[str, float]]:
+_ORDER_DATE_SKIP = ("аттестац", "пнр", "поставк", "отгрузк", "очередн")
+_ORDER_DATE_PREF = (
+    "дата заказа",
+    "дата регистрации",
+    "дата реализации",
+    "дата оплаты",
+)
+
+
+def _parse_dates_from_order_text(series: pd.Series) -> pd.Series:
+    """Достаёт дату из «Заказ клиента … от 24.07.2026 …»."""
+    extracted = (
+        series.astype(str)
+        .str.extract(r"от\s+(\d{1,2}[./]\d{1,2}[./]\d{2,4})", expand=False)
+    )
+    return pd.to_datetime(extracted, dayfirst=True, errors="coerce")
+
+
+def _resolve_order_date_series(df: pd.DataFrame) -> pd.Series | None:
+    """Дата регистрации заказа в 1С: из текста заказа или подходящей колонки."""
+    oid = _order_id_column(df)
+    if oid and oid in df.columns:
+        parsed = _parse_dates_from_order_text(df[oid])
+        dated = int(parsed.notna().sum())
+        if dated > 0 and dated >= max(1, int(len(df) * 0.5)):
+            return parsed
+
+    by_name = {_norm(c): str(c) for c in df.columns}
+    for pref in _ORDER_DATE_PREF:
+        col = by_name.get(pref)
+        if not col:
+            continue
+        parsed = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+        if int(parsed.notna().sum()) > 0:
+            return parsed
+
+    from services import data_tools
+
+    for col in data_tools.detect_date_columns(df).get("columns") or []:
+        name = _norm(col)
+        if any(skip in name for skip in _ORDER_DATE_SKIP):
+            continue
+        parsed = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+        if int(parsed.notna().sum()) > 0:
+            return parsed
+    return None
+
+
+def _sales_column_mode(tile: Tile | None) -> str:
+    """Гранулярность колонок по всему файлу: month / quarter / half."""
+    from services.dashboard_engine import _deals_zk_bucket_mode
+
+    return _deals_zk_bucket_mode(tile) if tile is not None else "quarter"
+
+
+def _period_range_keys(dates: pd.Series, mode: str) -> list:
+    """Все периоды от первой до последней даты в файле (включая пустые)."""
+    valid = dates.dropna()
+    if valid.empty:
+        return []
+    start = valid.min()
+    end = valid.max()
+    if mode == "month":
+        return list(pd.period_range(start.to_period("M"), end.to_period("M"), freq="M"))
+    if mode == "quarter":
+        return list(pd.period_range(start.to_period("Q"), end.to_period("Q"), freq="Q"))
+    # half-years as (year, half) tuples, contiguous
+    keys: list[tuple[int, int]] = []
+    y, m = int(start.year), int(start.month)
+    end_y, end_m = int(end.year), int(end.month)
+    cur = (y, 1 if m <= 6 else 2)
+    last = (end_y, 1 if end_m <= 6 else 2)
+    while cur <= last:
+        keys.append(cur)
+        year, half = cur
+        cur = (year + 1, 1) if half == 2 else (year, 2)
+    return keys
+
+
+def _period_column_label(bucket, mode: str) -> str:
+    from services.data_tools import _period_axis_label
+
+    if mode == "month":
+        return _period_axis_label(bucket, "month")
+    if mode == "quarter":
+        return _period_axis_label(bucket, "quarter")
+    if isinstance(bucket, tuple) and len(bucket) == 2:
+        return f"{bucket[1]} полуг. {bucket[0]}"
+    return str(bucket)
+
+
+def _part_order_stats(part: pd.DataFrame, order_col: str, oid: str | None) -> dict[str, float]:
+    if oid and oid in part.columns:
+        ids = (
+            part[oid]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace({"nan": "", "None": ""})
+        )
+        count = float(ids[ids != ""].nunique())
+    else:
+        count = float(len(part))
+    total = pd.to_numeric(part[order_col], errors="coerce").sum()
+    return {
+        "count": count,
+        "sum": 0.0 if pd.isna(total) else float(total),
+    }
+
+
+def _aggregate_orders_by_periods(
+    df: pd.DataFrame, tile: Tile | None = None
+) -> dict:
+    """Заказы по службам; колонки = все периоды файла с выбранной гранулярностью."""
+    from services.dashboard_engine import _deals_zk_bucket_key, _department_labels
+
     layout = detect_deficit_money_layout(df)
     order_col = layout.order_sum
     dept_col = resolve_semantic_column(df, "", semantic="department", dtype="categorical")
     if not dept_col or not order_col or dept_col not in df.columns:
-        return {}
-
-    from services.dashboard_engine import _department_labels
+        return {"periods": [], "by_dept": {}}
 
     work = df.copy()
     blank = work[dept_col].astype(str).str.strip().str.lower().isin({"", "nan", "-", "none"})
     work = work.loc[~blank]
     if work.empty:
-        return {}
+        return {"periods": [], "by_dept": {}}
 
     shorts = _department_labels(work[dept_col].astype(str).str.strip())
-    work["_bucket"] = shorts.map(_sales_row_label)
+    work["_dept"] = shorts.map(_sales_row_label)
     oid = _order_id_column(df)
+    dates = _resolve_order_date_series(work)
+    mode = _sales_column_mode(tile)
 
-    buckets: dict[str, dict[str, float]] = {}
-    for bucket, part in work.groupby("_bucket", sort=False):
-        if oid and oid in part.columns:
-            ids = (
-                part[oid]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .replace({"nan": "", "None": ""})
+    period_keys: list = []
+    if dates is not None:
+        work = work.copy()
+        work["_order_date"] = dates
+        dated = work["_order_date"].notna()
+        if dated.any():
+            period_keys = _period_range_keys(work.loc[dated, "_order_date"], mode)
+            work.loc[dated, "_period"] = _deals_zk_bucket_key(
+                work.loc[dated, "_order_date"], mode
             )
-            count = float(ids[ids != ""].nunique())
-        else:
-            count = float(len(part))
-        total = pd.to_numeric(part[order_col], errors="coerce").sum()
-        buckets[str(bucket)] = {
-            "count": count,
-            "sum": 0.0 if pd.isna(total) else float(total),
+
+    periods_meta = [
+        {"key": key, "label": _period_column_label(key, mode)} for key in period_keys
+    ]
+
+    by_dept: dict[str, dict] = {}
+    for dept, part in work.groupby("_dept", sort=False):
+        label = str(dept)
+        total = _part_order_stats(part, order_col, oid)
+        per_period: dict[str, dict[str, float]] = {}
+        if period_keys and "_period" in part.columns:
+            for key in period_keys:
+                slot = part.loc[part["_period"] == key]
+                per_period[str(key)] = (
+                    _part_order_stats(slot, order_col, oid)
+                    if not slot.empty
+                    else {"count": 0.0, "sum": 0.0}
+                )
+        by_dept[label] = {"total": total, "periods": per_period}
+
+    return {
+        "periods": periods_meta,
+        "by_dept": by_dept,
+        "child_mode": mode,
+    }
+
+
+def _aggregate_orders(df: pd.DataFrame, tile: Tile | None = None) -> dict[str, dict[str, float]]:
+    """Совместимость: итоги по службам (сумма всех видимых подпериодов)."""
+    packed = _aggregate_orders_by_periods(df, tile)
+    return {
+        label: dict(info["total"])
+        for label, info in (packed.get("by_dept") or {}).items()
+    }
+
+
+def _orders_matrix_for_display(
+    packed: dict, row_order: tuple[str, ...]
+) -> dict[str, dict]:
+    by_dept = dict(packed.get("by_dept") or {})
+    periods = list(packed.get("periods") or [])
+    if _COMBINED_SIO_APLIS not in row_order:
+        return by_dept
+    sio = by_dept.get("СИО", {"total": {"count": 0.0, "sum": 0.0}, "periods": {}})
+    apl = by_dept.get("ОАПЛиС", {"total": {"count": 0.0, "sum": 0.0}, "periods": {}})
+    merged_periods: dict[str, dict[str, float]] = {}
+    for meta in periods:
+        key = str(meta["key"])
+        a = sio.get("periods", {}).get(key, {"count": 0.0, "sum": 0.0})
+        b = apl.get("periods", {}).get(key, {"count": 0.0, "sum": 0.0})
+        merged_periods[key] = {
+            "count": float(a.get("count", 0) or 0) + float(b.get("count", 0) or 0),
+            "sum": float(a.get("sum", 0) or 0) + float(b.get("sum", 0) or 0),
         }
-    return buckets
+    out = dict(by_dept)
+    out[_COMBINED_SIO_APLIS] = {
+        "total": {
+            "count": float(sio.get("total", {}).get("count", 0) or 0)
+            + float(apl.get("total", {}).get("count", 0) or 0),
+            "sum": float(sio.get("total", {}).get("sum", 0) or 0)
+            + float(apl.get("total", {}).get("sum", 0) or 0),
+        },
+        "periods": merged_periods,
+    }
+    return out
 
 
 def _forecast_for_label(
@@ -278,166 +434,224 @@ def _forecast_for_label(
     return vitrine.get(label)
 
 
+def _as_count(value: float) -> float | int:
+    return int(value) if value == int(value) else value
+
+
 def build_deficit_sales_table(df: pd.DataFrame, tile: Tile) -> dict:
-    orders = _aggregate_orders(df)
-    if not orders:
+    packed = _aggregate_orders_by_periods(df, tile)
+    by_dept_raw = packed.get("by_dept") or {}
+    if not by_dept_raw:
         return {"error": "Нет данных по подразделениям и суммам заказов"}
 
     vitrine: dict[str, float] = dict(df.attrs.get(_ATTR_FORECAST) or {})
     manual: dict[str, float] = dict(tile.source.sales_forecasts or {})
     row_order = _display_row_order(vitrine, manual)
-    display_orders = _orders_for_display(orders, row_order)
+    display = _orders_matrix_for_display(packed, row_order)
+    periods = list(packed.get("periods") or [])
+
+    # Один период — без отдельного «Всего за период» (дубль единственной колонки).
+    show_period_total = len(periods) != 1
+
+    columns = ["Прогноз продаж, р."]
+    column_kinds: list[str] = ["money"]
+    year_spans: list[dict] = [{"label": "", "count": 1}]
+    for meta in periods:
+        columns.extend(["Количество", "Общая сумма"])
+        column_kinds.extend(["count", "money"])
+        year_spans.append({"label": meta["label"], "count": 2})
+    if show_period_total:
+        columns.extend(["Количество", "Общая сумма"])
+        column_kinds.extend(["count", "money"])
+        year_spans.append(
+            {
+                "label": "Всего за период" if periods else "Заказы, зарегистрированные в 1С",
+                "count": 2,
+            }
+        )
+    columns.append("Выполнение прогноза")
+    column_kinds.append("percent")
+    year_spans.append({"label": "", "count": 1})
+
+    fulfill_col = len(columns) - 1
+    if show_period_total:
+        order_count_col = fulfill_col - 2
+        order_sum_col = fulfill_col - 1
+    elif periods:
+        order_count_col = 1
+        order_sum_col = 2
+    else:
+        order_count_col = fulfill_col - 2
+        order_sum_col = fulfill_col - 1
+
     rows: list[dict] = []
+    totals = [0.0] * len(columns)
     total_forecast = 0.0
-    total_count = 0.0
-    total_sum = 0.0
     has_forecast = False
     shown = set(row_order)
+    period_totals = [{"count": 0.0, "sum": 0.0} for _ in periods]
 
-    for label in row_order:
-        bucket = display_orders.get(label, {"count": 0.0, "sum": 0.0})
-        count = bucket["count"]
-        order_sum = bucket["sum"]
-        forecast = _forecast_for_label(label, vitrine, manual)
+    def _append_row(label: str, info: dict, forecast: float | None) -> None:
+        nonlocal total_forecast, has_forecast
+        total = info.get("total") or {"count": 0.0, "sum": 0.0}
+        count = float(total.get("count", 0) or 0)
+        order_sum = float(total.get("sum", 0) or 0)
+        values: list = [forecast if forecast is not None else 0]
+        for i, meta in enumerate(periods):
+            slot = (info.get("periods") or {}).get(str(meta["key"]), {"count": 0.0, "sum": 0.0})
+            values.append(_as_count(float(slot.get("count", 0) or 0)))
+            values.append(float(slot.get("sum", 0) or 0))
+            period_totals[i]["count"] += float(slot.get("count", 0) or 0)
+            period_totals[i]["sum"] += float(slot.get("sum", 0) or 0)
+        if show_period_total:
+            values.append(_as_count(count))
+            values.append(order_sum)
+        pct = _fulfillment_percent(order_sum, forecast if forecast and forecast > 0 else None)
+        values.append(pct if pct is not None else None)
+        rows.append({"label": label, "values": values})
         if forecast is not None and forecast > 0:
             has_forecast = True
-        pct = _fulfillment_percent(order_sum, forecast if forecast and forecast > 0 else None)
-        rows.append(
-            {
-                "label": label,
-                "values": [
-                    forecast if forecast is not None else 0,
-                    int(count) if count == int(count) else count,
-                    order_sum,
-                    pct if pct is not None else None,
-                ],
-            }
-        )
-        if forecast is not None and forecast > 0:
             total_forecast += forecast
-        total_count += count
-        total_sum += order_sum
+        totals[order_count_col] = float(totals[order_count_col] or 0) + count
+        totals[order_sum_col] = float(totals[order_sum_col] or 0) + order_sum
 
-    # Extra departments not in the fixed row order
+    for label in row_order:
+        info = display.get(label, {"total": {"count": 0.0, "sum": 0.0}, "periods": {}})
+        forecast = _forecast_for_label(label, vitrine, manual)
+        _append_row(label, info, forecast)
+
     skip_when_combined = {"СИО", "ОАПЛиС"} if _COMBINED_SIO_APLIS in row_order else set()
-    for label, bucket in orders.items():
+    for label, info in (packed.get("by_dept") or {}).items():
         if label in shown or label in skip_when_combined:
             continue
-        if not bucket["count"] and not bucket["sum"]:
+        total = info.get("total") or {}
+        if not total.get("count") and not total.get("sum"):
             continue
-        rows.append(
-            {
-                "label": label,
-                "values": [
-                    0,
-                    int(bucket["count"])
-                    if bucket["count"] == int(bucket["count"])
-                    else bucket["count"],
-                    bucket["sum"],
-                    None,
-                ],
-            }
-        )
+        _append_row(label, info, None)
 
-    total_pct = _fulfillment_percent(total_sum, total_forecast if has_forecast else None)
-    totals = [
-        total_forecast if has_forecast else total_sum and 0 or 0,
-        int(total_count) if total_count == int(total_count) else total_count,
-        total_sum,
-        total_pct,
-    ]
-    if not has_forecast:
-        totals[0] = 0
+    totals[0] = total_forecast if has_forecast else 0
+    for i, slot in enumerate(period_totals):
+        totals[1 + i * 2] = _as_count(slot["count"])
+        totals[2 + i * 2] = slot["sum"]
+    if show_period_total:
+        totals[order_count_col] = _as_count(float(totals[order_count_col] or 0))
+    totals[fulfill_col] = _fulfillment_percent(
+        float(totals[order_sum_col] or 0),
+        total_forecast if has_forecast else None,
+    )
 
     return {
-        "groups": {row["label"]: float(row["values"][2] or 0) for row in rows},
+        "groups": {
+            row["label"]: float(row["values"][order_sum_col] or 0) for row in rows
+        },
         "table": {
             "index_label": "Службы",
-            "columns": [
-                "Прогноз продаж, р.",
-                "Количество",
-                "Общая сумма",
-                "Выполнение прогноза",
-            ],
-            "column_kinds": ["money", "count", "money", "percent"],
-            "year_spans": [
-                {"label": "", "count": 1},
-                {"label": "Заказы, зарегистрированные в 1С", "count": 2},
-                {"label": "", "count": 1},
-            ],
+            "columns": columns,
+            "column_kinds": column_kinds,
+            "year_spans": year_spans,
             "rows": rows,
             "totals": totals,
             "totals_label": "Всего",
             "forecast_column_index": 0,
+            "order_sum_column_index": order_sum_col,
+            "order_count_column_index": order_count_col,
+            "fulfill_column_index": fulfill_col,
         },
+        "bucket_period": (tile.source.period or "quarter") if tile else "quarter",
     }
 
 
 def build_deficit_sales_forecast_vitrine(df: pd.DataFrame, tile: Tile) -> dict:
-    """Компактная таблица как на листе «Прогноз»: прогноз, суммы заказов, % + строка компании."""
-    orders = _aggregate_orders(df)
-    if not orders:
+    """Компактная таблица: прогноз + суммы по подпериодам + итог + %."""
+    packed = _aggregate_orders_by_periods(df, tile)
+    by_dept_raw = packed.get("by_dept") or {}
+    if not by_dept_raw:
         return {"error": "Нет данных по подразделениям и суммам заказов"}
 
     vitrine: dict[str, float] = dict(df.attrs.get(_ATTR_FORECAST) or {})
     manual: dict[str, float] = dict(tile.source.sales_forecasts or {})
     row_order = _display_row_order(vitrine, manual)
-    display_orders = _orders_for_display(orders, row_order)
+    display = _orders_matrix_for_display(packed, row_order)
+    periods = list(packed.get("periods") or [])
+
+    show_period_total = len(periods) != 1
+
+    columns = ["Прогноз продаж, р."]
+    column_kinds: list[str] = ["money"]
+    year_spans: list[dict] = [{"label": "", "count": 1}]
+    for meta in periods:
+        columns.append(meta["label"])
+        column_kinds.append("money")
+        year_spans.append({"label": meta["label"], "count": 1})
+    if show_period_total:
+        columns.append("Суммы заказов, р.")
+        column_kinds.append("money")
+        year_spans.append({"label": "Всего", "count": 1})
+    columns.append("Выполнение прогноза")
+    column_kinds.append("percent")
+    year_spans.append({"label": "", "count": 1})
+
+    fulfill_col = len(columns) - 1
+    order_sum_col = fulfill_col - 1 if show_period_total else (1 if periods else fulfill_col - 1)
 
     rows: list[dict] = []
+    totals = [0.0] * len(columns)
     service_forecast_sum = 0.0
     has_service_forecast = False
+    period_sums = [0.0] * len(periods)
+
     for label in row_order:
-        bucket = display_orders.get(label, {"count": 0.0, "sum": 0.0})
-        order_sum = bucket["sum"]
+        info = display.get(label, {"total": {"count": 0.0, "sum": 0.0}, "periods": {}})
+        order_sum = float((info.get("total") or {}).get("sum", 0) or 0)
         forecast = _forecast_for_label(label, vitrine, manual)
+        values: list = [forecast if forecast is not None else 0]
+        for i, meta in enumerate(periods):
+            slot_sum = float(
+                (info.get("periods") or {}).get(str(meta["key"]), {}).get("sum", 0) or 0
+            )
+            values.append(slot_sum)
+            period_sums[i] += slot_sum
+        if show_period_total:
+            values.append(order_sum)
+        pct = _fulfillment_percent(order_sum, forecast if forecast and forecast > 0 else None)
+        values.append(pct if pct is not None else None)
+        rows.append({"label": label, "values": values})
         if forecast is not None and forecast > 0:
             has_service_forecast = True
             service_forecast_sum += forecast
-        pct = _fulfillment_percent(order_sum, forecast if forecast and forecast > 0 else None)
-        rows.append(
-            {
-                "label": label,
-                "values": [
-                    forecast if forecast is not None else 0,
-                    order_sum,
-                    pct if pct is not None else None,
-                ],
-            }
-        )
+        totals[order_sum_col] = float(totals[order_sum_col] or 0) + order_sum
 
     company_meta = dict(df.attrs.get(_ATTR_FORECAST_COMPANY) or {})
     total_forecast = company_meta.get("forecast")
     if total_forecast is None and has_service_forecast:
         total_forecast = service_forecast_sum
     total_forecast_f = float(total_forecast) if total_forecast is not None else None
-
-    all_order_sum = sum(float(b.get("sum") or 0) for b in orders.values())
-    total_pct = _fulfillment_percent(
+    all_order_sum = float(totals[order_sum_col] or 0)
+    totals[0] = total_forecast_f if total_forecast_f is not None else 0
+    for i, value in enumerate(period_sums):
+        totals[1 + i] = value
+    totals[fulfill_col] = _fulfillment_percent(
         all_order_sum,
         total_forecast_f if total_forecast_f and total_forecast_f > 0 else None,
     )
     totals_label = str(company_meta.get("label") or _COMPANY_TOTAL_LABEL)
 
     return {
-        "groups": {row["label"]: float(row["values"][1] or 0) for row in rows},
+        "groups": {row["label"]: float(row["values"][order_sum_col] or 0) for row in rows},
         "table": {
             "index_label": "Службы",
-            "columns": [
-                "Прогноз продаж, р.",
-                "Суммы заказов, р.",
-                "Выполнение прогноза",
-            ],
-            "column_kinds": ["money", "money", "percent"],
+            "columns": columns,
+            "column_kinds": column_kinds,
+            "year_spans": year_spans if periods else None,
             "rows": rows,
-            "totals": [
-                total_forecast_f if total_forecast_f is not None else 0,
-                all_order_sum,
-                total_pct,
-            ],
+            "totals": totals,
             "totals_label": totals_label,
             "totals_emphasis": True,
+            "forecast_column_index": 0,
+            "order_sum_column_index": order_sum_col,
+            "fulfill_column_index": fulfill_col,
         },
+        "bucket_period": (tile.source.period or "quarter") if tile else "quarter",
     }
 
 
@@ -447,8 +661,9 @@ def build_deficit_sales_fulfillment_board(df: pd.DataFrame, tile: Tile) -> dict:
     if "error" in data:
         return data
     table = data["table"]
-    totals = list(table.get("totals") or [0, 0, None])
-    company_pct = totals[2] if len(totals) > 2 else None
+    fulfill_col = int(table.get("fulfill_column_index") or len(table.get("columns") or []) - 1)
+    totals = list(table.get("totals") or [])
+    company_pct = totals[fulfill_col] if len(totals) > fulfill_col else None
     company_pct_i = int(company_pct) if company_pct is not None else None
     company_label = str(table.get("totals_label") or _COMPANY_TOTAL_LABEL)
 
@@ -464,16 +679,13 @@ def build_deficit_sales_fulfillment_board(df: pd.DataFrame, tile: Tile) -> dict:
 
     for row in table.get("rows") or []:
         values = list(row.get("values") or [])
-        pct = values[2] if len(values) > 2 else None
+        pct = values[fulfill_col] if len(values) > fulfill_col else None
         if pct is None:
             continue
-        pct_i = int(pct)
-        highlight = company_pct_i is not None and pct_i > company_pct_i
         rows.append(
             {
                 "label": row["label"],
-                "values": [pct_i],
-                "highlight": highlight,
+                "values": [int(pct)],
             }
         )
 
@@ -488,79 +700,176 @@ def build_deficit_sales_fulfillment_board(df: pd.DataFrame, tile: Tile) -> dict:
             "column_kinds": ["percent"],
             "rows": rows,
         },
+        "bucket_period": data.get("bucket_period"),
     }
 
 
 def build_deficit_sales_share_table(df: pd.DataFrame, tile: Tile) -> dict:
-    """Суммы заказов и доля в продажах по службам + строка компании."""
-    orders = _aggregate_orders(df)
-    if not orders:
+    """Суммы заказов по подпериодам и доля в продажах + строка компании."""
+    packed = _aggregate_orders_by_periods(df, tile)
+    by_dept_raw = packed.get("by_dept") or {}
+    if not by_dept_raw:
         return {"error": "Нет данных по подразделениям и суммам заказов"}
 
     vitrine: dict[str, float] = dict(df.attrs.get(_ATTR_FORECAST) or {})
     manual: dict[str, float] = dict(tile.source.sales_forecasts or {})
     row_order = _display_row_order(vitrine, manual)
-    display_orders = _orders_for_display(orders, row_order)
+    display = _orders_matrix_for_display(packed, row_order)
+    periods = list(packed.get("periods") or [])
 
-    total_sum = sum(float(b.get("sum") or 0) for b in orders.values())
+    show_period_total = len(periods) != 1
+    columns = [meta["label"] for meta in periods]
+    column_kinds = ["money"] * len(periods)
+    year_spans = [{"label": meta["label"], "count": 1} for meta in periods]
+    if show_period_total:
+        columns.append("Суммы заказов, р.")
+        column_kinds.append("money")
+        year_spans.append({"label": "Всего", "count": 1})
+    columns.append("Доля в продажах")
+    column_kinds.append("percent1")
+    year_spans.append({"label": "", "count": 1})
+
+    share_col = len(columns) - 1
+    order_sum_col = share_col - 1 if show_period_total else (0 if periods else share_col - 1)
+
+    total_sum = sum(
+        float((info.get("total") or {}).get("sum", 0) or 0)
+        for info in by_dept_raw.values()
+    )
     rows: list[dict] = []
-    for label in row_order:
-        order_sum = float(display_orders.get(label, {}).get("sum") or 0)
-        share = round(100.0 * order_sum / total_sum, 1) if total_sum > 0 else 0.0
-        rows.append({"label": label, "values": [order_sum, share]})
-
-    skip_when_combined = {"СИО", "ОАПЛиС"} if _COMBINED_SIO_APLIS in row_order else set()
+    totals = [0.0] * len(columns)
+    period_sums = [0.0] * len(periods)
     shown = set(row_order)
-    for label, bucket in orders.items():
+    skip_when_combined = {"СИО", "ОАПЛиС"} if _COMBINED_SIO_APLIS in row_order else set()
+
+    def _append(label: str, info: dict) -> None:
+        order_sum = float((info.get("total") or {}).get("sum", 0) or 0)
+        values: list = []
+        for i, meta in enumerate(periods):
+            slot_sum = float(
+                (info.get("periods") or {}).get(str(meta["key"]), {}).get("sum", 0) or 0
+            )
+            values.append(slot_sum)
+            period_sums[i] += slot_sum
+        share = round(100.0 * order_sum / total_sum, 1) if total_sum > 0 else 0.0
+        if show_period_total:
+            values.append(order_sum)
+        values.append(share)
+        rows.append({"label": label, "values": values})
+        totals[order_sum_col] = float(totals[order_sum_col] or 0) + order_sum
+
+    for label in row_order:
+        _append(label, display.get(label, {"total": {"sum": 0.0}, "periods": {}}))
+    for label, info in by_dept_raw.items():
         if label in shown or label in skip_when_combined:
             continue
-        order_sum = float(bucket.get("sum") or 0)
-        if not order_sum:
+        if not (info.get("total") or {}).get("sum"):
             continue
-        share = round(100.0 * order_sum / total_sum, 1) if total_sum > 0 else 0.0
-        rows.append({"label": label, "values": [order_sum, share]})
+        _append(label, info)
 
+    for i, value in enumerate(period_sums):
+        totals[i] = value
+    totals[share_col] = 100.0 if total_sum > 0 else 0.0
     company_meta = dict(df.attrs.get(_ATTR_FORECAST_COMPANY) or {})
     totals_label = str(company_meta.get("label") or _COMPANY_TOTAL_LABEL)
 
     return {
-        "groups": {row["label"]: float(row["values"][0] or 0) for row in rows},
+        "groups": {row["label"]: float(row["values"][order_sum_col] or 0) for row in rows},
         "table": {
             "index_label": "Подразделение",
-            "columns": ["Суммы заказов, р.", "Доля в продажах"],
-            "column_kinds": ["money", "percent1"],
+            "columns": columns,
+            "column_kinds": column_kinds,
+            "year_spans": year_spans if periods else None,
             "rows": rows,
-            "totals": [total_sum, 100.0 if total_sum > 0 else 0.0],
+            "totals": totals,
             "totals_label": totals_label,
             "totals_emphasis": True,
+            "order_sum_column_index": order_sum_col,
         },
+        "bucket_period": (tile.source.period or "quarter") if tile else "quarter",
     }
 
 
+def _period_money_columns(table: dict) -> list[tuple[str, int]]:
+    """Подписи и индексы денежных колонок периодов (после прогноза, до итога/%)."""
+    spans = list(table.get("year_spans") or [])
+    kinds = list(table.get("column_kinds") or [])
+    skip = {
+        "",
+        "всего",
+        "всего за период",
+        "заказы, зарегистрированные в 1с",
+    }
+    out: list[tuple[str, int]] = []
+    idx = 0
+    for span in spans:
+        label = str(span.get("label") or "").strip()
+        count = int(span.get("count") or 0)
+        key = label.lower()
+        if label and key not in skip:
+            if count == 2:
+                # Количество + Общая сумма
+                out.append((label, idx + 1))
+            elif count == 1 and idx < len(kinds) and kinds[idx] == "money":
+                out.append((label, idx))
+        idx += count
+    return out
+
+
 def build_deficit_sales_summary(df: pd.DataFrame, tile: Tile) -> dict:
-    """Итог: прогноз = сумма прогнозов по службам (из большой таблицы / витрины)."""
+    """Итог: прогноз + сумма заказов; при нескольких периодах — разбивка суммы."""
     data = build_deficit_sales_table(df, tile)
     if "error" in data:
         return data
     table = data["table"]
-    totals = table.get("totals") or [0, 0, 0, None]
-    forecast = float(totals[0] or 0)
-    order_sum = float(totals[2] or 0)
+    totals = list(table.get("totals") or [])
+    forecast_col = int(table.get("forecast_column_index") or 0)
+    order_sum_col = int(
+        table.get("order_sum_column_index")
+        if table.get("order_sum_column_index") is not None
+        else 2
+    )
+    forecast = float(totals[forecast_col] or 0) if len(totals) > forecast_col else 0.0
+    order_sum = float(totals[order_sum_col] or 0) if len(totals) > order_sum_col else 0.0
     pct = _fulfillment_percent(order_sum, forecast if forecast > 0 else None)
+
+    period_bars: list[dict] = []
+    for label, col_i in _period_money_columns(table):
+        amount = float(totals[col_i] or 0) if len(totals) > col_i else 0.0
+        period_bars.append(
+            {
+                "label": label,
+                "order_sum": amount,
+                "pct": _fulfillment_percent(amount, forecast if forecast > 0 else None),
+            }
+        )
+
+    columns = ["Прогноз продаж, р."]
+    column_kinds = ["money"]
+    values: list = [forecast]
+    if len(period_bars) > 1:
+        for bar in period_bars:
+            columns.append(bar["label"])
+            column_kinds.append("money")
+            values.append(bar["order_sum"])
+    else:
+        columns.append("Общая сумма заказов, р.")
+        column_kinds.append("money")
+        values.append(order_sum)
+    columns.append("Выполнение прогноза")
+    column_kinds.append("percent")
+    values.append(pct)
+
     return {
         "groups": {"Всего": order_sum},
         "table": {
-            "columns": [
-                "Прогноз продаж, р.",
-                "Общая сумма заказов, р.",
-                "Выполнение прогноза",
-            ],
-            "column_kinds": ["money", "money", "percent"],
-            "rows": [
-                {
-                    "label": "",
-                    "values": [forecast, order_sum, pct],
-                }
-            ],
+            "columns": columns,
+            "column_kinds": column_kinds,
+            "rows": [{"label": "", "values": values}],
         },
+        "period_bars": period_bars,
+        "forecast": forecast,
+        "order_sum": order_sum,
+        "fulfill_pct": pct,
+        "bucket_period": data.get("bucket_period"),
     }

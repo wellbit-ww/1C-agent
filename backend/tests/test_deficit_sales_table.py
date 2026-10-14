@@ -88,6 +88,155 @@ def test_summary_takes_forecast_from_department_table():
     assert summary[2] == 108
 
 
+def test_summary_splits_order_sum_by_quarters():
+    from services.deficit_sales_table import build_deficit_sales_summary
+    from services.dashboard_engine import _render_deficit_sales_summary_chart
+
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба испытательного оборудования",
+                "Служба тестового оборудования",
+                "Служба тестового оборудования",
+            ],
+            "заказ клиента": [
+                "Заказ клиента ЗК-1 от 10.01.2026",
+                "Заказ клиента ЗК-2 от 15.08.2026",
+                "Заказ клиента ЗК-3 от 20.09.2026",
+            ],
+            "сумма по заказу в рублях": [100.0, 200.0, 300.0],
+            "оплачено по заказу": [0.0, 0.0, 0.0],
+            "неоплаченный остаток": [100.0, 200.0, 300.0],
+        }
+    )
+    df.attrs["deficit_sales_forecast"] = {"СИО": 400.0, "СТО": 500.0}
+    tile = Tile(
+        title="Выполнение прогноза",
+        chart_type="table",
+        source={"kind": "deficit_sales_summary", "period": "quarter"},
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    data = build_deficit_sales_summary(df, tile)
+    bars = data["period_bars"]
+    assert len(bars) == 3
+    assert bars[0]["order_sum"] == pytest.approx(100.0)
+    assert bars[1]["order_sum"] == pytest.approx(0.0)
+    assert bars[2]["order_sum"] == pytest.approx(500.0)
+    assert data["order_sum"] == pytest.approx(600.0)
+    # Таблица: прогноз + 3 квартала + %
+    values = data["table"]["rows"][0]["values"]
+    assert values[0] == pytest.approx(900.0)
+    assert values[1] == pytest.approx(100.0)
+    assert values[3] == pytest.approx(500.0)
+
+    fig = _render_deficit_sales_summary_chart(
+        data["table"],
+        period_bars=bars,
+        forecast=data["forecast"],
+        order_sum=data["order_sum"],
+        fulfill_pct=data["fulfill_pct"],
+    )
+    # Прогноз отдельно + один stacked-столбец из 3 сегментов периодов
+    assert fig.layout.barmode == "stack"
+    assert list(fig.data[0].x) == ["ПРОГНОЗ ПРОДАЖ, Р."]
+    assert list(fig.data[0].y) == pytest.approx([900.0])
+    assert len(fig.data) == 4  # прогноз + 3 сегмента
+    assert all(list(tr.x) == ["ОБЩАЯ СУММА ЗАКАЗОВ, Р."] for tr in fig.data[1:])
+    assert [float(tr.y[0]) for tr in fig.data[1:]] == pytest.approx([100.0, 0.0, 500.0])
+    # Подписи периода и % — сбоку, не внутри тонких сегментов
+    side = [
+        str(a.text or "")
+        for a in (fig.layout.annotations or [])
+        if getattr(a, "showarrow", False)
+    ]
+    assert any("кв" in text.lower() and "%" in text for text in side)
+    assert len(side) >= 2
+
+
+def test_plan_fact_chart_splits_orders_by_periods():
+    from services.dashboard_engine import _render_deficit_sales_plan_fact_chart
+
+    table = {
+        "rows": [
+            {"label": "СИО и АПЛиС", "values": [400.0, 100.0, 50.0, 150.0, 38]},
+            {"label": "СТО", "values": [500.0, 0.0, 300.0, 300.0, 60]},
+        ],
+        "totals": [900.0, 100.0, 350.0, 450.0, 50],
+        "totals_label": "Совтест АТЕ",
+        "columns": [
+            "Прогноз продаж, р.",
+            "1 кв. 2026",
+            "3 кв. 2026",
+            "Суммы заказов, р.",
+            "Выполнение прогноза",
+        ],
+        "column_kinds": ["money", "money", "money", "money", "percent"],
+        "year_spans": [
+            {"label": "", "count": 1},
+            {"label": "1 кв. 2026", "count": 1},
+            {"label": "3 кв. 2026", "count": 1},
+            {"label": "Всего", "count": 1},
+            {"label": "", "count": 1},
+        ],
+        "forecast_column_index": 0,
+        "order_sum_column_index": 3,
+        "fulfill_column_index": 4,
+    }
+    fig = _render_deficit_sales_plan_fact_chart(table)
+    assert len(fig.data) == 3  # прогноз + 2 сегмента stacked
+    assert fig.data[0].orientation == "h"
+    assert fig.data[1].name == "1 кв. 2026"
+    assert fig.data[2].name == "3 кв. 2026"
+    # Горизонтально: службы по Y, суммы по X (порядок сверху вниз как в таблице)
+    assert list(fig.data[0].y) == ["Совтест АТЕ", "СТО", "СИО и АПЛиС"]
+    assert list(fig.data[1].x) == pytest.approx([100.0, 0.0, 100.0])
+    assert list(fig.data[2].x) == pytest.approx([350.0, 300.0, 50.0])
+    assert fig.data[1].offsetgroup == fig.data[2].offsetgroup == "orders"
+    assert list(fig.data[2].base) == pytest.approx([100.0, 0.0, 100.0])
+    # % и периоды — справа, не внутри столбцов
+    side = " ".join(str(a.text or "") for a in (fig.layout.annotations or []))
+    assert "50%" in side or "<b>50%</b>" in side
+    assert "1 кв. 2026" in side
+    assert "3 кв. 2026" in side
+    assert all(
+        (getattr(tr, "textposition", None) in (None, "none") or tr.textposition == "none")
+        for tr in fig.data
+    )
+
+
+def test_share_chart_splits_company_total_by_periods():
+    from services.dashboard_engine import _render_deficit_sales_share_chart
+
+    table = {
+        "rows": [
+            {"label": "СИО и АПЛиС", "values": [100.0, 50.0, 150.0, 25.0]},
+            {"label": "СТО", "values": [0.0, 450.0, 450.0, 75.0]},
+        ],
+        "totals": [100.0, 500.0, 600.0, 100.0],
+        "totals_label": "Совтест АТЕ",
+        "columns": ["1 кв. 2026", "3 кв. 2026", "Суммы заказов, р.", "Доля в продажах"],
+        "column_kinds": ["money", "money", "money", "percent1"],
+        "year_spans": [
+            {"label": "1 кв. 2026", "count": 1},
+            {"label": "3 кв. 2026", "count": 1},
+            {"label": "Всего", "count": 1},
+            {"label": "", "count": 1},
+        ],
+        "order_sum_column_index": 2,
+    }
+    fig = _render_deficit_sales_share_chart(table)
+    assert fig.layout.barmode == "stack"
+    # Два сегмента компании на одном x + службы
+    assert list(fig.data[0].x) == ["Совтест АТЕ"]
+    assert list(fig.data[1].x) == ["Совтест АТЕ"]
+    assert float(fig.data[0].y[0]) == pytest.approx(100.0)
+    assert float(fig.data[1].y[0]) == pytest.approx(500.0)
+    assert fig.data[0].name == "1 кв. 2026"
+    assert "СТО" in list(fig.data[-1].x)
+
+
 def test_manual_sales_forecasts_override_vitrine():
     df = _sample_df()
     df.attrs["deficit_sales_forecast"] = {"СТО": 999.0}
@@ -173,16 +322,18 @@ def test_forecast_vitrine_table_matches_excel_layout():
         "Выполнение прогноза",
     ]
     by_label = {row["label"]: row["values"] for row in table["rows"]}
-    assert by_label["СИО и АПЛиС"][1] == pytest.approx(300.0)
-    assert by_label["СИО и АПЛиС"][2] == 75
+    sum_col = table["order_sum_column_index"]
+    fulfill_col = table["fulfill_column_index"]
+    assert by_label["СИО и АПЛиС"][sum_col] == pytest.approx(300.0)
+    assert by_label["СИО и АПЛиС"][fulfill_col] == 75
     assert table["totals_label"] == "Совтест АТЕ"
     assert table["totals"][0] == pytest.approx(900.0)
-    assert table["totals"][1] == pytest.approx(650.0)
-    assert table["totals"][2] == 72
+    assert table["totals"][sum_col] == pytest.approx(650.0)
+    assert table["totals"][fulfill_col] == 72
     assert table["totals_emphasis"] is True
 
 
-def test_fulfillment_board_highlights_above_company():
+def test_fulfillment_board_company_first_no_row_fill():
     df = _sample_df()
     df.attrs["deficit_sales_forecast"] = {
         "СИО и АПЛиС": 400.0,
@@ -206,10 +357,139 @@ def test_fulfillment_board_highlights_above_company():
     assert table["columns"] == ["Выполнение прогноза"]
     assert table["rows"][0]["label"] == "Совтест АТЕ"
     assert table["rows"][0]["emphasis"] is True
-    by_label = {row["label"]: row for row in table["rows"][1:]}
-    assert by_label["СИО и АПЛиС"]["highlight"] is True
-    assert by_label["СТО"]["highlight"] is True
-    assert by_label["СМЭ"]["highlight"] is False
+    assert all(not row.get("highlight") for row in table["rows"])
+
+
+def test_single_period_omits_total_block():
+    df = pd.DataFrame(
+        {
+            "подразделение": ["Служба тестового оборудования"],
+            "заказ клиента": ["Заказ клиента ЗК-1 от 10.08.2026"],
+            "сумма по заказу в рублях": [300.0],
+            "оплачено по заказу": [0.0],
+            "неоплаченный остаток": [300.0],
+        }
+    )
+    tile = Tile(
+        title="t",
+        chart_type="table",
+        source={"kind": "deficit_sales_by_department", "period": "quarter"},
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    table = build_deficit_sales_table(df, tile)["table"]
+    assert table["columns"] == [
+        "Прогноз продаж, р.",
+        "Количество",
+        "Общая сумма",
+        "Выполнение прогноза",
+    ]
+    assert not any(s["label"] == "Всего за период" for s in table["year_spans"])
+    assert table["order_sum_column_index"] == 2
+    assert table["fulfill_column_index"] == 3
+
+
+def test_quarter_mode_shows_all_quarters_in_file():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба испытательного оборудования",
+                "Служба тестового оборудования",
+                "Служба тестового оборудования",
+            ],
+            "заказ клиента": [
+                "Заказ клиента ЗК-1 от 10.01.2026",
+                "Заказ клиента ЗК-2 от 15.08.2026",
+                "Заказ клиента ЗК-3 от 20.09.2026",
+            ],
+            "сумма по заказу в рублях": [100.0, 200.0, 300.0],
+            "оплачено по заказу": [0.0, 0.0, 0.0],
+            "неоплаченный остаток": [100.0, 200.0, 300.0],
+        }
+    )
+    df.attrs["deficit_sales_forecast"] = {"СИО": 400.0, "СТО": 500.0}
+    tile = Tile(
+        title="t",
+        chart_type="table",
+        source={"kind": "deficit_sales_by_department", "period": "quarter"},
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    table = build_deficit_sales_table(df, tile)["table"]
+    # Q1..Q3 (contiguous from Jan to Sep) = 3 quarter columns
+    period_spans = [s for s in table["year_spans"] if "кв" in s["label"].lower()]
+    assert len(period_spans) == 3
+    by_label = {row["label"]: row["values"] for row in table["rows"]}
+    assert by_label["СИО"][table["order_sum_column_index"]] == pytest.approx(100.0)
+    assert by_label["СТО"][table["order_sum_column_index"]] == pytest.approx(500.0)
+
+
+def test_month_mode_shows_all_months_in_file():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба испытательного оборудования",
+                "Служба тестового оборудования",
+            ],
+            "заказ клиента": [
+                "Заказ клиента ЗК-1 от 10.07.2026",
+                "Заказ клиента ЗК-2 от 20.09.2026",
+            ],
+            "сумма по заказу в рублях": [100.0, 300.0],
+            "оплачено по заказу": [0.0, 0.0],
+            "неоплаченный остаток": [100.0, 300.0],
+        }
+    )
+    tile = Tile(
+        title="t",
+        chart_type="table",
+        source={"kind": "deficit_sales_by_department", "period": "month"},
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    table = build_deficit_sales_table(df, tile)["table"]
+    month_spans = [
+        s["label"]
+        for s in table["year_spans"]
+        if s["label"] and s["label"] not in {"Всего за период", "Заказы, зарегистрированные в 1С"}
+    ]
+    assert len(month_spans) == 3  # июль, август, сентябрь
+    assert any("июл" in label.lower() for label in month_spans)
+    assert any("сен" in label.lower() for label in month_spans)
+
+
+def test_half_mode_shows_all_halves_in_file():
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба тестового оборудования",
+                "Служба тестового оборудования",
+            ],
+            "заказ клиента": [
+                "Заказ клиента ЗК-1 от 10.03.2026",
+                "Заказ клиента ЗК-2 от 20.09.2026",
+            ],
+            "сумма по заказу в рублях": [100.0, 200.0],
+            "оплачено по заказу": [0.0, 0.0],
+            "неоплаченный остаток": [100.0, 200.0],
+        }
+    )
+    tile = Tile(
+        title="t",
+        chart_type="table",
+        source={"kind": "deficit_sales_by_department", "period": "half"},
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    table = build_deficit_sales_table(df, tile)["table"]
+    half_spans = [s["label"] for s in table["year_spans"] if "полуг" in s["label"].lower()]
+    assert len(half_spans) == 2
+    by_label = {row["label"]: row["values"] for row in table["rows"]}
+    assert by_label["СТО"][table["order_sum_column_index"]] == pytest.approx(300.0)
 
 
 def test_share_table_from_order_sums():
@@ -229,13 +509,15 @@ def test_share_table_from_order_sums():
     )
     table = build_deficit_sales_share_table(df, tile)["table"]
     assert table["columns"] == ["Суммы заказов, р.", "Доля в продажах"]
+    sum_col = table["order_sum_column_index"]
+    share_col = sum_col + 1
     by_label = {row["label"]: row["values"] for row in table["rows"]}
-    assert by_label["СИО и АПЛиС"][0] == pytest.approx(300.0)
-    assert by_label["СИО и АПЛиС"][1] == pytest.approx(46.2)
-    assert by_label["СТО"][1] == pytest.approx(46.2)
+    assert by_label["СИО и АПЛиС"][sum_col] == pytest.approx(300.0)
+    assert by_label["СИО и АПЛиС"][share_col] == pytest.approx(46.2)
+    assert by_label["СТО"][share_col] == pytest.approx(46.2)
     assert table["totals_label"] == "Совтест АТЕ"
-    assert table["totals"][0] == pytest.approx(650.0)
-    assert table["totals"][1] == pytest.approx(100.0)
+    assert table["totals"][sum_col] == pytest.approx(650.0)
+    assert table["totals"][share_col] == pytest.approx(100.0)
     assert table["totals_emphasis"] is True
 
 
@@ -253,10 +535,13 @@ def test_share_chart_company_first_then_sorted():
         ],
         "totals": [442_233_969.0, 100.0],
         "totals_label": "Совтест АТЕ",
+        "order_sum_column_index": 0,
     }
     fig = _render_deficit_sales_share_chart(table)
-    assert list(fig.data[0].x) == [
-        "Совтест АТЕ",
+    assert list(fig.data[0].x) == ["Совтест АТЕ"]
+    assert float(fig.data[0].y[0]) == pytest.approx(442_233_969.0)
+    assert fig.data[0].marker.color == "#C00000"
+    assert list(fig.data[1].x) == [
         "СТО",
         "СИО и АПЛиС",
         "СТЕ",
@@ -264,8 +549,11 @@ def test_share_chart_company_first_then_sorted():
         "СООК",
         "СМЭ",
     ]
-    assert list(fig.data[0].marker.color)[0] == "#C00000"
-    assert all(c == "#5B9BD5" for c in list(fig.data[0].marker.color)[1:])
+    dept_colors = fig.data[1].marker.color
+    if isinstance(dept_colors, str):
+        assert dept_colors == "#5B9BD5"
+    else:
+        assert all(c == "#5B9BD5" for c in list(dept_colors))
     assert any("100,0%" in a["text"] for a in (fig.layout.annotations or []))
 
 
@@ -313,16 +601,20 @@ def test_plan_fact_chart_from_vitrine_table():
         ],
         "totals": [900.0, 650.0, 72],
         "totals_label": "Совтест АТЕ",
+        "forecast_column_index": 0,
+        "order_sum_column_index": 1,
+        "fulfill_column_index": 2,
     }
     fig = _render_deficit_sales_plan_fact_chart(table)
     assert len(fig.data) == 2
-    assert list(fig.data[0].x) == ["СИО и АПЛиС", "СТО", "СЕРВИС", "Совтест АТЕ"]
-    assert list(fig.data[0].y) == [400.0, 500.0, 0.0, 900.0]
-    assert list(fig.data[1].y) == [300.0, 300.0, 50.0, 650.0]
-    pct_texts = [a["text"] for a in (fig.layout.annotations or [])]
-    assert "<b>75%</b>" in pct_texts
-    assert "<b>72%</b>" in pct_texts
-    assert not any("None" in t for t in pct_texts)
+    assert fig.data[0].orientation == "h"
+    assert list(fig.data[0].y) == ["Совтест АТЕ", "СЕРВИС", "СТО", "СИО и АПЛиС"]
+    assert list(fig.data[0].x) == pytest.approx([900.0, 0.0, 500.0, 400.0])
+    assert list(fig.data[1].x) == pytest.approx([650.0, 50.0, 300.0, 300.0])
+    side = " ".join(str(a.text or "") for a in (fig.layout.annotations or []))
+    assert "<b>75%</b>" in side
+    assert "<b>72%</b>" in side
+    assert "None" not in side
 
 
 def test_combined_sio_aplis_row_from_vitrine():
@@ -394,10 +686,10 @@ def test_normalize_keeps_sales_table_on_payments_tab():
     assert pay_out["tiles"][0]["table"]["columns"][0] == "Прогноз продаж, р."
     assert pay_out["tiles"][1]["table"]["columns"][1] == "Общая сумма заказов, р."
     assert pay_out["tiles"][1].get("plotly_json")
-    assert pay_out["tiles"][2]["table"]["columns"][1] == "Суммы заказов, р."
+    assert "Суммы заказов, р." in pay_out["tiles"][2]["table"]["columns"]
     assert pay_out["tiles"][2].get("plotly_json")
     assert pay_out["tiles"][3]["table"]["columns"][0] == "Выполнение прогноза"
     assert pay_out["tiles"][3].get("plotly_json")
-    assert pay_out["tiles"][4]["table"]["columns"][1] == "Доля в продажах"
+    assert "Доля в продажах" in pay_out["tiles"][4]["table"]["columns"]
     assert pay_out["tiles"][4]["table"]["totals_label"] == "Совтест АТЕ"
     assert pay_out["tiles"][4].get("plotly_json")

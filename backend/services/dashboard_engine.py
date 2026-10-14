@@ -2538,27 +2538,80 @@ def _fmt_ru_int(value: float) -> str:
     return f"{n:,}".replace(",", " ")
 
 
-def _render_deficit_sales_summary_chart(table: dict) -> go.Figure:
-    """Два столбца: прогноз и сумма заказов; % выполнения над вторым столбцом."""
+_SUMMARY_PERIOD_COLORS = (
+    "#70AD47",
+    "#ED7D31",
+    "#5B9BD5",
+    "#9DC3E6",
+    "#548235",
+    "#C65911",
+    "#A9D08E",
+    "#F4B183",
+)
+
+
+def _spread_label_ys(desired: list[float], gap: float, lo: float, hi: float) -> list[float]:
+    """Раздвигает подписи по вертикали, сохраняя порядок снизу вверх."""
+    if not desired:
+        return []
+    ys = [float(v) for v in desired]
+    for i in range(1, len(ys)):
+        if ys[i] < ys[i - 1] + gap:
+            ys[i] = ys[i - 1] + gap
+    if ys[-1] > hi:
+        shift = ys[-1] - hi
+        ys = [y - shift for y in ys]
+    if ys[0] < lo:
+        ys[0] = lo
+        for i in range(1, len(ys)):
+            if ys[i] < ys[i - 1] + gap:
+                ys[i] = ys[i - 1] + gap
+    return ys
+
+
+def _render_deficit_sales_summary_chart(
+    table: dict,
+    *,
+    period_bars: list[dict] | None = None,
+    forecast: float | None = None,
+    order_sum: float | None = None,
+    fulfill_pct: int | None = None,
+) -> go.Figure:
+    """Прогноз + сумма заказов.
+
+    При нескольких периодах справа один stacked-столбец: сегменты периодов
+    с подписями месяца/квартала и % выполнения.
+    """
     row = (table.get("rows") or [{}])[0]
     values = list(row.get("values") or [0, 0, None])
-    forecast = float(values[0] or 0)
-    order_sum = float(values[1] or 0)
-    pct = values[2] if len(values) > 2 else None
+    forecast_v = float(forecast if forecast is not None else (values[0] or 0))
+    order_sum_v = float(order_sum if order_sum is not None else (values[1] or 0))
+    pct = fulfill_pct if fulfill_pct is not None else (values[-1] if values else None)
+    bars = list(period_bars or [])
 
-    labels = ["ПРОГНОЗ ПРОДАЖ, Р.", "ОБЩАЯ СУММА ЗАКАЗОВ, Р."]
-    amounts = [forecast, order_sum]
-    texts = [_fmt_ru_int(v) for v in amounts]
-    bar_color = "#5B9BD5"
-    peak = max(amounts) if amounts else 0.0
-    y_top = peak * 1.18 if peak > 0 else 1.0
+    forecast_label = "ПРОГНОЗ ПРОДАЖ, Р."
+    orders_label = "ОБЩАЯ СУММА ЗАКАЗОВ, Р."
+    shapes = [
+        dict(
+            type="line",
+            xref="x",
+            yref="paper",
+            x0=0.5,
+            x1=0.5,
+            y0=0,
+            y1=1,
+            line=dict(color="#D0D0D0", width=1),
+        )
+    ]
 
-    fig = go.Figure(
+    fig = go.Figure()
+    fig.add_trace(
         go.Bar(
-            x=labels,
-            y=amounts,
-            marker_color=bar_color,
-            text=texts,
+            name="Прогноз",
+            x=[forecast_label],
+            y=[forecast_v],
+            marker_color="#5B9BD5",
+            text=[_fmt_ru_int(forecast_v)],
             textposition="inside",
             textangle=-90,
             insidetextanchor="middle",
@@ -2566,47 +2619,142 @@ def _render_deficit_sales_summary_chart(table: dict) -> go.Figure:
             cliponaxis=False,
             width=0.55,
             hovertemplate="%{x}<br>%{text}<extra></extra>",
+            showlegend=False,
         )
     )
-    annotations = []
-    if pct is not None and forecast > 0:
-        annotations.append(
-            dict(
-                x=labels[1],
-                y=order_sum + peak * 0.06,
-                text=f"<b>{int(pct)}%</b>",
-                showarrow=False,
-                font=dict(color="#C00000", size=16),
-                bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#A0A0A0",
-                borderwidth=1,
-                borderpad=4,
-                xanchor="center",
-                yanchor="bottom",
+
+    annotations: list[dict] = []
+    if len(bars) > 1:
+        stack_total = sum(float(bar.get("order_sum") or 0) for bar in bars)
+        peak = max(forecast_v, stack_total, order_sum_v)
+        cursor = 0.0
+        callouts: list[tuple[float, str, str]] = []
+        for i, bar in enumerate(bars):
+            amount = float(bar.get("order_sum") or 0)
+            label = str(bar.get("label") or "")
+            bar_pct = bar.get("pct")
+            color = _SUMMARY_PERIOD_COLORS[i % len(_SUMMARY_PERIOD_COLORS)]
+            fig.add_trace(
+                go.Bar(
+                    name=label,
+                    x=[orders_label],
+                    y=[amount],
+                    marker_color=color,
+                    text=[""],
+                    hovertemplate=(
+                        f"{label}<br>{_fmt_ru_int(amount)}"
+                        + (f"<br>{int(bar_pct)}%" if bar_pct is not None else "")
+                        + "<extra></extra>"
+                    ),
+                    showlegend=False,
+                    width=0.42,
+                )
+            )
+            if bar_pct is not None:
+                callouts.append((cursor + amount / 2, color, f"<b>{int(bar_pct)}%</b>  {label}"))
+            cursor += amount
+        # Подписи справа от столбца, с разносом, чтобы тонкие сегменты не слипались.
+        gap = peak * 0.07 if peak > 0 else 1.0
+        mids = [item[0] for item in callouts]
+        placed = _spread_label_ys(mids, gap, 0.0, peak * 1.05 if peak > 0 else 1.0)
+        for (mid, color, text), y_label in zip(callouts, placed):
+            annotations.append(
+                dict(
+                    x=orders_label,
+                    y=mid,
+                    ax=78,
+                    ay=0 if peak <= 0 else -int(round((y_label - mid) / peak * 220)),
+                    xref="x",
+                    yref="y",
+                    axref="pixel",
+                    ayref="pixel",
+                    text=text,
+                    showarrow=True,
+                    arrowhead=0,
+                    arrowwidth=1,
+                    arrowcolor=color,
+                    font=dict(color="#1f2937", size=13),
+                    bgcolor="rgba(255,255,255,0.96)",
+                    bordercolor=color,
+                    borderwidth=1.5,
+                    borderpad=3,
+                    xanchor="left",
+                    yanchor="middle",
+                )
+            )
+        if pct is not None and forecast_v > 0 and stack_total > 0:
+            annotations.append(
+                dict(
+                    x=orders_label,
+                    y=stack_total + peak * 0.08,
+                    text=f"<b>{int(pct)}%</b>",
+                    showarrow=False,
+                    font=dict(color="#C00000", size=14),
+                    bgcolor="rgba(255,255,255,0.95)",
+                    bordercolor="#A0A0A0",
+                    borderwidth=1,
+                    borderpad=4,
+                    xanchor="center",
+                    yanchor="bottom",
+                )
+            )
+        barmode = "stack"
+    else:
+        peak = max(forecast_v, order_sum_v)
+        fig.add_trace(
+            go.Bar(
+                name="Сумма заказов",
+                x=[orders_label],
+                y=[order_sum_v],
+                marker_color="#70AD47",
+                text=[_fmt_ru_int(order_sum_v)],
+                textposition="inside",
+                textangle=-90,
+                insidetextanchor="middle",
+                textfont=dict(color="white", size=14),
+                cliponaxis=False,
+                width=0.55,
+                hovertemplate="%{x}<br>%{text}<extra></extra>",
+                showlegend=False,
             )
         )
+        if pct is not None and forecast_v > 0:
+            annotations.append(
+                dict(
+                    x=orders_label,
+                    y=order_sum_v + peak * 0.06,
+                    text=f"<b>{int(pct)}%</b>",
+                    showarrow=False,
+                    font=dict(color="#C00000", size=14),
+                    bgcolor="rgba(255,255,255,0.95)",
+                    bordercolor="#A0A0A0",
+                    borderwidth=1,
+                    borderpad=4,
+                    xanchor="center",
+                    yanchor="bottom",
+                )
+            )
+        barmode = "group"
+
+    y_top = peak * 1.28 if peak > 0 else 1.0
     fig.update_layout(
         title=chart_title_caps("Прогноз и факт продаж"),
         height=420,
-        margin=dict(l=24, r=24, t=64, b=72),
+        margin=dict(l=24, r=168 if len(bars) > 1 else 24, t=64, b=88),
         showlegend=False,
         template="plotly_white",
+        barmode=barmode,
         bargap=0.35,
         annotations=annotations,
-        shapes=[
-            dict(
-                type="line",
-                xref="x",
-                yref="paper",
-                x0=0.5,
-                x1=0.5,
-                y0=0,
-                y1=1,
-                line=dict(color="#D0D0D0", width=1),
-            )
-        ],
+        shapes=shapes,
     )
-    fig.update_xaxes(type="category", tickangle=0, automargin=True)
+    fig.update_xaxes(
+        type="category",
+        tickangle=0,
+        automargin=True,
+        categoryorder="array",
+        categoryarray=[forecast_label, orders_label],
+    )
     fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
     return fig
 
@@ -2616,66 +2764,93 @@ def _fmt_ru_share_pct(value: float) -> str:
     return f"{text}%"
 
 
+_SHARE_PERIOD_COLORS = (
+    "#C00000",
+    "#ED7D31",
+    "#9E480E",
+    "#F4B183",
+    "#833C0C",
+    "#C65911",
+)
+
+
 def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
-    """Столбцы сумм заказов: компания первая красная, службы синие по убыванию суммы."""
+    """Столбцы сумм заказов: компания первая, службы синие по убыванию суммы.
+
+    При нескольких периодах компания — один stacked-столбец с сегментами периодов.
+    """
+    from services.deficit_sales_table import _period_money_columns
+
     company_label = str(table.get("totals_label") or "Совтест АТЕ")
     totals = list(table.get("totals") or [0.0, 100.0])
-    company_sum = float(totals[0] or 0)
-    company_share = float(totals[1] if len(totals) > 1 else 100.0)
+    order_sum_col = int(
+        table.get("order_sum_column_index")
+        if table.get("order_sum_column_index") is not None
+        else max(0, len(totals) - 2)
+    )
+    share_col = order_sum_col + 1
+    company_sum = float(totals[order_sum_col] or 0) if len(totals) > order_sum_col else 0.0
+    company_share = (
+        float(totals[share_col] or 100.0) if len(totals) > share_col else 100.0
+    )
+    period_cols = _period_money_columns(table)
 
-    items: list[tuple[str, float, float, bool]] = [
-        (company_label, company_sum, company_share, True)
-    ]
+    dept_items: list[tuple[str, float, float]] = []
     for row in table.get("rows") or []:
         values = list(row.get("values") or [0, 0])
-        items.append(
+        dept_items.append(
             (
                 str(row.get("label") or ""),
-                float(values[0] or 0),
-                float(values[1] or 0) if len(values) > 1 else 0.0,
-                False,
+                float(values[order_sum_col] or 0) if len(values) > order_sum_col else 0.0,
+                float(values[share_col] or 0) if len(values) > share_col else 0.0,
             )
         )
+    rest = sorted(dept_items, key=lambda item: (-item[1], item[0]))
+    dept_labels = [label for label, _, _ in rest]
+    dept_amounts = [amount for _, amount, _ in rest]
+    dept_shares = [share for _, _, share in rest]
 
-    # Компания всегда слева, остальные по убыванию суммы
-    company = items[0]
-    rest = sorted(items[1:], key=lambda item: (-item[1], item[0]))
-    ordered = [company, *rest]
-
-    labels = [label for label, _, _, _ in ordered]
-    amounts = [amount for _, amount, _, _ in ordered]
-    shares = [share for _, _, share, _ in ordered]
-    is_company = [flag for _, _, _, flag in ordered]
-    colors = ["#C00000" if flag else "#5B9BD5" for flag in is_company]
-    peak = max(amounts) if amounts else 0.0
+    peak = max([company_sum, *dept_amounts], default=0.0)
     y_top = peak * 1.35 if peak > 0 else 1.0
+    fig = go.Figure()
+    annotations: list[dict] = []
+    category_order = [company_label, *dept_labels]
 
-    fig = go.Figure(
-        go.Bar(
-            x=labels,
-            y=amounts,
-            marker_color=colors,
-            text=[f"{_fmt_ru_int(v)} ₽" for v in amounts],
-            textposition="outside",
-            textfont=dict(
-                color=["#C00000" if flag else "#2F2F2F" for flag in is_company],
-                size=11,
-            ),
-            cliponaxis=False,
-            width=0.92,
-            hovertemplate="%{x}<br>%{text}<extra></extra>",
-        )
-    )
-
-    annotations = []
-    for label, amount, share, flag in ordered:
+    if len(period_cols) > 1:
+        for i, (label, col_i) in enumerate(period_cols):
+            amount = float(totals[col_i] or 0) if len(totals) > col_i else 0.0
+            share = round(100.0 * amount / company_sum, 1) if company_sum > 0 else 0.0
+            color = _SHARE_PERIOD_COLORS[i % len(_SHARE_PERIOD_COLORS)]
+            if amount > 0 and peak > 0 and amount / peak >= 0.05:
+                seg_text = f"{label}<br>{_fmt_ru_share_pct(share)}"
+            else:
+                seg_text = ""
+            fig.add_trace(
+                go.Bar(
+                    name=label,
+                    x=[company_label],
+                    y=[amount],
+                    marker_color=color,
+                    text=[seg_text],
+                    textposition="inside",
+                    insidetextanchor="middle",
+                    textfont=dict(color="white", size=11),
+                    cliponaxis=False,
+                    width=0.92,
+                    hovertemplate=(
+                        f"{label}<br>{_fmt_ru_int(amount)} ₽"
+                        f"<br>{_fmt_ru_share_pct(share)}<extra></extra>"
+                    ),
+                    showlegend=False,
+                )
+            )
         annotations.append(
             dict(
-                x=label,
-                y=amount + peak * 0.12,
-                text=f"<b>{_fmt_ru_share_pct(share)}</b>",
+                x=company_label,
+                y=company_sum + peak * 0.12,
+                text=f"<b>{_fmt_ru_share_pct(company_share)}</b>",
                 showarrow=False,
-                font=dict(color="#C00000" if flag else "#2F2F2F", size=12),
+                font=dict(color="#C00000", size=12),
                 bgcolor="rgba(255,255,255,0.95)",
                 bordercolor="#A0A0A0",
                 borderwidth=1,
@@ -2684,6 +2859,72 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
                 yanchor="bottom",
             )
         )
+        barmode = "stack"
+    else:
+        fig.add_trace(
+            go.Bar(
+                name=company_label,
+                x=[company_label],
+                y=[company_sum],
+                marker_color="#C00000",
+                text=[f"{_fmt_ru_int(company_sum)} ₽"],
+                textposition="outside",
+                textfont=dict(color="#C00000", size=11),
+                cliponaxis=False,
+                width=0.92,
+                hovertemplate="%{x}<br>%{text}<extra></extra>",
+                showlegend=False,
+            )
+        )
+        annotations.append(
+            dict(
+                x=company_label,
+                y=company_sum + peak * 0.12,
+                text=f"<b>{_fmt_ru_share_pct(company_share)}</b>",
+                showarrow=False,
+                font=dict(color="#C00000", size=12),
+                bgcolor="rgba(255,255,255,0.95)",
+                bordercolor="#A0A0A0",
+                borderwidth=1,
+                borderpad=3,
+                xanchor="center",
+                yanchor="bottom",
+            )
+        )
+        barmode = "group"
+
+    if dept_labels:
+        fig.add_trace(
+            go.Bar(
+                name="Службы",
+                x=dept_labels,
+                y=dept_amounts,
+                marker_color="#5B9BD5",
+                text=[f"{_fmt_ru_int(v)} ₽" for v in dept_amounts],
+                textposition="outside",
+                textfont=dict(color="#2F2F2F", size=11),
+                cliponaxis=False,
+                width=0.92,
+                hovertemplate="%{x}<br>%{text}<extra></extra>",
+                showlegend=False,
+            )
+        )
+        for label, amount, share in zip(dept_labels, dept_amounts, dept_shares):
+            annotations.append(
+                dict(
+                    x=label,
+                    y=amount + peak * 0.12,
+                    text=f"<b>{_fmt_ru_share_pct(share)}</b>",
+                    showarrow=False,
+                    font=dict(color="#2F2F2F", size=12),
+                    bgcolor="rgba(255,255,255,0.95)",
+                    bordercolor="#A0A0A0",
+                    borderwidth=1,
+                    borderpad=3,
+                    xanchor="center",
+                    yanchor="bottom",
+                )
+            )
 
     fig.update_layout(
         title=chart_title_caps("Доля продаж коммерческих служб"),
@@ -2691,11 +2932,18 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
         margin=dict(l=24, r=24, t=72, b=80),
         showlegend=False,
         template="plotly_white",
+        barmode=barmode,
         bargap=0.02,
         plot_bgcolor="#F5F5F5",
         annotations=annotations,
     )
-    fig.update_xaxes(type="category", tickangle=0, automargin=True)
+    fig.update_xaxes(
+        type="category",
+        tickangle=0,
+        automargin=True,
+        categoryorder="array",
+        categoryarray=category_order,
+    )
     fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
     return fig
 
@@ -2759,100 +3007,225 @@ def _render_deficit_sales_fulfillment_chart(table: dict) -> go.Figure:
     return fig
 
 
+_PLAN_FACT_PERIOD_COLORS = (
+    "#C00000",
+    "#ED7D31",
+    "#70AD47",
+    "#9E480E",
+    "#548235",
+    "#A9D08E",
+)
+
+
+def _plan_fact_side_label(
+    *,
+    pct: int | None,
+    forecast: float,
+    period_cols: list[tuple[str, int]],
+    period_amounts: list[float],
+    order_sum: float,
+) -> str:
+    """Читаемая подпись справа: общий % и разбивка по периодам."""
+    lines: list[str] = []
+    if pct is not None:
+        lines.append(f"<b>{pct}%</b>")
+    if period_cols and forecast > 0:
+        bits: list[str] = []
+        for (label, _col), amount in zip(period_cols, period_amounts):
+            if amount <= 0:
+                continue
+            p = int(round(100.0 * amount / forecast))
+            bits.append(f"{label} {p}%")
+        if bits:
+            lines.append(" · ".join(bits))
+    elif order_sum > 0:
+        lines.append(_fmt_ru_int(order_sum))
+    return "<br>".join(lines) if lines else ""
+
+
 def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
-    """Сгруппированные столбцы: прогноз (синий) и суммы заказов (красный) по службам + итого."""
+    """Горизонтальные столбцы: прогноз и суммы заказов по службам + итого.
+
+    Подписи % и периодов — справа отдельной колонкой, без наложений на столбцы.
+    """
+    from services.deficit_sales_table import _period_money_columns
+
     categories: list[str] = []
     forecasts: list[float] = []
     orders: list[float] = []
+    period_series: list[list[float]] = []
     pcts: list[int | None] = []
+    forecast_col = int(table.get("forecast_column_index") or 0)
+    order_sum_col = int(
+        table.get("order_sum_column_index")
+        if table.get("order_sum_column_index") is not None
+        else 1
+    )
+    fulfill_col = int(
+        table.get("fulfill_column_index")
+        if table.get("fulfill_column_index") is not None
+        else order_sum_col + 1
+    )
+    period_cols = _period_money_columns(table)
+    split_periods = len(period_cols) > 1
+    if split_periods:
+        period_series = [[] for _ in period_cols]
+
+    def _append_values(values: list) -> None:
+        forecasts.append(
+            float(values[forecast_col] or 0) if len(values) > forecast_col else 0.0
+        )
+        orders.append(
+            float(values[order_sum_col] or 0) if len(values) > order_sum_col else 0.0
+        )
+        if split_periods:
+            for i, (_label, col_i) in enumerate(period_cols):
+                period_series[i].append(
+                    float(values[col_i] or 0) if len(values) > col_i else 0.0
+                )
+        pct = values[fulfill_col] if len(values) > fulfill_col else None
+        pcts.append(int(pct) if pct is not None else None)
 
     for row in table.get("rows") or []:
-        values = list(row.get("values") or [0, 0, None])
         categories.append(str(row.get("label") or ""))
-        forecasts.append(float(values[0] or 0))
-        orders.append(float(values[1] or 0))
-        pct = values[2] if len(values) > 2 else None
-        pcts.append(int(pct) if pct is not None else None)
+        _append_values(list(row.get("values") or [0, 0, None]))
 
     totals = list(table.get("totals") or [])
     if totals:
         categories.append(str(table.get("totals_label") or "Совтест АТЕ"))
-        forecasts.append(float(totals[0] or 0))
-        orders.append(float(totals[1] or 0) if len(totals) > 1 else 0.0)
-        total_pct = totals[2] if len(totals) > 2 else None
-        pcts.append(int(total_pct) if total_pct is not None else None)
+        _append_values(totals)
+
+    # Plotly рисует первую категорию снизу — разворачиваем, чтобы порядок как в таблице.
+    categories = list(reversed(categories))
+    forecasts = list(reversed(forecasts))
+    orders = list(reversed(orders))
+    pcts = list(reversed(pcts))
+    if split_periods:
+        period_series = [list(reversed(series)) for series in period_series]
 
     peak = max([*forecasts, *orders], default=0.0)
-    y_top = peak * 1.28 if peak > 0 else 1.0
-    company_i = len(categories) - 1 if totals else -1
+    # Запас справа под колонку подписей (%, периоды).
+    x_top = peak * 1.55 if peak > 0 else 1.0
+    label_x = peak * 1.06 if peak > 0 else 1.0
+    company_label = str(table.get("totals_label") or "Совтест АТЕ") if totals else None
 
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
             name="Прогноз продаж, р.",
-            x=categories,
-            y=forecasts,
+            orientation="h",
+            y=categories,
+            x=forecasts,
             marker_color="#5B9BD5",
+            # Суммы только в hover — снаружи они наезжали на %%.
             text=[_fmt_ru_int(v) for v in forecasts],
-            textposition="outside",
-            textangle=-90,
-            textfont=dict(color="#2F2F2F", size=10),
+            textposition="none",
             cliponaxis=False,
-            hovertemplate="%{x}<br>Прогноз: %{text}<extra></extra>",
+            offsetgroup="forecast",
+            hovertemplate="%{y}<br>Прогноз: %{text}<extra></extra>",
         )
     )
-    fig.add_trace(
-        go.Bar(
-            name="Суммы заказов, р.",
-            x=categories,
-            y=orders,
-            marker_color="#C00000",
-            text=[_fmt_ru_int(v) for v in orders],
-            textposition="outside",
-            textangle=-90,
-            textfont=dict(color="#2F2F2F", size=10),
-            cliponaxis=False,
-            hovertemplate="%{x}<br>Заказы: %{text}<extra></extra>",
+    if split_periods:
+        bases = [0.0] * len(categories)
+        for i, (label, _col_i) in enumerate(period_cols):
+            amounts = period_series[i]
+            color = _PLAN_FACT_PERIOD_COLORS[i % len(_PLAN_FACT_PERIOD_COLORS)]
+            fig.add_trace(
+                go.Bar(
+                    name=label,
+                    orientation="h",
+                    y=categories,
+                    x=amounts,
+                    base=list(bases),
+                    marker_color=color,
+                    text=[""] * len(amounts),
+                    textposition="none",
+                    cliponaxis=False,
+                    offsetgroup="orders",
+                    hovertemplate="%{y}<br>" + label + ": %{x:,.0f}<extra></extra>",
+                )
+            )
+            bases = [b + a for b, a in zip(bases, amounts)]
+    else:
+        fig.add_trace(
+            go.Bar(
+                name="Суммы заказов, р.",
+                orientation="h",
+                y=categories,
+                x=orders,
+                marker_color="#C00000",
+                text=[_fmt_ru_int(v) for v in orders],
+                textposition="none",
+                cliponaxis=False,
+                offsetgroup="orders",
+                hovertemplate="%{y}<br>Заказы: %{text}<extra></extra>",
+            )
         )
-    )
 
     annotations = []
     for i, (label, forecast, order_sum, pct) in enumerate(
         zip(categories, forecasts, orders, pcts)
     ):
-        if pct is None or forecast <= 0:
+        period_amounts = (
+            [series[i] for series in period_series] if split_periods else []
+        )
+        text = _plan_fact_side_label(
+            pct=pct if forecast > 0 else None,
+            forecast=forecast,
+            period_cols=period_cols if split_periods else [],
+            period_amounts=period_amounts,
+            order_sum=order_sum,
+        )
+        if not text:
             continue
-        is_company = i == company_i
-        top = max(forecast, order_sum)
+        is_company = company_label is not None and label == company_label
         annotations.append(
             dict(
-                x=label,
-                y=top + peak * 0.08,
-                text=f"<b>{pct}%</b>",
+                x=label_x,
+                y=label,
+                text=text,
                 showarrow=False,
-                font=dict(color="#C00000" if is_company else "#2F2F2F", size=13),
-                bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#C00000" if is_company else "#A0A0A0",
+                align="left",
+                font=dict(
+                    color="#C00000" if is_company else "#1f2937",
+                    size=13 if is_company else 12,
+                ),
+                bgcolor="rgba(255,255,255,0.97)",
+                bordercolor="#C00000" if is_company else "#CBD5E1",
                 borderwidth=1.5 if is_company else 1,
-                borderpad=3,
-                xanchor="center",
-                yanchor="bottom",
+                borderpad=4,
+                xanchor="left",
+                yanchor="middle",
             )
         )
 
+    n = max(1, len(categories))
     fig.update_layout(
         title=chart_title_caps("План-фактный анализ продаж"),
         barmode="group",
-        height=480,
-        margin=dict(l=24, r=24, t=72, b=80),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=max(520, 78 * n + 140),
+        margin=dict(l=110, r=220, t=80, b=40),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            font=dict(size=12),
+        ),
         template="plotly_white",
-        bargap=0.25,
-        bargroupgap=0.08,
+        bargap=0.14,
+        bargroupgap=0.06,
         annotations=annotations,
     )
-    fig.update_xaxes(type="category", tickangle=0, automargin=True)
-    fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
+    fig.update_yaxes(
+        type="category",
+        automargin=True,
+        categoryorder="array",
+        categoryarray=categories,
+        tickfont=dict(size=13),
+    )
+    fig.update_xaxes(visible=False, showgrid=False, range=[0, x_top])
     return fig
 
 
@@ -2953,7 +3326,7 @@ def _tile_stats(tile: Tile, data: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def _with_department_sales_forecasts(tab: Tab, tile: Tile) -> Tile:
-    """Итог и витрина берут ручные прогнозы с тайла «по подразделениям»."""
+    """Итог и витрина берут ручные прогнозы и период с тайла «по подразделениям»."""
     if tile.source.kind not in (
         "deficit_sales_summary",
         "deficit_sales_forecast_vitrine",
@@ -2961,20 +3334,21 @@ def _with_department_sales_forecasts(tab: Tab, tile: Tile) -> Tile:
         "deficit_sales_share",
     ):
         return tile
-    if tile.source.sales_forecasts:
-        return tile
     donor = next(
         (t for t in tab.tiles if t.source.kind == "deficit_sales_by_department"),
         None,
     )
-    if not donor or not donor.source.sales_forecasts:
+    if not donor:
+        return tile
+    updates: dict = {}
+    if not tile.source.sales_forecasts and donor.source.sales_forecasts:
+        updates["sales_forecasts"] = dict(donor.source.sales_forecasts)
+    if donor.source.period and tile.source.period != donor.source.period:
+        updates["period"] = donor.source.period
+    if not updates:
         return tile
     return tile.model_copy(
-        update={
-            "source": tile.source.model_copy(
-                update={"sales_forecasts": dict(donor.source.sales_forecasts)}
-            )
-        }
+        update={"source": tile.source.model_copy(update=updates)}
     )
 
 
@@ -3092,7 +3466,11 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                 }
                 try:
                     payload["plotly_json"] = _render_deficit_sales_summary_chart(
-                        data["table"]
+                        data["table"],
+                        period_bars=data.get("period_bars"),
+                        forecast=data.get("forecast"),
+                        order_sum=data.get("order_sum"),
+                        fulfill_pct=data.get("fulfill_pct"),
                     ).to_json()
                 except Exception as exc:
                     logger.warning("График выполнения прогноза упал: %s", exc)

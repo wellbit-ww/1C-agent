@@ -48,6 +48,14 @@ function typeName(t?: string) {
 
 const STAGES_PERIOD_KINDS = new Set(["deal_statuses", "in_work_stages"]);
 
+const DEFICIT_SALES_PERIOD_KINDS = [
+  "deficit_sales_by_department",
+  "deficit_sales_summary",
+  "deficit_sales_forecast_vitrine",
+  "deficit_sales_fulfillment_board",
+  "deficit_sales_share",
+] as const;
+
 const DYNAMICS_PERIOD_KINDS = [
   "deals_dynamics",
   "deals_dynamics_departments",
@@ -801,10 +809,6 @@ function PivotTableView({
   );
 }
 
-const DEFICIT_FORECAST_COL = 0;
-const DEFICIT_ORDER_SUM_COL = 2;
-const DEFICIT_FULFILL_COL = 3;
-
 function parseForecastInput(raw: string): number | null {
   const text = raw.replace(/\s/g, "").replace(",", ".");
   if (!text) return null;
@@ -822,33 +826,31 @@ function deficitFulfillmentPercent(
 }
 
 function applySalesForecasts(table: PivotTable, forecasts: Record<string, number>): PivotTable {
+  const forecastCol = table.forecast_column_index ?? 0;
+  const orderSumCol = table.order_sum_column_index ?? 2;
+  const fulfillCol = table.fulfill_column_index ?? Math.max(orderSumCol + 1, 3);
   let totalForecast = 0;
   let hasForecast = false;
-  let totalCount = 0;
   let totalSum = 0;
   const rows = table.rows.map((row) => {
-    const orderSum = Number(row.values[DEFICIT_ORDER_SUM_COL] ?? 0);
-    const count = row.values[1] ?? 0;
-    const serverForecast = Number(row.values[DEFICIT_FORECAST_COL] ?? 0);
+    const orderSum = Number(row.values[orderSumCol] ?? 0);
+    const serverForecast = Number(row.values[forecastCol] ?? 0);
     const forecast = row.label in forecasts ? forecasts[row.label] : serverForecast;
     if (forecast > 0) {
       hasForecast = true;
       totalForecast += forecast;
     }
-    totalCount += Number(count);
     totalSum += orderSum;
     const pct = deficitFulfillmentPercent(orderSum, forecast);
-    return {
-      ...row,
-      values: [forecast, count, orderSum, pct],
-    };
+    const values = [...row.values];
+    values[forecastCol] = forecast;
+    values[fulfillCol] = pct;
+    return { ...row, values };
   });
   const totals = table.totals ? [...table.totals] : [];
-  if (totals.length > DEFICIT_FULFILL_COL) {
-    totals[DEFICIT_FORECAST_COL] = hasForecast ? totalForecast : 0;
-    totals[1] = totalCount;
-    totals[DEFICIT_ORDER_SUM_COL] = totalSum;
-    totals[DEFICIT_FULFILL_COL] = deficitFulfillmentPercent(
+  if (totals.length > fulfillCol) {
+    totals[forecastCol] = hasForecast ? totalForecast : 0;
+    totals[fulfillCol] = deficitFulfillmentPercent(
       totalSum,
       hasForecast ? totalForecast : null,
     );
@@ -917,7 +919,7 @@ function DeficitSalesBoardView({
   const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
   const breaks = quarterStarts(spans);
   const quarterEdge = "border-l border-zinc-400";
-  const forecastCol = table.forecast_column_index ?? DEFICIT_FORECAST_COL;
+  const forecastCol = table.forecast_column_index ?? 0;
 
   const liveForecasts = { ...salesForecasts };
   for (const row of table.rows) {
@@ -1705,7 +1707,11 @@ export function App() {
   const fileIdRef = useRef<string | null>(null);
   const restoredRef = useRef(false);
 
-  const refreshWorkspace = useCallback(async (wsId: string, restore?: SavedSession) => {
+  const refreshWorkspace = useCallback(async (
+    wsId: string,
+    restore?: SavedSession,
+    options?: { keepPlace?: boolean },
+  ) => {
     fileIdRef.current = wsId;
     setBusy("Читаю выгрузку…");
     setError(null);
@@ -1729,6 +1735,9 @@ export function App() {
       const tabCount = dash.tabs?.length ?? 0;
       if (restore) {
         setTab(tabCount ? Math.min(restore.tab, tabCount - 1) : 0);
+      } else if (options?.keepPlace) {
+        // Смена периода / сохранение спеки — остаёмся на текущей вкладке
+        setTab((current) => (tabCount ? Math.min(current, tabCount - 1) : 0));
       } else {
         setView("dash");
         setTab(0);
@@ -2005,7 +2014,7 @@ export function App() {
           : next;
       if (workspaceId) {
         await api.dashboardSaveSpec(targetFileId, toSave);
-        await refreshWorkspace(workspaceId);
+        await refreshWorkspace(workspaceId, undefined, { keepPlace: true });
       } else {
         const patch = await api.dashboardSaveSpec(targetFileId, toSave);
         await applyDashboardPatch(patch, next);
@@ -2051,7 +2060,7 @@ export function App() {
           : next;
       if (workspaceId) {
         await api.dashboardSaveSpec(targetFileId, toSave);
-        await refreshWorkspace(workspaceId);
+        await refreshWorkspace(workspaceId, undefined, { keepPlace: true });
       } else {
         const patch = await api.dashboardSaveSpec(targetFileId, toSave);
         await applyDashboardPatch(patch, next);
@@ -2077,7 +2086,12 @@ export function App() {
       | "deals_conversion"
       | "deals_money"
       | "deal_statuses"
-      | "in_work_stages",
+      | "in_work_stages"
+      | "deficit_sales_by_department"
+      | "deficit_sales_summary"
+      | "deficit_sales_forecast_vitrine"
+      | "deficit_sales_fulfillment_board"
+      | "deficit_sales_share",
   ) {
     const spec = dashboard?.spec;
     const targetFileId = fileIdForTab(tabI);
@@ -2086,6 +2100,9 @@ export function App() {
       kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
     );
     const syncStages = STAGES_PERIOD_KINDS.has(kind);
+    const syncDeficitSales = DEFICIT_SALES_PERIOD_KINDS.includes(
+      kind as (typeof DEFICIT_SALES_PERIOD_KINDS)[number],
+    );
     const next: DashSpec = {
       tabs: spec.tabs.map((t, ti) =>
         ti !== tabI
@@ -2106,6 +2123,15 @@ export function App() {
                 if (syncStages && itemKind && STAGES_PERIOD_KINDS.has(itemKind)) {
                   return { ...item, source: { ...item.source, period } };
                 }
+                if (
+                  syncDeficitSales &&
+                  itemKind &&
+                  DEFICIT_SALES_PERIOD_KINDS.includes(
+                    itemKind as (typeof DEFICIT_SALES_PERIOD_KINDS)[number],
+                  )
+                ) {
+                  return { ...item, source: { ...item.source, period } };
+                }
                 if (ij !== tileI) return item;
                 return { ...item, source: { ...item.source, kind, period } };
               }),
@@ -2121,7 +2147,7 @@ export function App() {
           : next;
       if (workspaceId) {
         await api.dashboardSaveSpec(targetFileId, toSave);
-        await refreshWorkspace(workspaceId);
+        await refreshWorkspace(workspaceId, undefined, { keepPlace: true });
       } else {
         const patch = await api.dashboardSaveSpec(targetFileId, toSave);
         await applyDashboardPatch(patch, next);
@@ -2171,7 +2197,7 @@ export function App() {
           };
           await api.dashboardSaveSpec(src.file_id, nextSpec);
         }
-        await refreshWorkspace(workspaceId);
+        await refreshWorkspace(workspaceId, undefined, { keepPlace: true });
         setNotice("Дашборд сохранён");
       } else if (fileId) {
         const patch = await api.dashboardSaveSpec(fileId, spec);
@@ -2492,6 +2518,9 @@ export function App() {
                           moneyTile ||
                           DYNAMICS_PERIOD_KINDS.includes(
                             specTile?.source?.kind as (typeof DYNAMICS_PERIOD_KINDS)[number],
+                          ) ||
+                          DEFICIT_SALES_PERIOD_KINDS.includes(
+                            specTile?.source?.kind as (typeof DEFICIT_SALES_PERIOD_KINDS)[number],
                           );
                         const periodBucketDefault = "quarter";
                         const dynamicsTile = DYNAMICS_PERIOD_KINDS.includes(
@@ -2559,7 +2588,12 @@ export function App() {
                                         | "deals_conversion"
                                         | "deals_money"
                                         | "deal_statuses"
-                                        | "in_work_stages",
+                                        | "in_work_stages"
+                                        | "deficit_sales_by_department"
+                                        | "deficit_sales_summary"
+                                        | "deficit_sales_forecast_vitrine"
+                                        | "deficit_sales_fulfillment_board"
+                                        | "deficit_sales_share",
                                     )
                                   }
                                   className="rounded-md border border-line bg-bg px-2 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-accent/60"
@@ -2728,7 +2762,7 @@ export function App() {
                             <div className="space-y-4">
                               <PivotTableView table={tile.table} />
                               {tile.plotly_json ? (
-                                <PlotChart json={tile.plotly_json} className="h-[30rem] w-full" />
+                                <PlotChart json={tile.plotly_json} className="h-[44rem] w-full" />
                               ) : null}
                             </div>
                           ) : deficitSalesFulfillmentBoardTile && tile.table ? (
