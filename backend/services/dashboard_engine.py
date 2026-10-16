@@ -2613,7 +2613,7 @@ def _render_deficit_sales_summary_chart(
             marker_color="#5B9BD5",
             text=[_fmt_ru_int(forecast_v)],
             textposition="inside",
-            textangle=-90,
+            textangle=0,
             insidetextanchor="middle",
             textfont=dict(color="white", size=14),
             cliponaxis=False,
@@ -2650,20 +2650,30 @@ def _render_deficit_sales_summary_chart(
                     width=0.42,
                 )
             )
-            if bar_pct is not None:
+            if amount > 0 and bar_pct is not None:
                 callouts.append((cursor + amount / 2, color, f"<b>{int(bar_pct)}%</b>  {label}"))
             cursor += amount
-        # Подписи справа от столбца, с разносом, чтобы тонкие сегменты не слипались.
-        gap = peak * 0.07 if peak > 0 else 1.0
+        # Разнос по вертикали в долях пика (~высота плашки), плюс зигзаг по X.
+        n_call = max(1, len(callouts))
+        gap = peak * 0.14 if peak > 0 else 1.0
+        band_hi = max(stack_total * 1.15, gap * (n_call + 0.5))
         mids = [item[0] for item in callouts]
-        placed = _spread_label_ys(mids, gap, 0.0, peak * 1.05 if peak > 0 else 1.0)
-        for (mid, color, text), y_label in zip(callouts, placed):
+        placed = _spread_label_ys(mids, gap, peak * 0.02 if peak > 0 else 0.0, band_hi)
+        # Если после разноса всё ещё тесно — равномерно по полосе.
+        if len(placed) >= 2 and placed[-1] - placed[0] < gap * (len(placed) - 1) * 0.95:
+            step = gap
+            start = max(peak * 0.04, (band_hi - step * (len(placed) - 1)) / 2)
+            placed = [start + i * step for i in range(len(placed))]
+        highest = max(placed) if placed else stack_total
+        for i, ((mid, color, text), y_label) in enumerate(zip(callouts, placed)):
+            ax = 72 + (i % 2) * 58
+            ay_px = 0 if peak <= 0 else -int(round((y_label - mid) / peak * 260))
             annotations.append(
                 dict(
                     x=orders_label,
                     y=mid,
-                    ax=78,
-                    ay=0 if peak <= 0 else -int(round((y_label - mid) / peak * 220)),
+                    ax=ax,
+                    ay=ay_px,
                     xref="x",
                     yref="y",
                     axref="pixel",
@@ -2677,16 +2687,17 @@ def _render_deficit_sales_summary_chart(
                     bgcolor="rgba(255,255,255,0.96)",
                     bordercolor=color,
                     borderwidth=1.5,
-                    borderpad=3,
+                    borderpad=4,
                     xanchor="left",
                     yanchor="middle",
                 )
             )
         if pct is not None and forecast_v > 0 and stack_total > 0:
+            total_y = max(stack_total + peak * 0.1, highest + gap * 0.85)
             annotations.append(
                 dict(
                     x=orders_label,
-                    y=stack_total + peak * 0.08,
+                    y=total_y,
                     text=f"<b>{int(pct)}%</b>",
                     showarrow=False,
                     font=dict(color="#C00000", size=14),
@@ -2698,7 +2709,10 @@ def _render_deficit_sales_summary_chart(
                     yanchor="bottom",
                 )
             )
+        else:
+            total_y = highest
         barmode = "stack"
+        y_top = max(peak, total_y) * 1.18 if peak > 0 else 1.0
     else:
         peak = max(forecast_v, order_sum_v)
         fig.add_trace(
@@ -2735,12 +2749,12 @@ def _render_deficit_sales_summary_chart(
                 )
             )
         barmode = "group"
+        y_top = peak * 1.28 if peak > 0 else 1.0
 
-    y_top = peak * 1.28 if peak > 0 else 1.0
     fig.update_layout(
         title=chart_title_caps("Прогноз и факт продаж"),
-        height=420,
-        margin=dict(l=24, r=168 if len(bars) > 1 else 24, t=64, b=88),
+        height=460 if len(bars) > 1 else 420,
+        margin=dict(l=24, r=210 if len(bars) > 1 else 24, t=64, b=88),
         showlegend=False,
         template="plotly_white",
         barmode=barmode,
@@ -3026,15 +3040,19 @@ def _plan_fact_side_label(
     order_sum: float,
 ) -> str:
     """Читаемая подпись справа: общий % и разбивка по периодам."""
+    from services.deficit_sales_table import _allocate_percentages
+
     lines: list[str] = []
     if pct is not None:
         lines.append(f"<b>{pct}%</b>")
     if period_cols and forecast > 0:
+        allocated = _allocate_percentages(
+            period_amounts, forecast, target=pct if pct is not None else None
+        )
         bits: list[str] = []
-        for (label, _col), amount in zip(period_cols, period_amounts):
+        for (label, _col), amount, p in zip(period_cols, period_amounts, allocated):
             if amount <= 0:
                 continue
-            p = int(round(100.0 * amount / forecast))
             bits.append(f"{label} {p}%")
         if bits:
             lines.append(" · ".join(bits))
@@ -3104,9 +3122,9 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
         period_series = [list(reversed(series)) for series in period_series]
 
     peak = max([*forecasts, *orders], default=0.0)
-    # Запас справа под колонку подписей (%, периоды).
-    x_top = peak * 1.55 if peak > 0 else 1.0
-    label_x = peak * 1.06 if peak > 0 else 1.0
+    # Запас под цифры у конца столбца + плашку % правее них.
+    number_pad = peak * 0.18 if peak > 0 else 0.0
+    badge_pad = peak * 0.04 if peak > 0 else 0.0
     company_label = str(table.get("totals_label") or "Совтест АТЕ") if totals else None
 
     fig = go.Figure()
@@ -3117,9 +3135,9 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
             y=categories,
             x=forecasts,
             marker_color="#5B9BD5",
-            # Суммы только в hover — снаружи они наезжали на %%.
             text=[_fmt_ru_int(v) for v in forecasts],
-            textposition="none",
+            textposition="outside",
+            textfont=dict(color="#2F2F2F", size=11),
             cliponaxis=False,
             offsetgroup="forecast",
             hovertemplate="%{y}<br>Прогноз: %{text}<extra></extra>",
@@ -3155,7 +3173,8 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
                 x=orders,
                 marker_color="#C00000",
                 text=[_fmt_ru_int(v) for v in orders],
-                textposition="none",
+                textposition="outside",
+                textfont=dict(color="#2F2F2F", size=11),
                 cliponaxis=False,
                 offsetgroup="orders",
                 hovertemplate="%{y}<br>Заказы: %{text}<extra></extra>",
@@ -3163,6 +3182,7 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
         )
 
     annotations = []
+    farthest = peak
     for i, (label, forecast, order_sum, pct) in enumerate(
         zip(categories, forecasts, orders, pcts)
     ):
@@ -3179,6 +3199,10 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
         if not text:
             continue
         is_company = company_label is not None and label == company_label
+        # Плашка правее цифр у самого длинного столбца этой строки.
+        bar_end = max(forecast, order_sum)
+        label_x = bar_end + number_pad + badge_pad
+        farthest = max(farthest, label_x)
         annotations.append(
             dict(
                 x=label_x,
@@ -3199,12 +3223,13 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
             )
         )
 
+    x_top = farthest * 1.28 if farthest > 0 else 1.0
     n = max(1, len(categories))
     fig.update_layout(
         title=chart_title_caps("План-фактный анализ продаж"),
         barmode="group",
         height=max(520, 78 * n + 140),
-        margin=dict(l=110, r=220, t=80, b=40),
+        margin=dict(l=110, r=260, t=80, b=40),
         legend=dict(
             orientation="h",
             yanchor="bottom",

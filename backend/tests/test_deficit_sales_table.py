@@ -88,6 +88,56 @@ def test_summary_takes_forecast_from_department_table():
     assert summary[2] == 108
 
 
+def test_allocate_percentages_match_total():
+    from services.deficit_sales_table import _allocate_percentages, _fulfillment_percent
+
+    forecast = 1_322_457_052.0
+    amounts = [199_716_325.2, 167_990_628.6, 74_496_631.3]
+    total = sum(amounts)
+    target = _fulfillment_percent(total, forecast)
+    assert target == 33
+    # Независимое округление даёт 15+13+6=34
+    assert [_fulfillment_percent(a, forecast) for a in amounts] == [15, 13, 6]
+    allocated = _allocate_percentages(amounts, forecast, target=target)
+    assert sum(allocated) == target
+    assert allocated == [15, 13, 5]
+
+
+def test_summary_period_pcts_sum_to_fulfill():
+    from services.deficit_sales_table import build_deficit_sales_summary
+
+    df = pd.DataFrame(
+        {
+            "подразделение": [
+                "Служба тестового оборудования",
+                "Служба тестового оборудования",
+                "Служба тестового оборудования",
+            ],
+            "заказ клиента": [
+                "Заказ клиента ЗК-1 от 10.07.2026",
+                "Заказ клиента ЗК-2 от 10.08.2026",
+                "Заказ клиента ЗК-3 от 10.09.2026",
+            ],
+            "сумма по заказу в рублях": [199_716_325.2, 167_990_628.6, 74_496_631.3],
+            "оплачено по заказу": [0.0, 0.0, 0.0],
+            "неоплаченный остаток": [199_716_325.2, 167_990_628.6, 74_496_631.3],
+        }
+    )
+    df.attrs["deficit_sales_forecast"] = {"СТО": 1_322_457_052.0}
+    tile = Tile(
+        title="Выполнение прогноза",
+        chart_type="table",
+        source={"kind": "deficit_sales_summary", "period": "month"},
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+    data = build_deficit_sales_summary(df, tile)
+    bars = [b for b in data["period_bars"] if b["order_sum"] > 0]
+    assert data["fulfill_pct"] == 33
+    assert sum(int(b["pct"]) for b in bars) == data["fulfill_pct"]
+
+
 def test_summary_splits_order_sum_by_quarters():
     from services.deficit_sales_table import build_deficit_sales_summary
     from services.dashboard_engine import _render_deficit_sales_summary_chart
@@ -195,15 +245,15 @@ def test_plan_fact_chart_splits_orders_by_periods():
     assert list(fig.data[2].x) == pytest.approx([350.0, 300.0, 50.0])
     assert fig.data[1].offsetgroup == fig.data[2].offsetgroup == "orders"
     assert list(fig.data[2].base) == pytest.approx([100.0, 0.0, 100.0])
-    # % и периоды — справа, не внутри столбцов
+    # % и периоды — справа от цифр у столбцов
     side = " ".join(str(a.text or "") for a in (fig.layout.annotations or []))
     assert "50%" in side or "<b>50%</b>" in side
     assert "1 кв. 2026" in side
     assert "3 кв. 2026" in side
-    assert all(
-        (getattr(tr, "textposition", None) in (None, "none") or tr.textposition == "none")
-        for tr in fig.data
-    )
+    # Плашки правее конца столбца (+ запас под цифры)
+    peak = 900.0
+    for a in fig.layout.annotations or []:
+        assert float(a.x) > peak * 0.5
 
 
 def test_share_chart_splits_company_total_by_periods():

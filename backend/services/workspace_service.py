@@ -136,18 +136,18 @@ def _order_payments_tab_tiles(tiles: list) -> list:
 
 
 def normalize_deficit_dashboard_spec(spec):
-    """Вкладка «Платежи» (Продажи в UI): таблицы продаж; платёжные графики — на «Структура»."""
-    from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
+    """Вкладка «Платежи» (Продажи в UI): таблицы продаж.
+
+    Автографики вкладки «Оплата»/«Структура» не создаём и снимаем со спеки.
+    """
+    from models.dashboard_spec import DashboardSpec, Tile, TileSource
 
     if not isinstance(spec, DashboardSpec):
         return spec
     pay = next((tab for tab in spec.tabs if tab.title == "Платежи"), None)
     if pay is None:
         return spec
-    structure = next((tab for tab in spec.tabs if tab.title == "Структура"), None)
     stay = [t for t in pay.tiles if t.source.kind in _PAYMENTS_TAB_TILE_KINDS]
-    moved = [t for t in pay.tiles if t.source.kind not in _PAYMENTS_TAB_TILE_KINDS]
-    moved.extend(list(structure.tiles) if structure else [])
     if not any(t.source.kind == "deficit_sales_by_department" for t in stay):
         stay.insert(
             0,
@@ -240,10 +240,8 @@ def normalize_deficit_dashboard_spec(spec):
         for t in stay
     ]
     pay.tiles = _order_payments_tab_tiles(stay)
-    if structure is not None:
-        structure.tiles = moved[:8]
-    elif moved:
-        spec.tabs.append(Tab(title="Структура", tiles=moved[:8]))
+    # Убираем вкладку «Структура» («Оплата» в UI) вместе с автографиками.
+    spec.tabs = [tab for tab in spec.tabs if tab.title != "Структура"]
     return spec
 
 

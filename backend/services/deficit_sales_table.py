@@ -67,6 +67,54 @@ def _fulfillment_percent(order_sum: float, forecast: float | None) -> int | None
     return int(round(100.0 * order_sum / forecast))
 
 
+def _allocate_percentages(
+    amounts: list[float],
+    forecast: float,
+    target: int | None = None,
+) -> list[int]:
+    """Целые % по периодам, сумма которых равна общему % (метод наибольших остатков)."""
+    n = len(amounts)
+    if n == 0 or forecast <= 0:
+        return [0] * n
+    clean = [max(0.0, float(a or 0)) for a in amounts]
+    total = sum(clean)
+    if target is None:
+        target = int(round(100.0 * total / forecast)) if total > 0 else 0
+    target = max(0, int(target))
+    if total <= 0 or target == 0:
+        return [0] * n
+
+    exact = [100.0 * a / forecast for a in clean]
+    floors = [int(x) for x in exact]  # truncate toward 0; amounts >= 0
+    # Если из‑за округления вниз суммы floors > target — урежем
+    while sum(floors) > target:
+        idx = max(range(n), key=lambda i: (floors[i], exact[i] - floors[i]))
+        if floors[idx] <= 0:
+            break
+        floors[idx] -= 1
+
+    rem = target - sum(floors)
+    order = sorted(
+        range(n),
+        key=lambda i: (-(exact[i] - floors[i]), -clean[i], i),
+    )
+    for i in order:
+        if rem <= 0:
+            break
+        if clean[i] <= 0:
+            continue
+        floors[i] += 1
+        rem -= 1
+    # Если остались очки (все нули уже учтены) — добьём крупнейшие суммы
+    if rem > 0:
+        for i in sorted(range(n), key=lambda j: (-clean[j], j)):
+            if rem <= 0:
+                break
+            floors[i] += 1
+            rem -= 1
+    return floors
+
+
 def _normalize_forecast_label(label: str) -> str | None:
     """Приводит подписи листа «Прогноз» к ключам таблицы продаж."""
     text = str(label or "").strip()
@@ -833,16 +881,22 @@ def build_deficit_sales_summary(df: pd.DataFrame, tile: Tile) -> dict:
     order_sum = float(totals[order_sum_col] or 0) if len(totals) > order_sum_col else 0.0
     pct = _fulfillment_percent(order_sum, forecast if forecast > 0 else None)
 
-    period_bars: list[dict] = []
-    for label, col_i in _period_money_columns(table):
-        amount = float(totals[col_i] or 0) if len(totals) > col_i else 0.0
-        period_bars.append(
-            {
-                "label": label,
-                "order_sum": amount,
-                "pct": _fulfillment_percent(amount, forecast if forecast > 0 else None),
-            }
+    period_cols = _period_money_columns(table)
+    period_amounts = [
+        float(totals[col_i] or 0) if len(totals) > col_i else 0.0
+        for _label, col_i in period_cols
+    ]
+    period_pcts = (
+        _allocate_percentages(period_amounts, forecast, target=pct)
+        if forecast > 0 and pct is not None
+        else [0] * len(period_amounts)
+    )
+    period_bars: list[dict] = [
+        {"label": label, "order_sum": amount, "pct": bar_pct}
+        for (label, _col_i), amount, bar_pct in zip(
+            period_cols, period_amounts, period_pcts
         )
+    ]
 
     columns = ["Прогноз продаж, р."]
     column_kinds = ["money"]

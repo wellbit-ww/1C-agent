@@ -116,9 +116,9 @@ def test_sook_xls_order_sum_is_summa_zakaza_not_next_payment():
 
 
 class TestDeficitDashboard:
-    def test_spec_has_payment_charts(self):
+    def test_spec_sales_only_no_payment_charts(self):
         spec = build_deficit_dashboard_spec(_ks_df())
-        assert [tab.title for tab in spec.tabs] == ["Платежи", "Структура"]
+        assert [tab.title for tab in spec.tabs] == ["Платежи"]
         assert [t.source.kind for t in spec.tabs[0].tiles] == [
             "deficit_sales_by_department",
             "deficit_sales_summary",
@@ -126,24 +126,13 @@ class TestDeficitDashboard:
             "deficit_sales_fulfillment_board",
             "deficit_sales_share",
         ]
-        structure = spec.tabs[1]
-        titles = [tile.title for tile in structure.tiles]
-        assert "К оплате" in titles
-        assert "Оплачено и неоплаченный остаток" in titles
-        to_pay = next(t for t in structure.tiles if t.title == "К оплате")
-        assert to_pay.source.kind == "named_columns"
-        assert len(to_pay.source.column_names) == 3
+        assert not any(tab.title == "Структура" for tab in spec.tabs)
 
         rendered = render_spec(_ks_df(), spec)
         sales_tile = rendered["tabs"][0]["tiles"][0]
         assert sales_tile["chart_type"] == "table"
         assert sales_tile["table"]["totals_label"] == "Всего"
-        pay_out = rendered["tabs"][1]["tiles"]
-        assert all("plotly_json" in tile for tile in pay_out)
-        k_oplate = next(t for t in pay_out if t["title"] == "К оплате")
-        fig = json.loads(k_oplate["plotly_json"])
-        labels = list(fig["data"][0]["x"])
-        assert labels == ["До обеспечения", "До отгрузки", "После отгрузки"]
+        assert not any(tab["title"] == "Структура" for tab in rendered["tabs"])
 
     def test_real_deficit_file(self, deficit_df):
         _, profile = get_profile_for_df(deficit_df, filename="Дефицит по КС.xlsx")
@@ -154,9 +143,8 @@ class TestDeficitDashboard:
         assert kpis["Неоплаченный остаток"] == pytest.approx(374_617_149.86, rel=1e-6)
         spec = profile.get_dashboard_spec(deficit_df)
         rendered = render_spec(deficit_df, spec)
-        structure = next(tab for tab in rendered["tabs"] if tab["title"] == "Структура")
-        ok = [t for t in structure["tiles"] if "plotly_json" in t]
-        assert len(ok) >= 3
+        assert [tab["title"] for tab in rendered["tabs"]] == ["Платежи"]
+        assert rendered["tabs"][0]["tiles"][0]["chart_type"] == "table"
 
 
 def test_desktop_ks_file_if_present():
@@ -174,5 +162,4 @@ def test_desktop_ks_file_if_present():
     rendered = render_spec(df, spec)
     pay_tab = next(tab for tab in rendered["tabs"] if tab["title"] == "Платежи")
     assert pay_tab["tiles"][0]["chart_type"] == "table"
-    structure = next(tab for tab in rendered["tabs"] if tab["title"] == "Структура")
-    assert all("error" not in t for t in structure["tiles"])
+    assert not any(tab["title"] == "Структура" for tab in rendered["tabs"])

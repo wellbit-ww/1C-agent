@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import pandas as pd
 
 from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
-from services.column_resolver import resolve_semantic_column
 from services.kpi_engine import (
     _format_number,
     calculate_unique_customers,
@@ -215,28 +214,6 @@ def deficit_kpis(df: pd.DataFrame) -> list[dict]:
     return kpis
 
 
-def _money_group_title(layout: DeficitMoneyLayout, money: str, unpaid_title: str, group_ru: str) -> str:
-    if money == layout.unpaid:
-        return unpaid_title
-    name = _norm(money)
-    if "очередн" in name or "платеж" in name:
-        return f"Очередной платёж по {group_ru}"
-    if money == layout.order_sum:
-        return f"Сумма заказов по {group_ru}"
-    return f"{money} по {group_ru}"
-
-
-def _named_tile(title: str, columns: list[str], chart_type: str = "bar") -> Tile:
-    return Tile(
-        title=title,
-        chart_type=chart_type,
-        source=TileSource(kind="named_columns", column_names=columns),
-        agg="sum",
-        unit="auto",
-        sort="none",
-    )
-
-
 def _deficit_sales_table_tile() -> Tile:
     return Tile(
         title="Продажи по подразделениям",
@@ -292,30 +269,6 @@ def _deficit_sales_summary_tile() -> Tile:
     )
 
 
-def _group_tile(
-    title: str,
-    group_semantic: str | None,
-    group_column: str | None,
-    value_column: str,
-    chart_type: str,
-    agg: str = "sum",
-    top_n: int = 10,
-) -> Tile:
-    return Tile(
-        title=title,
-        chart_type=chart_type,
-        source=TileSource(
-            kind="group",
-            group_semantic=group_semantic,
-            group_column=group_column,
-            value_column=value_column,
-        ),
-        agg=agg,
-        top_n=top_n,
-        unit="auto",
-    )
-
-
 def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
     layout = detect_deficit_money_layout(df)
     if layout.is_empty():
@@ -323,120 +276,8 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
 
         return build_generic_spec(df)
 
-    money = layout.money_column
-    payments: list[Tile] = []
-    if layout.stages:
-        payments.append(
-            _named_tile("К оплате", [col for _, col in layout.stages], "bar")
-        )
-    paid_unpaid = [c for c in (layout.paid, layout.unpaid) if c]
-    if len(paid_unpaid) >= 2:
-        payments.append(_named_tile("Оплачено и неоплаченный остаток", paid_unpaid, "bar"))
-    elif layout.unpaid and layout.order_sum:
-        payments.append(
-            _named_tile(
-                "Сумма заказа и неоплаченный остаток",
-                [layout.order_sum, layout.unpaid],
-                "bar",
-            )
-        )
-
-    client_col = resolve_semantic_column(df, "", semantic="client", dtype="categorical")
-    dept_col = resolve_semantic_column(
-        df, "", semantic="department", dtype="categorical"
-    )
-    mgr_col = resolve_semantic_column(df, "", semantic="manager", dtype="categorical")
-
-    if money and client_col:
-        payments.append(
-            _group_tile(
-                _money_group_title(
-                    layout, money, "Неоплаченный остаток по заказчикам", "заказчикам"
-                ),
-                "client",
-                client_col,
-                money,
-                "hbar",
-                top_n=12,
-            )
-        )
-    dept_varied = bool(dept_col) and int(df[dept_col].dropna().astype(str).nunique()) >= 2
-    if money and dept_varied:
-        payments.append(
-            _group_tile(
-                _money_group_title(
-                    layout, money, "Остаток по подразделениям", "подразделениям"
-                ),
-                "department",
-                dept_col,
-                money,
-                "pie",
-                top_n=8,
-            )
-        )
-
-    structure: list[Tile] = []
-    if money and mgr_col:
-        structure.append(
-            _group_tile(
-                _money_group_title(
-                    layout, money, "Остаток по ответственным", "ответственным"
-                ),
-                "manager",
-                mgr_col,
-                money,
-                "hbar",
-                top_n=12,
-            )
-        )
-    if layout.order_sum and client_col:
-        structure.append(
-            _group_tile(
-                "Сумма заказов по заказчикам",
-                "client",
-                client_col,
-                layout.order_sum,
-                "hbar",
-                top_n=12,
-            )
-        )
-    if dept_varied:
-        structure.append(
-            Tile(
-                title="Количество заказов по подразделениям",
-                chart_type="bar",
-                source=TileSource(
-                    kind="group",
-                    group_semantic="department",
-                    group_column=dept_col,
-                ),
-                agg="count",
-                top_n=12,
-                unit="auto",
-            )
-        )
-
-    from services import data_tools
-
-    dates = data_tools.detect_date_columns(df).get("columns") or []
-    if dates and money:
-        structure.append(
-            Tile(
-                title="Динамика остатка по месяцам",
-                chart_type="area",
-                source=TileSource(
-                    kind="period",
-                    period="month",
-                    value_column=money,
-                ),
-                unit="auto",
-                sort="none",
-            )
-        )
-
-    tabs: list[Tab] = []
-    # «Платежи» в workspace показывается как «Продажи».
-    tabs.append(
+    tabs: list[Tab] = [
+        # «Платежи» в UI — «Продажи». Вкладка «Оплата» (Структура) без автографиков.
         Tab(
             title="Платежи",
             tiles=[
@@ -447,14 +288,7 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
                 _deficit_sales_share_tile(),
             ],
         )
-    )
-    combined = (payments + structure)[:8]
-    if combined:
-        tabs.append(Tab(title="Структура", tiles=combined))
-    if not tabs:
-        from services.generic_dashboard import build_generic_spec
-
-        return build_generic_spec(df)
+    ]
     return DashboardSpec(tabs=tabs)
 
 

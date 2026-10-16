@@ -34,7 +34,8 @@ def test_workspace_dashboard_isolates_sources(sales_df, deficit_df):
     assert "Этапы продаж" in sales_titles or any("Этап" in t for t in sales_titles)
 
     deficit_titles = {tab["title"] for tab in deficit_src["tabs"]}
-    assert "Платежи" in deficit_titles or "Структура" in deficit_titles
+    assert "Платежи" in deficit_titles
+    assert "Структура" not in deficit_titles
 
     for tab in sales_src["tabs"]:
         assert tab.get("source_file_id") == sales_id
