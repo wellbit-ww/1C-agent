@@ -34,8 +34,18 @@ def test_workspace_dashboard_isolates_sources(sales_df, deficit_df):
     assert "Этапы продаж" in sales_titles or any("Этап" in t for t in sales_titles)
 
     deficit_titles = {tab["title"] for tab in deficit_src["tabs"]}
-    assert "Платежи" in deficit_titles
-    assert "Структура" not in deficit_titles
+    assert deficit_titles == {"Платежи", "Структура"}
+    structure = next(tab for tab in deficit_src["tabs"] if tab["title"] == "Структура")
+    assert structure["tiles"]
+    structure_spec = next(
+        tab for tab in deficit_src["spec"]["tabs"] if tab["title"] == "Структура"
+    )
+    assert [t["source"]["kind"] for t in structure_spec["tiles"]] == [
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
+    ]
 
     for tab in sales_src["tabs"]:
         assert tab.get("source_file_id") == sales_id

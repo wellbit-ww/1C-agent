@@ -138,9 +138,9 @@ def _order_payments_tab_tiles(tiles: list) -> list:
 def normalize_deficit_dashboard_spec(spec):
     """Вкладка «Платежи» (Продажи в UI): таблицы продаж.
 
-    Автографики вкладки «Оплата»/«Структура» не создаём и снимаем со спеки.
+    «Структура» — отдельный пустой дашборд «Оплата»; автографики на неё не вешаем.
     """
-    from models.dashboard_spec import DashboardSpec, Tile, TileSource
+    from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
 
     if not isinstance(spec, DashboardSpec):
         return spec
@@ -240,8 +240,32 @@ def normalize_deficit_dashboard_spec(spec):
         for t in stay
     ]
     pay.tiles = _order_payments_tab_tiles(stay)
-    # Убираем вкладку «Структура» («Оплата» в UI) вместе с автографиками.
-    spec.tabs = [tab for tab in spec.tabs if tab.title != "Структура"]
+    from services.report_profiles.deficit_profile import deficit_payment_tab_tiles
+
+    _PAYMENT_KINDS = {
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
+    }
+    payment_shell = next((tab for tab in spec.tabs if tab.title == "Структура"), None)
+    payment_period = next(
+        (
+            t.source.period
+            for t in (payment_shell.tiles if payment_shell else [])
+            if t.source.kind in _PAYMENT_KINDS
+            and t.source.period in {"half", "quarter", "month"}
+        ),
+        period,
+    )
+    if payment_period not in {"half", "quarter", "month"}:
+        payment_period = "quarter"
+    # Отдельные тайлы как на «Продажах», с единым периодом вкладки «Оплата».
+    payment_shell = Tab(
+        title="Структура",
+        tiles=deficit_payment_tab_tiles(payment_period),
+    )
+    spec.tabs = [pay, payment_shell]
     return spec
 
 

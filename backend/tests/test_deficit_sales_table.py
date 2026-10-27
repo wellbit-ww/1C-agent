@@ -743,3 +743,10 @@ def test_normalize_keeps_sales_table_on_payments_tab():
     assert "Доля в продажах" in pay_out["tiles"][4]["table"]["columns"]
     assert pay_out["tiles"][4]["table"]["totals_label"] == "Совтест АТЕ"
     assert pay_out["tiles"][4].get("plotly_json")
+    structure = next(tab for tab in spec.tabs if tab.title == "Структура")
+    assert [t.source.kind for t in structure.tiles] == [
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
+    ]

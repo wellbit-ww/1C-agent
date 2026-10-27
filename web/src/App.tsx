@@ -13,7 +13,9 @@ import { clearSession, readSession, writeSession, type SavedSession } from "./se
 import {
   flattenWorkspaceDashboard,
   specForSourceFile,
+  specTileAt,
   tabSourceFileId,
+  deficitDashboardTabTitle,
 } from "./workspaceDashboard";
 import type {
   ChatMessage,
@@ -54,6 +56,13 @@ const DEFICIT_SALES_PERIOD_KINDS = [
   "deficit_sales_forecast_vitrine",
   "deficit_sales_fulfillment_board",
   "deficit_sales_share",
+] as const;
+
+const DEFICIT_PAYMENT_PERIOD_KINDS = [
+  "deficit_payment_receipt",
+  "deficit_payment_by_department",
+  "deficit_payment_fulfillment_board",
+  "deficit_payment_share",
 ] as const;
 
 const DYNAMICS_PERIOD_KINDS = [
@@ -856,6 +865,51 @@ function applySalesForecasts(table: PivotTable, forecasts: Record<string, number
     );
   }
   return { ...table, rows, totals };
+}
+
+function DeficitPaymentReceiptView({
+  table,
+  plotlyJson,
+}: {
+  table: PivotTable;
+  plotlyJson?: string;
+}) {
+  const row = table.rows[0];
+  const values = row?.values ?? [];
+  return (
+    <div className="space-y-4">
+      <div className="overflow-auto rounded-lg border border-line">
+        <table className="min-w-full border-collapse text-right text-xs">
+          <thead className="bg-panel text-zinc-200">
+            <tr>
+              {table.columns.map((col) => (
+                <th key={col} className="border-b border-line px-3 py-2 font-medium whitespace-nowrap">
+                  {col}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              {values.map((value, i) => (
+                <td
+                  key={i}
+                  className={`border-t border-line px-3 py-2 tabular-nums ${
+                    table.column_kinds?.[i] === "percent"
+                      ? "font-medium text-zinc-100"
+                      : "text-zinc-300"
+                  }`}
+                >
+                  {formatPivotNumber(value as number, table.column_kinds?.[i])}
+                </td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      {plotlyJson ? <PlotChart json={plotlyJson} className="h-[26rem] w-full" /> : null}
+    </div>
+  );
 }
 
 function DeficitSalesSummaryReadonly({
@@ -2091,7 +2145,11 @@ export function App() {
       | "deficit_sales_summary"
       | "deficit_sales_forecast_vitrine"
       | "deficit_sales_fulfillment_board"
-      | "deficit_sales_share",
+      | "deficit_sales_share"
+      | "deficit_payment_receipt"
+      | "deficit_payment_by_department"
+      | "deficit_payment_fulfillment_board"
+      | "deficit_payment_share",
   ) {
     const spec = dashboard?.spec;
     const targetFileId = fileIdForTab(tabI);
@@ -2102,6 +2160,9 @@ export function App() {
     const syncStages = STAGES_PERIOD_KINDS.has(kind);
     const syncDeficitSales = DEFICIT_SALES_PERIOD_KINDS.includes(
       kind as (typeof DEFICIT_SALES_PERIOD_KINDS)[number],
+    );
+    const syncDeficitPayment = DEFICIT_PAYMENT_PERIOD_KINDS.includes(
+      kind as (typeof DEFICIT_PAYMENT_PERIOD_KINDS)[number],
     );
     const next: DashSpec = {
       tabs: spec.tabs.map((t, ti) =>
@@ -2128,6 +2189,15 @@ export function App() {
                   itemKind &&
                   DEFICIT_SALES_PERIOD_KINDS.includes(
                     itemKind as (typeof DEFICIT_SALES_PERIOD_KINDS)[number],
+                  )
+                ) {
+                  return { ...item, source: { ...item.source, period } };
+                }
+                if (
+                  syncDeficitPayment &&
+                  itemKind &&
+                  DEFICIT_PAYMENT_PERIOD_KINDS.includes(
+                    itemKind as (typeof DEFICIT_PAYMENT_PERIOD_KINDS)[number],
                   )
                 ) {
                   return { ...item, source: { ...item.source, period } };
@@ -2292,6 +2362,12 @@ export function App() {
   }
 
   const tabs = dashboard?.tabs ?? [];
+  const tabLabel = (t: (typeof tabs)[number]) => {
+    if (t.source_role === "deficit_report" || dashboard?.report_type === "deficit_report") {
+      return deficitDashboardTabTitle(t.title);
+    }
+    return t.title;
+  };
   const kpis = dashboard?.kpis ?? [];
   const meta = dashboard?.metadata;
 
@@ -2450,7 +2526,7 @@ export function App() {
                     <div className="mb-3 flex flex-wrap items-center gap-1">
                       {tabs.map((t, i) => (
                         <button
-                          key={t.title}
+                          key={`${t.title}-${i}`}
                           type="button"
                           onClick={() => {
                             setTab(i);
@@ -2462,7 +2538,7 @@ export function App() {
                               : "rounded-lg px-3 py-1.5 text-sm text-zinc-400 hover:text-zinc-200"
                           }
                         >
-                          {t.title}
+                          {tabLabel(t)}
                         </button>
                       ))}
                       {dashboard?.spec && (
@@ -2481,14 +2557,20 @@ export function App() {
                       </p>
                     )}
                     <div className="grid min-w-0 grid-cols-1 gap-3 xl:grid-cols-2">
-                      {(tabs[tab]?.tiles ?? []).map((tile, tileI) => {
+                      {(tabs[tab]?.tiles ?? []).length === 0 ? (
+                        <p className="col-span-full text-sm text-zinc-500">
+                          На этой вкладке пока нет виджетов. Обновите дашборд: закройте файл и откройте
+                          снова.
+                        </p>
+                      ) : (
+                      (tabs[tab]?.tiles ?? []).map((tile, tileI) => {
                         const id = `${tabs[tab]?.title ?? "tab"}::${tile.title}`;
                         const inReport = reportCharts.some((c) => c.id === id);
                         const editing =
                           chartEditor?.mode === "edit" &&
                           chartEditor.tabI === tab &&
                           chartEditor.tileI === tileI;
-                        const specTile = dashboard?.spec?.tabs[tab]?.tiles[tileI];
+                        const specTile = specTileAt(dashboard, tab, tileI);
                         const conversionTile =
                           specTile?.source?.kind === "deals_conversion" ||
                           tile.chart_type === "deals_conversion";
@@ -2502,6 +2584,15 @@ export function App() {
                           tile.chart_type === "deficit_sales_by_department";
                         const deficitSalesSummaryTile =
                           specTile?.source?.kind === "deficit_sales_summary";
+                        const deficitPaymentReceiptTile =
+                          specTile?.source?.kind === "deficit_payment_receipt" ||
+                          tile.table?.layout === "payment_receipt";
+                        const deficitPaymentByDeptTile =
+                          specTile?.source?.kind === "deficit_payment_by_department";
+                        const deficitPaymentFulfillmentTile =
+                          specTile?.source?.kind === "deficit_payment_fulfillment_board";
+                        const deficitPaymentShareTile =
+                          specTile?.source?.kind === "deficit_payment_share";
                         const deficitSalesVitrineTile =
                           specTile?.source?.kind === "deficit_sales_forecast_vitrine";
                         const deficitSalesFulfillmentBoardTile =
@@ -2521,6 +2612,9 @@ export function App() {
                           ) ||
                           DEFICIT_SALES_PERIOD_KINDS.includes(
                             specTile?.source?.kind as (typeof DEFICIT_SALES_PERIOD_KINDS)[number],
+                          ) ||
+                          DEFICIT_PAYMENT_PERIOD_KINDS.includes(
+                            specTile?.source?.kind as (typeof DEFICIT_PAYMENT_PERIOD_KINDS)[number],
                           );
                         const periodBucketDefault = "quarter";
                         const dynamicsTile = DYNAMICS_PERIOD_KINDS.includes(
@@ -2564,7 +2658,7 @@ export function App() {
                           key={`${tile.title}-${tileI}`}
                           className={`min-w-0 overflow-hidden rounded-xl border bg-card p-3 ${
                             editing ? "border-accent/60" : "border-line"
-                          } ${(tile.table || tile.sections || tile.money || tile.deals_list || dynamicsTile || conversionTile || moneyTile || stagesDealListTile || deficitSalesTile || deficitSalesVitrineTile || deficitSalesFulfillmentBoardTile || deficitSalesShareTile || deficitSalesSummaryTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
+                          } ${(tile.table || tile.sections || tile.money || tile.deals_list || dynamicsTile || conversionTile || moneyTile || stagesDealListTile || deficitSalesTile || deficitSalesVitrineTile || deficitSalesFulfillmentBoardTile || deficitSalesShareTile || deficitSalesSummaryTile || deficitPaymentReceiptTile || deficitPaymentByDeptTile || deficitPaymentFulfillmentTile || deficitPaymentShareTile) && !sideBySideTile || (tabs[tab]?.tiles ?? []).length === 1 ? "xl:col-span-2" : ""}`}
                         >
                           <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
                             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -2593,7 +2687,11 @@ export function App() {
                                         | "deficit_sales_summary"
                                         | "deficit_sales_forecast_vitrine"
                                         | "deficit_sales_fulfillment_board"
-                                        | "deficit_sales_share",
+                                        | "deficit_sales_share"
+                                        | "deficit_payment_receipt"
+                                        | "deficit_payment_by_department"
+                                        | "deficit_payment_fulfillment_board"
+                                        | "deficit_payment_share",
                                     )
                                   }
                                   className="rounded-md border border-line bg-bg px-2 py-0.5 text-[11px] text-zinc-300 outline-none focus:border-accent/60"
@@ -2753,6 +2851,32 @@ export function App() {
                                 void onDeficitSalesPatch(tab, tileI, nextForecasts)
                               }
                             />
+                          ) : deficitPaymentReceiptTile && tile.table ? (
+                            <DeficitPaymentReceiptView
+                              table={tile.table}
+                              plotlyJson={tile.plotly_json}
+                            />
+                          ) : deficitPaymentByDeptTile && tile.table ? (
+                            <div className="space-y-4">
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <PlotChart json={tile.plotly_json} className="h-[44rem] w-full" />
+                              ) : null}
+                            </div>
+                          ) : deficitPaymentFulfillmentTile && tile.table ? (
+                            <div className="space-y-4">
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <PlotChart json={tile.plotly_json} className="h-[26rem] w-full" />
+                              ) : null}
+                            </div>
+                          ) : deficitPaymentShareTile && tile.table ? (
+                            <div className="space-y-4">
+                              <PivotTableView table={tile.table} />
+                              {tile.plotly_json ? (
+                                <PlotChart json={tile.plotly_json} className="h-[28rem] w-full" />
+                              ) : null}
+                            </div>
                           ) : deficitSalesSummaryTile && tile.table ? (
                             <DeficitSalesSummaryReadonly
                               table={tile.table}
@@ -2786,7 +2910,8 @@ export function App() {
                           ) : null}
                         </div>
                         );
-                      })}
+                      })
+                      )}
                     </div>
                   </>
                 )}

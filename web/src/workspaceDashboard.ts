@@ -14,6 +14,13 @@ export type WorkspaceDashboardPayload = {
   sources: DashboardSourcePayload[];
 };
 
+/** Подписи вкладок дашборда дефицита в UI (бэкенд: «Платежи», «Структура»). */
+export function deficitDashboardTabTitle(title: string): string {
+  if (title === "Платежи") return "Продажи";
+  if (title === "Структура") return "Оплата";
+  return title;
+}
+
 export function flattenWorkspaceDashboard(payload: WorkspaceDashboardPayload): Dashboard {
   const flatTabs: DashTab[] = [];
   const specTabs: DashSpec["tabs"] = [];
@@ -22,9 +29,9 @@ export function flattenWorkspaceDashboard(payload: WorkspaceDashboardPayload): D
 
   for (const src of payload.sources) {
     const deficitTabTitle = (title: string) => {
-      if (title === "Платежи") return "Продажи";
-      if (title === "Структура") return "Оплата";
-      return `Дефицит · ${title}`;
+      if (src.role !== "deficit_report") return title;
+      if (title.startsWith("Дефицит · ")) return title;
+      return deficitDashboardTabTitle(title);
     };
     for (const kpi of src.kpis ?? []) {
       kpis.push({
@@ -79,6 +86,23 @@ export function flattenWorkspaceDashboard(payload: WorkspaceDashboardPayload): D
 export function tabSourceFileId(dashboard: Dashboard | null, tabIndex: number): string | null {
   const tab = dashboard?.tabs?.[tabIndex];
   return tab?.source_file_id ?? dashboard?.sales_file_id ?? null;
+}
+
+/** Спека тайла с учётом workspace (несколько файлов в одной ленте вкладок). */
+export function specTileAt(
+  dashboard: Dashboard | null,
+  tabIndex: number,
+  tileIndex: number,
+) {
+  const flatTab = dashboard?.tabs?.[tabIndex];
+  if (!flatTab) return undefined;
+  const fileId = flatTab.source_file_id;
+  const sourceTabIndex = flatTab.source_tab_index;
+  if (fileId != null && sourceTabIndex != null && dashboard?.sources?.length) {
+    const src = dashboard.sources.find((item) => item.file_id === fileId);
+    return src?.spec?.tabs?.[sourceTabIndex]?.tiles?.[tileIndex];
+  }
+  return dashboard?.spec?.tabs?.[tabIndex]?.tiles?.[tileIndex];
 }
 
 export function specForSourceFile(

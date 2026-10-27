@@ -71,9 +71,11 @@ def read_workbook(file_path: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]
 
     df = next(iter(sheets.values()))
     try:
+        from services.deficit_payment_table import attach_deficit_payment_plan
         from services.deficit_sales_table import attach_deficit_sales_forecast
 
         attach_deficit_sales_forecast(df, file_path)
+        attach_deficit_payment_plan(df, file_path)
     except Exception:
         pass
     return df, sheets

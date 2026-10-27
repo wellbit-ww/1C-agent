@@ -2528,6 +2528,22 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
         from services.deficit_sales_table import build_deficit_sales_summary
 
         return build_deficit_sales_summary(df, tile)
+    if kind == "deficit_payment_receipt":
+        from services.deficit_payment_table import build_deficit_payment_receipt_table
+
+        return build_deficit_payment_receipt_table(df, tile)
+    if kind == "deficit_payment_by_department":
+        from services.deficit_payment_table import build_deficit_payment_by_department
+
+        return build_deficit_payment_by_department(df, tile)
+    if kind == "deficit_payment_fulfillment_board":
+        from services.deficit_payment_table import build_deficit_payment_fulfillment_board
+
+        return build_deficit_payment_fulfillment_board(df, tile)
+    if kind == "deficit_payment_share":
+        from services.deficit_payment_table import build_deficit_payment_share
+
+        return build_deficit_payment_share(df, tile)
     if kind == "pivot" or tile.chart_type == "table":
         return _pivot_data(df, tile)
     return _group_data(df, tile)
@@ -2536,6 +2552,55 @@ def _tile_data(df: pd.DataFrame, tile: Tile) -> dict:
 def _fmt_ru_int(value: float) -> str:
     n = int(round(float(value)))
     return f"{n:,}".replace(",", " ")
+
+
+def _render_deficit_payment_receipt_chart(
+    table: dict,
+    *,
+    plan: float | None = None,
+    fact: float | None = None,
+    fulfill_pct: int | None = None,
+    period_bars: list[dict] | None = None,
+) -> go.Figure:
+    """План + факт оплаты; при нескольких периодах факт — stacked-столбец как на Продажах."""
+    # Переиспользуем разметку summary-продаж: прогноз→план, заказы→факт.
+    fig = _render_deficit_sales_summary_chart(
+        table,
+        period_bars=period_bars,
+        forecast=plan,
+        order_sum=fact,
+        fulfill_pct=fulfill_pct,
+    )
+    fig.update_layout(title=chart_title_caps("План и факт оплаты, руб."))
+    # Подписи категорий как на оплате
+    plan_label = "ПЛАН"
+    fact_label = "ФАКТ"
+    for trace in fig.data:
+        xs = list(getattr(trace, "x", None) or [])
+        if not xs:
+            continue
+        mapped = []
+        for x in xs:
+            text = str(x)
+            if "ПРОГНОЗ" in text.upper():
+                mapped.append(plan_label)
+            elif "ОБЩАЯ СУММА" in text.upper() or "ЗАКАЗ" in text.upper():
+                mapped.append(fact_label)
+            else:
+                mapped.append(text)
+        trace.x = mapped
+    for ann in fig.layout.annotations or []:
+        x = str(getattr(ann, "x", "") or "")
+        if "ПРОГНОЗ" in x.upper():
+            ann.x = plan_label
+        elif "ОБЩАЯ СУММА" in x.upper() or "ЗАКАЗ" in x.upper():
+            ann.x = fact_label
+    fig.update_xaxes(
+        categoryorder="array",
+        categoryarray=[plan_label, fact_label],
+        title=dict(text="Поступление оплаты, р.", font=dict(size=12)),
+    )
+    return fig
 
 
 _SUMMARY_PERIOD_COLORS = (
@@ -2723,7 +2788,7 @@ def _render_deficit_sales_summary_chart(
                 marker_color="#70AD47",
                 text=[_fmt_ru_int(order_sum_v)],
                 textposition="inside",
-                textangle=-90,
+                textangle=0,
                 insidetextanchor="middle",
                 textfont=dict(color="white", size=14),
                 cliponaxis=False,
@@ -2788,8 +2853,13 @@ _SHARE_PERIOD_COLORS = (
 )
 
 
-def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
-    """Столбцы сумм заказов: компания первая, службы синие по убыванию суммы.
+def _render_deficit_sales_share_chart(
+    table: dict,
+    *,
+    title: str = "Доля продаж коммерческих служб",
+    show_company_share: bool = True,
+) -> go.Figure:
+    """Столбцы сумм: компания первая (красная), службы синие по убыванию суммы.
 
     При нескольких периодах компания — один stacked-столбец с сегментами периодов.
     """
@@ -2831,14 +2901,26 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
     category_order = [company_label, *dept_labels]
 
     if len(period_cols) > 1:
+        cursor = 0.0
+        small_callouts: list[tuple[float, str, str]] = []
         for i, (label, col_i) in enumerate(period_cols):
             amount = float(totals[col_i] or 0) if len(totals) > col_i else 0.0
             share = round(100.0 * amount / company_sum, 1) if company_sum > 0 else 0.0
             color = _SHARE_PERIOD_COLORS[i % len(_SHARE_PERIOD_COLORS)]
-            if amount > 0 and peak > 0 and amount / peak >= 0.05:
+            # Мелкие периоды (напр. сен << июл) внутри столбца не читаются —
+            # подпись уводим в callout справа.
+            if amount > 0 and peak > 0 and amount / peak >= 0.08:
                 seg_text = f"{label}<br>{_fmt_ru_share_pct(share)}"
             else:
                 seg_text = ""
+                if amount > 0:
+                    small_callouts.append(
+                        (
+                            cursor + amount / 2,
+                            color,
+                            f"<b>{label}</b><br>{_fmt_ru_share_pct(share)}",
+                        )
+                    )
             fig.add_trace(
                 go.Bar(
                     name=label,
@@ -2858,21 +2940,48 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
                     showlegend=False,
                 )
             )
-        annotations.append(
-            dict(
-                x=company_label,
-                y=company_sum + peak * 0.12,
-                text=f"<b>{_fmt_ru_share_pct(company_share)}</b>",
-                showarrow=False,
-                font=dict(color="#C00000", size=12),
-                bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#A0A0A0",
-                borderwidth=1,
-                borderpad=3,
-                xanchor="center",
-                yanchor="bottom",
+            cursor += amount
+        for i, (mid, color, text) in enumerate(small_callouts):
+            annotations.append(
+                dict(
+                    x=company_label,
+                    y=mid,
+                    ax=70 + (i % 2) * 48,
+                    ay=0,
+                    xref="x",
+                    yref="y",
+                    axref="pixel",
+                    ayref="pixel",
+                    text=text,
+                    showarrow=True,
+                    arrowhead=0,
+                    arrowwidth=1,
+                    arrowcolor=color,
+                    font=dict(color="#1f2937", size=11),
+                    bgcolor="rgba(255,255,255,0.96)",
+                    bordercolor=color,
+                    borderwidth=1.5,
+                    borderpad=3,
+                    xanchor="left",
+                    yanchor="middle",
+                )
             )
-        )
+        if show_company_share:
+            annotations.append(
+                dict(
+                    x=company_label,
+                    y=company_sum + peak * 0.12,
+                    text=f"<b>{_fmt_ru_share_pct(company_share)}</b>",
+                    showarrow=False,
+                    font=dict(color="#C00000", size=12),
+                    bgcolor="rgba(255,255,255,0.95)",
+                    bordercolor="#A0A0A0",
+                    borderwidth=1,
+                    borderpad=3,
+                    xanchor="center",
+                    yanchor="bottom",
+                )
+            )
         barmode = "stack"
     else:
         fig.add_trace(
@@ -2890,21 +2999,22 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
                 showlegend=False,
             )
         )
-        annotations.append(
-            dict(
-                x=company_label,
-                y=company_sum + peak * 0.12,
-                text=f"<b>{_fmt_ru_share_pct(company_share)}</b>",
-                showarrow=False,
-                font=dict(color="#C00000", size=12),
-                bgcolor="rgba(255,255,255,0.95)",
-                bordercolor="#A0A0A0",
-                borderwidth=1,
-                borderpad=3,
-                xanchor="center",
-                yanchor="bottom",
+        if show_company_share:
+            annotations.append(
+                dict(
+                    x=company_label,
+                    y=company_sum + peak * 0.12,
+                    text=f"<b>{_fmt_ru_share_pct(company_share)}</b>",
+                    showarrow=False,
+                    font=dict(color="#C00000", size=12),
+                    bgcolor="rgba(255,255,255,0.95)",
+                    bordercolor="#A0A0A0",
+                    borderwidth=1,
+                    borderpad=3,
+                    xanchor="center",
+                    yanchor="bottom",
+                )
             )
-        )
         barmode = "group"
 
     if dept_labels:
@@ -2940,10 +3050,11 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
                 )
             )
 
+    right_margin = 150 if any(a.get("showarrow") for a in annotations) else 24
     fig.update_layout(
-        title=chart_title_caps("Доля продаж коммерческих служб"),
+        title=chart_title_caps(title),
         height=460,
-        margin=dict(l=24, r=24, t=72, b=80),
+        margin=dict(l=24, r=right_margin, t=72, b=80),
         showlegend=False,
         template="plotly_white",
         barmode=barmode,
@@ -2962,7 +3073,22 @@ def _render_deficit_sales_share_chart(table: dict) -> go.Figure:
     return fig
 
 
-def _render_deficit_sales_fulfillment_chart(table: dict) -> go.Figure:
+def _render_deficit_payment_share_chart(table: dict) -> go.Figure:
+    """Доля фактических поступлений: компания красная, службы синие по убыванию."""
+    # order_sum_column_index уже указывает на «Оплата, р.» / итог — не сбрасывать в 0
+    # (иначе при месяцах берётся июль как сумма, август как «%», сентябрь пропадает).
+    return _render_deficit_sales_share_chart(
+        table,
+        title="Доля поступлений коммерческих служб",
+        show_company_share=False,
+    )
+
+
+def _render_deficit_sales_fulfillment_chart(
+    table: dict,
+    *,
+    title: str = "Выполнение прогноза продаж",
+) -> go.Figure:
     """Столбцы % выполнения: компания красная, выше — зелёные, ниже — синие; сортировка по убыванию."""
     items: list[tuple[str, int, bool]] = []
     for row in table.get("rows") or []:
@@ -2974,7 +3100,7 @@ def _render_deficit_sales_fulfillment_chart(table: dict) -> go.Figure:
     items.sort(key=lambda item: (-item[1], 0 if item[2] else 1, item[0]))
     if not items:
         fig = go.Figure()
-        fig.update_layout(title=chart_title_caps("Выполнение прогноза продаж"), height=360)
+        fig.update_layout(title=chart_title_caps(title), height=360)
         return fig
 
     company_pct = next((pct for _, pct, is_co in items if is_co), None)
@@ -3008,7 +3134,7 @@ def _render_deficit_sales_fulfillment_chart(table: dict) -> go.Figure:
         )
     )
     fig.update_layout(
-        title=chart_title_caps("Выполнение прогноза продаж"),
+        title=chart_title_caps(title),
         height=420,
         margin=dict(l=24, r=24, t=64, b=72),
         showlegend=False,
@@ -3019,6 +3145,25 @@ def _render_deficit_sales_fulfillment_chart(table: dict) -> go.Figure:
     fig.update_xaxes(type="category", tickangle=0, automargin=True)
     fig.update_yaxes(visible=False, showgrid=False, range=[0, y_top])
     return fig
+
+
+def _render_deficit_payment_fulfillment_chart(fulfillment_table: dict) -> go.Figure:
+    """% оплаты по службам: как на «Продажах», СИО и ОАПЛиС раздельно."""
+    rows = list(fulfillment_table.get("rows") or [])
+    totals = list(fulfillment_table.get("totals") or [])
+    if totals and totals[0] is not None:
+        rows = [
+            *rows,
+            {
+                "label": str(fulfillment_table.get("totals_label") or "Совтест АТЕ"),
+                "values": [int(totals[0])],
+                "emphasis": True,
+            },
+        ]
+    return _render_deficit_sales_fulfillment_chart(
+        {"rows": rows},
+        title="Выполнение плана поступлений",
+    )
 
 
 _PLAN_FACT_PERIOD_COLORS = (
@@ -3254,6 +3399,26 @@ def _render_deficit_sales_plan_fact_chart(table: dict) -> go.Figure:
     return fig
 
 
+def _render_deficit_payment_by_department_chart(table: dict) -> go.Figure:
+    """Горизонтальный план/факт поступлений (с разбивкой факта по периодам)."""
+    from services.deficit_sales_table import _period_money_columns
+
+    fig = _render_deficit_sales_plan_fact_chart(table)
+    fig.update_layout(
+        title=chart_title_caps("План-фактный анализ поступлений денежных средств, руб.")
+    )
+    for trace in fig.data:
+        name = str(getattr(trace, "name", "") or "")
+        if name == "Прогноз продаж, р.":
+            trace.name = "План поступлений, р."
+        elif name == "Суммы заказов, р.":
+            trace.name = "Фактические поступления р."
+            # как на эталоне оплаты — оранжевый факт
+            if len(_period_money_columns(table)) <= 1:
+                trace.marker.color = "#ED7D31"
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Рендер фигур
 # ---------------------------------------------------------------------------
@@ -3337,7 +3502,7 @@ def _render_figure(tile: Tile, data: dict) -> go.Figure:
 
 def _tile_stats(tile: Tile, data: dict) -> dict:
     """Числа для авто-комментариев LLM (ничего не считает сама)."""
-    groups = data["groups"]
+    groups = data.get("groups") or {}
     items = sorted(groups.items(), key=lambda x: -x[1])
     return {
         "total": sum(groups.values()),
@@ -3377,6 +3542,42 @@ def _with_department_sales_forecasts(tab: Tab, tile: Tile) -> Tile:
     )
 
 
+def _with_payment_period(tab: Tab, tile: Tile) -> Tile:
+    """Тайлы «Оплата» берут период с соседнего тайла (как продажи с by_department)."""
+    if tile.source.kind not in (
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
+    ):
+        return tile
+    donor = next(
+        (
+            t
+            for t in tab.tiles
+            if t.source.kind == "deficit_payment_by_department" and t.source.period
+        ),
+        None,
+    )
+    if not donor and tab.tiles:
+        donor = next(
+            (t for t in tab.tiles if t.source.kind in {
+                "deficit_payment_receipt",
+                "deficit_payment_by_department",
+                "deficit_payment_fulfillment_board",
+                "deficit_payment_share",
+            } and t.source.period),
+            None,
+        )
+    if not donor or not donor.source.period:
+        return tile
+    if tile.source.period == donor.source.period:
+        return tile
+    return tile.model_copy(
+        update={"source": tile.source.model_copy(update={"period": donor.source.period})}
+    )
+
+
 def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
     """Возвращает {"tabs": [{title, tiles: [{title, chart_type, plotly_json, stats} | {title, error}]}]}."""
     catalog = department_catalog(df)
@@ -3385,6 +3586,7 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
         tiles = []
         for tile in tab.tiles:
             tile = _with_department_sales_forecasts(tab, tile)
+            tile = _with_payment_period(tab, tile)
 
             def emit(payload: dict, tile=tile) -> None:
                 if tile.source.kind in _DEPT_FILTER_KINDS:
@@ -3499,6 +3701,88 @@ def render_spec(df: pd.DataFrame, spec: DashboardSpec) -> dict:
                     ).to_json()
                 except Exception as exc:
                     logger.warning("График выполнения прогноза упал: %s", exc)
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_payment_receipt" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                if data.get("bucket_period"):
+                    payload["bucket_period"] = data["bucket_period"]
+                try:
+                    payload["plotly_json"] = _render_deficit_payment_receipt_chart(
+                        data["table"],
+                        plan=data.get("plan"),
+                        fact=data.get("fact"),
+                        fulfill_pct=data.get("fulfill_pct"),
+                        period_bars=data.get("period_bars"),
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning("График план/факт оплаты упал: %s", exc)
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_payment_by_department" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                if data.get("bucket_period"):
+                    payload["bucket_period"] = data["bucket_period"]
+                try:
+                    payload["plotly_json"] = _render_deficit_payment_by_department_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning(
+                        "График план/факт поступлений по службам упал: %s", exc
+                    )
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_payment_fulfillment_board" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                if data.get("bucket_period"):
+                    payload["bucket_period"] = data["bucket_period"]
+                try:
+                    payload["plotly_json"] = _render_deficit_payment_fulfillment_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning(
+                        "График выполнения плана поступлений упал: %s", exc
+                    )
+                emit(payload)
+                continue
+
+            if tile.source.kind == "deficit_payment_share" and data.get("table"):
+                payload = {
+                    "title": tile.title,
+                    "chart_type": "table",
+                    "table": data["table"],
+                    "stats": _tile_stats(tile, data),
+                }
+                if data.get("bucket_period"):
+                    payload["bucket_period"] = data["bucket_period"]
+                try:
+                    payload["plotly_json"] = _render_deficit_payment_share_chart(
+                        data["table"]
+                    ).to_json()
+                except Exception as exc:
+                    logger.warning(
+                        "График доли поступлений по службам упал: %s", exc
+                    )
                 emit(payload)
                 continue
 

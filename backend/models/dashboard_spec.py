@@ -60,6 +60,10 @@ class TileSource(BaseModel):
         "deficit_sales_fulfillment_board",
         "deficit_sales_share",
         "deficit_sales_summary",
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
     ]
     group_semantic: str | None = None
     group_column: str | None = None

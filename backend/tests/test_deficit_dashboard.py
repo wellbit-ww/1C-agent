@@ -118,7 +118,7 @@ def test_sook_xls_order_sum_is_summa_zakaza_not_next_payment():
 class TestDeficitDashboard:
     def test_spec_sales_only_no_payment_charts(self):
         spec = build_deficit_dashboard_spec(_ks_df())
-        assert [tab.title for tab in spec.tabs] == ["Платежи"]
+        assert [tab.title for tab in spec.tabs] == ["Платежи", "Структура"]
         assert [t.source.kind for t in spec.tabs[0].tiles] == [
             "deficit_sales_by_department",
             "deficit_sales_summary",
@@ -126,13 +126,19 @@ class TestDeficitDashboard:
             "deficit_sales_fulfillment_board",
             "deficit_sales_share",
         ]
-        assert not any(tab.title == "Структура" for tab in spec.tabs)
+        assert [t.source.kind for t in spec.tabs[1].tiles] == [
+            "deficit_payment_receipt",
+            "deficit_payment_by_department",
+            "deficit_payment_fulfillment_board",
+            "deficit_payment_share",
+        ]
 
         rendered = render_spec(_ks_df(), spec)
         sales_tile = rendered["tabs"][0]["tiles"][0]
         assert sales_tile["chart_type"] == "table"
         assert sales_tile["table"]["totals_label"] == "Всего"
-        assert not any(tab["title"] == "Структура" for tab in rendered["tabs"])
+        structure = next(tab for tab in rendered["tabs"] if tab["title"] == "Структура")
+        assert len(structure["tiles"]) == 4
 
     def test_real_deficit_file(self, deficit_df):
         _, profile = get_profile_for_df(deficit_df, filename="Дефицит по КС.xlsx")
@@ -143,8 +149,14 @@ class TestDeficitDashboard:
         assert kpis["Неоплаченный остаток"] == pytest.approx(374_617_149.86, rel=1e-6)
         spec = profile.get_dashboard_spec(deficit_df)
         rendered = render_spec(deficit_df, spec)
-        assert [tab["title"] for tab in rendered["tabs"]] == ["Платежи"]
+        assert [tab["title"] for tab in rendered["tabs"]] == ["Платежи", "Структура"]
         assert rendered["tabs"][0]["tiles"][0]["chart_type"] == "table"
+        assert [t.source.kind for t in spec.tabs[1].tiles] == [
+            "deficit_payment_receipt",
+            "deficit_payment_by_department",
+            "deficit_payment_fulfillment_board",
+            "deficit_payment_share",
+        ]
 
 
 def test_desktop_ks_file_if_present():
@@ -162,4 +174,5 @@ def test_desktop_ks_file_if_present():
     rendered = render_spec(df, spec)
     pay_tab = next(tab for tab in rendered["tabs"] if tab["title"] == "Платежи")
     assert pay_tab["tiles"][0]["chart_type"] == "table"
-    assert not any(tab["title"] == "Структура" for tab in rendered["tabs"])
+    structure = next(tab for tab in rendered["tabs"] if tab["title"] == "Структура")
+    assert structure["tiles"]

@@ -30,25 +30,35 @@ def get_current_spec(file_id: str, df: pd.DataFrame) -> DashboardSpec | None:
 
 
 def _get_current_spec_unlocked(file_id: str, df: pd.DataFrame) -> DashboardSpec | None:
+    from services.report_detector import detect_report_type
+    from services.report_service import get_profile_for_df
+    from services.storage_service import get_original_name
+    from services.workspace_service import normalize_deficit_dashboard_spec
+
+    filename = get_original_name(file_id) or ""
+    is_deficit = detect_report_type(df, filename=filename) == "deficit_report"
+
     saved = db_service.get_dashboard_spec(file_id)
     if saved:
         try:
-            return DashboardSpec.model_validate_json(saved)
+            spec = DashboardSpec.model_validate_json(saved)
+            if is_deficit:
+                spec = normalize_deficit_dashboard_spec(spec)
+            return spec
         except ValidationError:
             logger.warning("Сохранённая спека %s невалидна — беру профиль", file_id)
             db_service.delete_dashboard_spec(file_id)
 
-    from services.report_service import get_profile_for_df
-    from services.storage_service import get_original_name
-
-    _, profile = get_profile_for_df(
-        df, filename=get_original_name(file_id)
-    )
+    _, profile = get_profile_for_df(df, filename=filename)
     builder = getattr(profile, "get_dashboard_spec", None)
     if builder is None:
         return None
     spec = builder(df)
-    return spec if isinstance(spec, DashboardSpec) else None
+    if not isinstance(spec, DashboardSpec):
+        return None
+    if is_deficit:
+        spec = normalize_deficit_dashboard_spec(spec)
+    return spec
 
 
 def save_spec(file_id: str, spec: DashboardSpec) -> None:
@@ -209,6 +219,10 @@ _VALID_KINDS = {
     "deficit_sales_fulfillment_board",
     "deficit_sales_share",
     "deficit_sales_summary",
+    "deficit_payment_receipt",
+    "deficit_payment_by_department",
+    "deficit_payment_fulfillment_board",
+    "deficit_payment_share",
 }
 _VALID_PERIODS = {"month", "quarter", "year", "half"}
 _VALID_UNITS = {"auto", "rub", "k", "mln", "mlrd"}
@@ -329,6 +343,10 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deficit_sales_fulfillment_board",
         "deficit_sales_share",
         "deficit_sales_summary",
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
     ):
         kind = "pivot"
 
@@ -372,6 +390,10 @@ def _coerce_tile(tile: dict, df: pd.DataFrame) -> dict | None:
         "deficit_sales_fulfillment_board",
         "deficit_sales_share",
         "deficit_sales_summary",
+        "deficit_payment_receipt",
+        "deficit_payment_by_department",
+        "deficit_payment_fulfillment_board",
+        "deficit_payment_share",
     ):
         src["kind"] = kind
         chart = "table"

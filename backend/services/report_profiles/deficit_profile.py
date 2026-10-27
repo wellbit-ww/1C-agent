@@ -247,6 +247,68 @@ def _deficit_sales_fulfillment_board_tile() -> Tile:
     )
 
 
+def _deficit_payment_receipt_tile() -> Tile:
+    return Tile(
+        title="Поступление оплаты",
+        chart_type="table",
+        source=TileSource(kind="deficit_payment_receipt", period="quarter"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def _deficit_payment_by_department_tile() -> Tile:
+    return Tile(
+        title="Поступления по службам",
+        chart_type="table",
+        source=TileSource(kind="deficit_payment_by_department", period="quarter"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def _deficit_payment_fulfillment_board_tile() -> Tile:
+    return Tile(
+        title="Выполнение плана поступлений",
+        chart_type="table",
+        source=TileSource(kind="deficit_payment_fulfillment_board", period="quarter"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def _deficit_payment_share_tile() -> Tile:
+    return Tile(
+        title="Доля поступлений по службам",
+        chart_type="table",
+        source=TileSource(kind="deficit_payment_share", period="quarter"),
+        agg="sum",
+        top_n=50,
+        sort="none",
+    )
+
+
+def deficit_payment_tab_tiles(period: str = "quarter") -> list[Tile]:
+    """Тайлы вкладки «Оплата» — структура как у «Продаж», с тем же периодом."""
+    if period not in {"half", "quarter", "month"}:
+        period = "quarter"
+    tiles = [
+        _deficit_payment_receipt_tile(),
+        _deficit_payment_by_department_tile(),
+        _deficit_payment_fulfillment_board_tile(),
+        _deficit_payment_share_tile(),
+    ]
+    return [
+        t.model_copy(
+            update={"source": t.source.model_copy(update={"period": period})}
+        )
+        for t in tiles
+    ]
+
+
 def _deficit_sales_share_tile() -> Tile:
     return Tile(
         title="Доля подразделений в продажах",
@@ -277,7 +339,7 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
         return build_generic_spec(df)
 
     tabs: list[Tab] = [
-        # «Платежи» в UI — «Продажи». Вкладка «Оплата» (Структура) без автографиков.
+        # «Платежи» в UI — «Продажи»; «Структура» — пустой дашборд «Оплата» справа.
         Tab(
             title="Платежи",
             tiles=[
@@ -287,7 +349,8 @@ def build_deficit_dashboard_spec(df: pd.DataFrame) -> DashboardSpec | None:
                 _deficit_sales_fulfillment_board_tile(),
                 _deficit_sales_share_tile(),
             ],
-        )
+        ),
+        Tab(title="Структура", tiles=deficit_payment_tab_tiles("quarter")),
     ]
     return DashboardSpec(tabs=tabs)
 

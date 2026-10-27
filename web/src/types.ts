@@ -12,6 +12,8 @@ export type ChatMessage = {
 };
 
 export type PivotTable = {
+  layout?: "payment_receipt";
+  column_groups?: { label: string; span: number }[];
   index_label?: string;
   columns: string[];
   year_spans?: { label: string; count: number }[];
@@ -93,6 +95,12 @@ export type Tile = {
   plotly_json?: string;
   chart_type?: string;
   table?: PivotTable;
+  department_table?: PivotTable;
+  department_plotly_json?: string;
+  fulfillment_table?: PivotTable;
+  fulfillment_plotly_json?: string;
+  share_table?: PivotTable;
+  share_plotly_json?: string;
   sections?: SectionBlock[];
   bucket_period?: string;
   period_charts?: string[];
