@@ -9,6 +9,47 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   charts?: ChartPayload[];
+  saved_report?: { id: string; title: string };
+};
+
+export type ReportBlockLayout = { x: number; y: number; w: number; h: number };
+
+export type ReportBlockSource = {
+  kind: string;
+  period?: string;
+  group_semantic?: string | null;
+  group_column?: string | null;
+  value_semantic?: string | null;
+  value_column?: string | null;
+  columns_pattern?: string | null;
+  column_names?: string[] | null;
+  departments?: string[] | null;
+  stages?: string[] | null;
+  managers?: string[] | null;
+  statuses?: string[] | null;
+  min_potential?: number | null;
+  list_sort_column?: string | null;
+  variant?: "full" | "counts" | null;
+  sales_forecasts?: Record<string, number> | null;
+};
+
+export type ReportBlock = {
+  id: string;
+  kind: "chart" | "table" | "text";
+  title: string;
+  layout: ReportBlockLayout;
+  file_id?: string;
+  source?: ReportBlockSource;
+  period?: string;
+  plotly_json?: string;
+  table?: PivotTable;
+  text?: string;
+};
+
+export type ReportDoc = {
+  id?: string;
+  title: string;
+  blocks: ReportBlock[];
 };
 
 export type PivotTable = {
@@ -225,9 +266,13 @@ export type Report = {
   };
 };
 
+/** @deprecated use ReportBlock — kept for chat «В отчёт» bridge */
 export type ReportChart = {
   id: string;
   title: string;
   plotly_json?: string;
   table?: PivotTable;
+  file_id?: string;
+  source?: ReportBlockSource;
+  period?: string;
 };

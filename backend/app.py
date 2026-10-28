@@ -50,6 +50,9 @@ from models.schemas import (
     TableRequest,
     ReportRequest,
     ReportPdfRequest,
+    ReportBlockRenderRequest,
+    ReportExcelRequest,
+    SavedReportSaveRequest,
     WorkspaceAttachRequest,
     WorkspaceDashboardRequest,
     WorkspaceId,
@@ -692,6 +695,133 @@ def full_report(
     )
 
     return report
+
+
+@app.post("/report/blocks/render")
+def report_block_render(request: ReportBlockRenderRequest):
+    file_path = _get_file_path_or_404(request.file_id)
+    df = _handle_service_errors(
+        agent._load_dataframe,
+        request.file_id,
+        file_path,
+    )
+    from services.saved_report_service import render_block
+
+    return _handle_service_errors(
+        render_block,
+        df,
+        title=request.title,
+        source=request.source,
+        period=request.period,
+    )
+
+
+@app.get("/reports")
+def reports_list(workspace_id: str | None = None, file_id: str | None = None):
+    from services.saved_report_service import list_reports
+
+    return {"reports": list_reports(workspace_id=workspace_id, file_id=file_id)}
+
+
+@app.get("/reports/{report_id}")
+def reports_get(report_id: str):
+    from services.saved_report_service import get_report
+
+    row = get_report(report_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    return row
+
+
+@app.post("/reports")
+def reports_save(request: SavedReportSaveRequest):
+    from services.saved_report_service import save_report
+
+    if not request.workspace_id and not request.file_id:
+        raise HTTPException(status_code=400, detail="Нужен workspace_id или file_id")
+    try:
+        row = save_report(
+            title=request.title,
+            payload=request.payload,
+            report_id=request.report_id,
+            workspace_id=request.workspace_id,
+            file_id=request.file_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if request.notify_chat:
+        chat_file = request.file_id or request.workspace_id or ""
+        marker = [
+            {
+                "kind": "saved_report",
+                "report_id": row["id"],
+                "title": row["title"],
+            }
+        ]
+        try:
+            db_service.add_chat_message(
+                chat_file,
+                "assistant",
+                f"Отчёт «{row['title']}» сохранён в базу знаний.",
+                charts=marker,
+                workspace_id=request.workspace_id,
+            )
+        except Exception as exc:
+            logger.warning("Не удалось записать отчёт в чат: %s", exc)
+    return row
+
+
+@app.put("/reports/{report_id}")
+def reports_update(report_id: str, request: SavedReportSaveRequest):
+    from services.saved_report_service import get_report, save_report
+
+    if not get_report(report_id):
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    try:
+        return save_report(
+            title=request.title,
+            payload=request.payload,
+            report_id=report_id,
+            workspace_id=request.workspace_id,
+            file_id=request.file_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/reports/{report_id}")
+def reports_delete(report_id: str):
+    from services.saved_report_service import delete_report
+
+    if not delete_report(report_id):
+        raise HTTPException(status_code=404, detail="Отчёт не найден")
+    return {"ok": True}
+
+
+@app.post("/report/excel")
+def report_excel(request: ReportExcelRequest):
+    from services.saved_report_service import export_report_excel
+    from urllib.parse import quote
+
+    payload = dict(request.payload or {})
+    payload.setdefault("title", request.title)
+    try:
+        data = export_report_excel(payload, filename=request.filename)
+    except Exception as exc:
+        logger.exception("Excel отчёта")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    stem = (request.filename or request.title or "report").rsplit(".", 1)[0]
+    utf_name = f"{stem}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=\"report.xlsx\"; filename*=UTF-8''{quote(utf_name)}"
+            )
+        },
+    )
 
 
 @app.post("/report/pdf")

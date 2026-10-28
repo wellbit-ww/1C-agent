@@ -3530,15 +3530,10 @@ def _with_department_sales_forecasts(tab: Tab, tile: Tile) -> Tile:
     )
     if not donor:
         return tile
-    updates: dict = {}
-    if not tile.source.sales_forecasts and donor.source.sales_forecasts:
-        updates["sales_forecasts"] = dict(donor.source.sales_forecasts)
-    if donor.source.period and tile.source.period != donor.source.period:
-        updates["period"] = donor.source.period
-    if not updates:
+    if not donor.source.period or tile.source.period == donor.source.period:
         return tile
     return tile.model_copy(
-        update={"source": tile.source.model_copy(update=updates)}
+        update={"source": tile.source.model_copy(update={"period": donor.source.period})}
     )
 
 

@@ -67,17 +67,19 @@ def test_aggregate_orders_splits_sio_and_aplis():
     assert table["year_spans"][1]["label"] == "Заказы, зарегистрированные в 1С"
 
 
-def test_summary_takes_forecast_from_department_table():
+def test_summary_takes_forecast_from_file():
     from services.deficit_sales_table import build_deficit_sales_summary
 
     df = _sample_df()
+    df.attrs["deficit_sales_forecast"] = {"СТО": 500.0, "СИО": 100.0}
+    df.attrs["deficit_sales_forecast_company"] = {
+        "label": "Совтест АТЕ",
+        "forecast": 600.0,
+    }
     tile = Tile(
         title="Выполнение прогноза",
         chart_type="table",
-        source={
-            "kind": "deficit_sales_summary",
-            "sales_forecasts": {"СТО": 500.0, "СИО": 100.0},
-        },
+        source={"kind": "deficit_sales_summary"},
         agg="sum",
         top_n=50,
         sort="none",
@@ -287,7 +289,7 @@ def test_share_chart_splits_company_total_by_periods():
     assert "СТО" in list(fig.data[-1].x)
 
 
-def test_manual_sales_forecasts_override_vitrine():
+def test_file_forecast_ignores_manual_sales_forecasts():
     df = _sample_df()
     df.attrs["deficit_sales_forecast"] = {"СТО": 999.0}
     tile = Tile(
@@ -305,10 +307,9 @@ def test_manual_sales_forecasts_override_vitrine():
         row["label"]: row["values"]
         for row in build_deficit_sales_table(df, tile)["table"]["rows"]
     }
-    assert by_label["СТО"][0] == 500.0
-    assert by_label["СТО"][3] == 60
-    assert by_label["СИО"][0] == 100.0
-    assert by_label["СИО"][3] == 100
+    assert by_label["СТО"][0] == 999.0
+    assert by_label["СТО"][3] == 30
+    assert "СИО" not in by_label or by_label["СИО"][0] in (0, None, 0.0)
 
 
 def test_parse_forecast_from_second_sheet(tmp_path):

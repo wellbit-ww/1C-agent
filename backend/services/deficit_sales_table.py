@@ -475,10 +475,10 @@ def _orders_matrix_for_display(
 def _forecast_for_label(
     label: str,
     vitrine: dict[str, float],
-    manual: dict[str, float],
+    manual: dict[str, float] | None = None,
 ) -> float | None:
-    if label in manual:
-        return manual[label]
+    # Прогноз только из файла дефицита (2-й лист); ручные правки в UI отключены.
+    _ = manual
     return vitrine.get(label)
 
 
@@ -493,8 +493,7 @@ def build_deficit_sales_table(df: pd.DataFrame, tile: Tile) -> dict:
         return {"error": "Нет данных по подразделениям и суммам заказов"}
 
     vitrine: dict[str, float] = dict(df.attrs.get(_ATTR_FORECAST) or {})
-    manual: dict[str, float] = dict(tile.source.sales_forecasts or {})
-    row_order = _display_row_order(vitrine, manual)
+    row_order = _display_row_order(vitrine, {})
     display = _orders_matrix_for_display(packed, row_order)
     periods = list(packed.get("periods") or [])
 
@@ -565,7 +564,7 @@ def build_deficit_sales_table(df: pd.DataFrame, tile: Tile) -> dict:
 
     for label in row_order:
         info = display.get(label, {"total": {"count": 0.0, "sum": 0.0}, "periods": {}})
-        forecast = _forecast_for_label(label, vitrine, manual)
+        forecast = _forecast_for_label(label, vitrine)
         _append_row(label, info, forecast)
 
     skip_when_combined = {"СИО", "ОАПЛиС"} if _COMBINED_SIO_APLIS in row_order else set()
@@ -617,8 +616,7 @@ def build_deficit_sales_forecast_vitrine(df: pd.DataFrame, tile: Tile) -> dict:
         return {"error": "Нет данных по подразделениям и суммам заказов"}
 
     vitrine: dict[str, float] = dict(df.attrs.get(_ATTR_FORECAST) or {})
-    manual: dict[str, float] = dict(tile.source.sales_forecasts or {})
-    row_order = _display_row_order(vitrine, manual)
+    row_order = _display_row_order(vitrine, {})
     display = _orders_matrix_for_display(packed, row_order)
     periods = list(packed.get("periods") or [])
 
@@ -651,7 +649,7 @@ def build_deficit_sales_forecast_vitrine(df: pd.DataFrame, tile: Tile) -> dict:
     for label in row_order:
         info = display.get(label, {"total": {"count": 0.0, "sum": 0.0}, "periods": {}})
         order_sum = float((info.get("total") or {}).get("sum", 0) or 0)
-        forecast = _forecast_for_label(label, vitrine, manual)
+        forecast = _forecast_for_label(label, vitrine)
         values: list = [forecast if forecast is not None else 0]
         for i, meta in enumerate(periods):
             slot_sum = float(
@@ -760,8 +758,7 @@ def build_deficit_sales_share_table(df: pd.DataFrame, tile: Tile) -> dict:
         return {"error": "Нет данных по подразделениям и суммам заказов"}
 
     vitrine: dict[str, float] = dict(df.attrs.get(_ATTR_FORECAST) or {})
-    manual: dict[str, float] = dict(tile.source.sales_forecasts or {})
-    row_order = _display_row_order(vitrine, manual)
+    row_order = _display_row_order(vitrine, {})
     display = _orders_matrix_for_display(packed, row_order)
     periods = list(packed.get("periods") or [])
 

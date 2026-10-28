@@ -53,6 +53,7 @@ type Props = {
   onSend: (q: string) => void;
   onPin?: (spec: Record<string, unknown>) => void;
   onAddToReport?: (chart: ReportChart) => void;
+  onOpenSavedReport?: (id: string) => void;
   reportChartIds?: string[];
   canPin: boolean;
   className?: string;
@@ -69,6 +70,7 @@ export function ChatPanel({
   onPin,
   canPin,
   onAddToReport,
+  onOpenSavedReport,
   reportChartIds = [],
   className,
   onClose,
@@ -152,6 +154,15 @@ export function ChatPanel({
             >
               {msg.role === "assistant" ? <ChatMarkdown text={msg.content} /> : msg.content}
             </div>
+            {msg.saved_report?.id && onOpenSavedReport ? (
+              <button
+                type="button"
+                className="mt-2 text-[11px] text-accent hover:underline"
+                onClick={() => onOpenSavedReport(msg.saved_report!.id)}
+              >
+                Открыть отчёт «{msg.saved_report.title}»
+              </button>
+            ) : null}
             {msg.charts?.map((chart, ci) =>
               chart.plotly_json ? (
                 <div key={ci} className="mt-2 overflow-hidden rounded-xl border border-line bg-card p-2">

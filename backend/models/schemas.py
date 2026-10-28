@@ -63,6 +63,28 @@ class ReportRequest(BaseModel):
     filename: str | None = Field(default=None, max_length=MAX_FILENAME_CHARS)
 
 
+class ReportBlockRenderRequest(BaseModel):
+    file_id: FileId
+    title: str = Field(default="Блок", max_length=200)
+    source: dict
+    period: str | None = Field(default=None, max_length=20)
+
+
+class SavedReportSaveRequest(BaseModel):
+    title: str = Field(default="Отчёт", max_length=200)
+    payload: dict
+    report_id: str | None = Field(default=None, max_length=MAX_FILE_ID_CHARS)
+    workspace_id: WorkspaceId | None = None
+    file_id: FileId | None = None
+    notify_chat: bool = True
+
+
+class ReportExcelRequest(BaseModel):
+    title: str = Field(default="Отчёт", max_length=200)
+    payload: dict
+    filename: str | None = Field(default=None, max_length=MAX_FILENAME_CHARS)
+
+
 class ReportChartIn(BaseModel):
     title: str = Field(default="", max_length=200)
     plotly_json: str | None = Field(default=None, max_length=150_000)

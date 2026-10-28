@@ -9,7 +9,14 @@ import { BriefSummary } from "./BriefSummary";
 import { PlotChart } from "./PlotChart";
 import { dealsListToGrid, StagesDealListView, type DealsListFiltersPatch } from "./StagesDealList";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
-import { clearSession, readSession, writeSession, type SavedSession } from "./session";
+import { ReportCanvas, nextBlockLayout } from "./ReportCanvas";
+import {
+  clearSession,
+  emptyReportDoc,
+  readSession,
+  writeSession,
+  type SavedSession,
+} from "./session";
 import {
   flattenWorkspaceDashboard,
   specForSourceFile,
@@ -26,12 +33,15 @@ import type {
   MoneyMetric,
   MoneyRow,
   PivotTable,
-  Report,
-  ReportChart,
+  ReportBlock,
+  ReportBlockSource,
+  ReportDoc,
   SectionBlock,
   SectionTable,
   Tile,
 } from "./types";
+
+const MAX_REPORT_BLOCKS = 24;
 
 const TYPE_NAMES: Record<string, string> = {
   sales_pipeline: "Этапы продаж",
@@ -818,55 +828,6 @@ function PivotTableView({
   );
 }
 
-function parseForecastInput(raw: string): number | null {
-  const text = raw.replace(/\s/g, "").replace(",", ".");
-  if (!text) return null;
-  const n = Number(text);
-  return Number.isFinite(n) && n >= 0 ? n : null;
-}
-
-function deficitFulfillmentPercent(
-  orderSum: number,
-  forecast: number | null | undefined,
-): number | null {
-  if (forecast == null || forecast <= 0) return null;
-  if (orderSum <= 0) return 0;
-  return Math.round((100 * orderSum) / forecast);
-}
-
-function applySalesForecasts(table: PivotTable, forecasts: Record<string, number>): PivotTable {
-  const forecastCol = table.forecast_column_index ?? 0;
-  const orderSumCol = table.order_sum_column_index ?? 2;
-  const fulfillCol = table.fulfill_column_index ?? Math.max(orderSumCol + 1, 3);
-  let totalForecast = 0;
-  let hasForecast = false;
-  let totalSum = 0;
-  const rows = table.rows.map((row) => {
-    const orderSum = Number(row.values[orderSumCol] ?? 0);
-    const serverForecast = Number(row.values[forecastCol] ?? 0);
-    const forecast = row.label in forecasts ? forecasts[row.label] : serverForecast;
-    if (forecast > 0) {
-      hasForecast = true;
-      totalForecast += forecast;
-    }
-    totalSum += orderSum;
-    const pct = deficitFulfillmentPercent(orderSum, forecast);
-    const values = [...row.values];
-    values[forecastCol] = forecast;
-    values[fulfillCol] = pct;
-    return { ...row, values };
-  });
-  const totals = table.totals ? [...table.totals] : [];
-  if (totals.length > fulfillCol) {
-    totals[forecastCol] = hasForecast ? totalForecast : 0;
-    totals[fulfillCol] = deficitFulfillmentPercent(
-      totalSum,
-      hasForecast ? totalForecast : null,
-    );
-  }
-  return { ...table, rows, totals };
-}
-
 function DeficitPaymentReceiptView({
   table,
   plotlyJson,
@@ -953,159 +914,6 @@ function DeficitSalesSummaryReadonly({
         </table>
       </div>
       {plotlyJson ? <PlotChart json={plotlyJson} className="h-[26rem] w-full" /> : null}
-    </div>
-  );
-}
-
-function DeficitSalesBoardView({
-  table,
-  salesForecasts,
-  busy,
-  onSaveForecasts,
-}: {
-  table: PivotTable;
-  salesForecasts: Record<string, number>;
-  busy: boolean;
-  onSaveForecasts: (next: Record<string, number>) => void;
-}) {
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const spans = table.year_spans ?? [];
-  const hasYears = spans.some((span) => span.count > 1) || spans.length > 1;
-  const breaks = quarterStarts(spans);
-  const quarterEdge = "border-l border-zinc-400";
-  const forecastCol = table.forecast_column_index ?? 0;
-
-  const liveForecasts = { ...salesForecasts };
-  for (const row of table.rows) {
-    const draft = drafts[row.label];
-    if (draft === undefined) continue;
-    const parsed = parseForecastInput(draft);
-    if (parsed != null) liveForecasts[row.label] = parsed;
-    else delete liveForecasts[row.label];
-  }
-  const view = applySalesForecasts(table, liveForecasts);
-
-  function forecastInputValue(label: string, serverForecast: number) {
-    if (label in drafts) return drafts[label];
-    const saved = salesForecasts[label];
-    const value = saved ?? serverForecast;
-    if (!value) return "";
-    return String(value);
-  }
-
-  function commitForecast(label: string, raw: string) {
-    const parsed = parseForecastInput(raw);
-    const next = { ...salesForecasts };
-    if (parsed == null) delete next[label];
-    else next[label] = parsed;
-    onSaveForecasts(next);
-    setDrafts((current) => {
-      const { [label]: _, ...rest } = current;
-      return rest;
-    });
-  }
-
-  return (
-    <div className="max-h-[28rem] overflow-auto rounded-lg border border-line">
-      <table className="min-w-full border-collapse text-right text-xs">
-        <thead className="sticky top-0 z-10 bg-panel">
-          {hasYears && (
-            <tr className="text-zinc-400">
-              <th
-                rowSpan={2}
-                className="sticky left-0 z-20 border-b border-r border-line bg-panel px-3 py-1.5 text-left font-medium text-zinc-300"
-              >
-                {table.index_label || "Подразделение"}
-              </th>
-              {spans.map((span, spanI) => (
-                <th
-                  key={span.label}
-                  colSpan={span.count}
-                  className={`border-b border-line px-2 py-1.5 text-center font-semibold text-zinc-200 ${
-                    spanI > 0 ? quarterEdge : ""
-                  }`}
-                >
-                  {span.label}
-                </th>
-              ))}
-            </tr>
-          )}
-          <tr className="text-zinc-500">
-            {!hasYears && (
-              <th className="sticky left-0 z-20 border-b border-r border-line bg-panel px-3 py-1.5 text-left font-medium text-zinc-300">
-                {table.index_label || "Подразделение"}
-              </th>
-            )}
-            {table.columns.map((col, i) => (
-              <th
-                key={`${i}-${col}`}
-                className={`border-b border-line px-2 py-1.5 font-medium whitespace-nowrap text-zinc-200 ${
-                  breaks.has(i) ? quarterEdge : ""
-                }`}
-              >
-                {hasYears && isYearTotalColumn(col) ? col : hasYears ? col.replace(/\s+\d{4}$/, "") : col}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {view.rows.map((row) => (
-            <tr key={row.label} className="border-t border-line">
-              <th className="sticky left-0 bg-card px-3 py-1.5 text-left font-medium text-zinc-200">
-                {row.label}
-              </th>
-              {row.values.map((value, i) => (
-                <td
-                  key={`${row.label}-${i}`}
-                  className={`px-2 py-1.5 tabular-nums ${
-                    table.column_kinds?.[i] === "percent"
-                      ? "font-medium text-zinc-100"
-                      : "text-zinc-300"
-                  } ${breaks.has(i) ? quarterEdge : ""}`}
-                >
-                  {i === forecastCol ? (
-                    <input
-                      type="text"
-                      inputMode="decimal"
-                      disabled={busy}
-                      className="w-full min-w-[6rem] rounded border border-line bg-bg px-1.5 py-0.5 text-right text-zinc-100 outline-none focus:border-accent/60 disabled:opacity-60"
-                      placeholder="0"
-                      aria-label={`Прогноз продаж: ${row.label}`}
-                      value={forecastInputValue(row.label, Number(table.rows.find((r) => r.label === row.label)?.values[forecastCol] ?? 0))}
-                      onChange={(e) =>
-                        setDrafts((current) => ({ ...current, [row.label]: e.target.value }))
-                      }
-                      onBlur={(e) => commitForecast(row.label, e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                      }}
-                    />
-                  ) : (
-                    formatPivotNumber(value as number, table.column_kinds?.[i])
-                  )}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-        {view.totals && view.totals.length > 0 && (
-          <tfoot>
-            <tr className="border-t border-line bg-panel font-medium">
-              <th className="sticky left-0 bg-panel px-3 py-1.5 text-left text-zinc-100">
-                {table.totals_label || "Итого"}
-              </th>
-              {view.totals.map((value, i) => (
-                <td
-                  key={`total-${i}`}
-                  className={`px-2 py-1.5 tabular-nums text-accent ${breaks.has(i) ? quarterEdge : ""}`}
-                >
-                  {formatPivotNumber(value, table.column_kinds?.[i])}
-                </td>
-              ))}
-            </tr>
-          </tfoot>
-        )}
-      </table>
     </div>
   );
 }
@@ -1647,43 +1455,15 @@ function MoneyBoardView({
   );
 }
 
-function reportChartVerb(chart: ReportChart, removed: boolean) {
-  if (chart.table) return removed ? "убрана" : "добавлена";
-  return removed ? "убран" : "добавлен";
-}
-
-function reportChartNotice(chart: ReportChart, removed: boolean) {
-  const verb = reportChartVerb(chart, removed);
-  return removed ? `«${chart.title}» ${verb} из отчёта` : `«${chart.title}» ${verb} в отчёт`;
-}
-
-function GrowingTextarea({
-  value,
-  onChange,
-  className,
-  minHeight = 192,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  className?: string;
-  minHeight?: number;
-}) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.max(minHeight, el.scrollHeight)}px`;
-  }, [value, minHeight]);
-  return (
-    <textarea
-      ref={ref}
-      value={value}
-      rows={8}
-      onChange={(e) => onChange(e.target.value)}
-      className={`overflow-hidden ${className ?? ""}`}
-    />
-  );
+function reportBlockNotice(block: { title: string; table?: unknown }, removed: boolean) {
+  const verb = block.table
+    ? removed
+      ? "убрана"
+      : "добавлена"
+    : removed
+      ? "убран"
+      : "добавлен";
+  return removed ? `«${block.title}» ${verb} из отчёта` : `«${block.title}» ${verb} в отчёт`;
 }
 
 function isNarrowViewport() {
@@ -1740,11 +1520,10 @@ export function App() {
   const [dashboard, setDashboard] = useState<Dashboard | null>(null);
   const [ctx, setCtx] = useState<FileContext | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [report, setReport] = useState<Report | null>(null);
-  const [reportCharts, setReportCharts] = useState<ReportChart[]>([]);
-  const [narrative, setNarrative] = useState("");
-  const [insightsText, setInsightsText] = useState("");
-  const [comment, setComment] = useState("");
+  const [reportDoc, setReportDoc] = useState<ReportDoc>(() => emptyReportDoc());
+  const [reportLibrary, setReportLibrary] = useState<
+    { id: string; title: string; updated_at?: string }[]
+  >([]);
   const [comments, setComments] = useState<Record<string, string>>({});
   const [tab, setTab] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
@@ -1796,8 +1575,7 @@ export function App() {
         setView("dash");
         setTab(0);
         setComments({});
-        setReport(null);
-        setReportCharts([]);
+        setReportDoc(emptyReportDoc());
       }
       setBusy(null);
       if (primaryId) {
@@ -1819,7 +1597,7 @@ export function App() {
         setFilename(null);
         setDashboard(null);
         setMessages([]);
-        setReportCharts([]);
+        setReportDoc(emptyReportDoc());
         setError("Сессия не найдена на сервере. Загрузите файл снова.");
       } else {
         setError(message);
@@ -1850,8 +1628,7 @@ export function App() {
         setView("dash");
         setTab(0);
         setComments({});
-        setReport(null);
-        setReportCharts([]);
+        setReportDoc(emptyReportDoc());
       }
       setBusy(null);
       void api
@@ -1863,18 +1640,7 @@ export function App() {
           /* карточка по колонкам уже в dashboard */
         });
       if (restore?.view === "report") {
-        try {
-          const rep = await api.getReport(id, name);
-          if (fileIdRef.current !== id) return;
-          setReport(rep);
-          setNarrative(rep.narrative ?? "");
-          const ins = rep.insights;
-          setInsightsText(Array.isArray(ins) ? ins.join("\n") : (ins ?? ""));
-          setComment(rep.comment ?? "");
-          setView("report");
-        } catch {
-          setView("dash");
-        }
+        setView("report");
       }
     } catch (exc) {
       if (fileIdRef.current !== id) return;
@@ -1886,7 +1652,7 @@ export function App() {
         setFilename(null);
         setDashboard(null);
         setMessages([]);
-        setReportCharts([]);
+        setReportDoc(emptyReportDoc());
         setError("Сессия не найдена на сервере. Загрузите файл снова.");
       } else {
         setError(message);
@@ -1901,7 +1667,7 @@ export function App() {
     const saved = readSession();
     if (!saved) return;
     setChatOpen(saved.chatOpen && !isNarrowViewport());
-    setReportCharts(saved.reportCharts);
+    if (saved.reportDoc) setReportDoc(saved.reportDoc);
     if (saved.workspaceId) {
       void refreshWorkspace(saved.workspaceId, saved);
     } else {
@@ -1918,9 +1684,9 @@ export function App() {
       view,
       tab,
       chatOpen,
-      reportCharts,
+      reportDoc,
     });
-  }, [workspaceId, fileId, filename, view, tab, chatOpen, reportCharts]);
+  }, [workspaceId, fileId, filename, view, tab, chatOpen, reportDoc]);
 
   async function onUpload(file: File) {
     setBusy("Загружаю файл…");
@@ -2060,52 +1826,6 @@ export function App() {
       ),
     };
     setBusy("Обновляю список…");
-    setError(null);
-    try {
-      const toSave =
-        workspaceId && dashboard
-          ? specForSourceFile(dashboard, targetFileId, next)
-          : next;
-      if (workspaceId) {
-        await api.dashboardSaveSpec(targetFileId, toSave);
-        await refreshWorkspace(workspaceId, undefined, { keepPlace: true });
-      } else {
-        const patch = await api.dashboardSaveSpec(targetFileId, toSave);
-        await applyDashboardPatch(patch, next);
-      }
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function onDeficitSalesPatch(
-    tabI: number,
-    tileI: number,
-    salesForecasts: Record<string, number>,
-  ) {
-    const spec = dashboard?.spec;
-    const targetFileId = fileIdForTab(tabI);
-    if (!spec || !targetFileId) return;
-    const next: DashSpec = {
-      tabs: spec.tabs.map((t, ti) =>
-        ti !== tabI
-          ? t
-          : {
-              ...t,
-              tiles: t.tiles.map((item, ij) =>
-                ij !== tileI
-                  ? item
-                  : {
-                      ...item,
-                      source: { ...item.source, sales_forecasts: salesForecasts },
-                    },
-              ),
-            },
-      ),
-    };
-    setBusy("Сохраняю прогноз…");
     setError(null);
     try {
       const toSave =
@@ -2281,32 +2001,175 @@ export function App() {
     }
   }
 
-  function toggleReportChart(chart: ReportChart) {
-    const exists = reportCharts.some((c) => c.id === chart.id);
-    if (!exists && reportCharts.length >= 8) {
-      setNotice("В отчёт можно добавить не больше 8 графиков");
+  function toggleReportBlock(input: {
+    id: string;
+    title: string;
+    plotly_json?: string;
+    table?: PivotTable;
+    file_id?: string;
+    source?: ReportBlockSource;
+    period?: string;
+  }) {
+    const exists = reportDoc.blocks.some((b) => b.id === input.id);
+    if (exists) {
+      setReportDoc((doc) => ({
+        ...doc,
+        blocks: doc.blocks.filter((b) => b.id !== input.id),
+      }));
+      setNotice(reportBlockNotice(input, true));
       return;
     }
-    setReportCharts((cur) =>
-      exists ? cur.filter((c) => c.id !== chart.id) : [...cur, chart],
-    );
-    setNotice(reportChartNotice(chart, exists));
+    if (reportDoc.blocks.length >= MAX_REPORT_BLOCKS) {
+      setNotice(`В отчёт можно добавить не больше ${MAX_REPORT_BLOCKS} блоков`);
+      return;
+    }
+    const kind: ReportBlock["kind"] = input.table && !input.plotly_json ? "table" : "chart";
+    const block: ReportBlock = {
+      id: input.id,
+      kind,
+      title: input.title,
+      layout: nextBlockLayout(reportDoc.blocks),
+      file_id: input.file_id,
+      source: input.source,
+      period: input.period || input.source?.period || undefined,
+      plotly_json: input.plotly_json,
+      table: input.table,
+    };
+    setReportDoc((doc) => ({ ...doc, blocks: [...doc.blocks, block] }));
+    setNotice(reportBlockNotice(input, false));
   }
 
-  async function openReport() {
-    const reportFileId = dashboard?.sales_file_id ?? fileId;
-    if (!reportFileId) return;
-    const reportName =
-      dashboard?.sources?.find((s) => s.file_id === reportFileId)?.filename ?? filename;
-    setBusy("Формирую отчёт…");
+  function openReport() {
+    setView("report");
+    void refreshReportLibrary();
+  }
+
+  async function refreshReportLibrary() {
+    if (!workspaceId && !fileId) return;
+    try {
+      const res = await api.listSavedReports({
+        workspace_id: workspaceId ?? undefined,
+        file_id: workspaceId ? undefined : fileId ?? undefined,
+      });
+      setReportLibrary(res.reports ?? []);
+    } catch {
+      /* библиотека опциональна */
+    }
+  }
+
+  async function onSaveReport() {
+    if (!workspaceId && !fileId) return;
+    setBusy("Сохраняю отчёт…");
     setError(null);
     try {
-      const rep = await api.getReport(reportFileId, reportName ?? undefined);
-      setReport(rep);
-      setNarrative(rep.narrative ?? "");
-      const ins = rep.insights;
-      setInsightsText(Array.isArray(ins) ? ins.join("\n") : (ins ?? ""));
-      setComment(rep.comment ?? "");
+      const saved = await api.saveSavedReport({
+        title: reportDoc.title || "Отчёт",
+        payload: { title: reportDoc.title, blocks: reportDoc.blocks },
+        report_id: reportDoc.id,
+        workspace_id: workspaceId ?? undefined,
+        file_id: fileId ?? undefined,
+        notify_chat: true,
+      });
+      setReportDoc((doc) => ({
+        ...doc,
+        id: saved.id,
+        title: saved.title,
+        blocks: saved.payload?.blocks ?? doc.blocks,
+      }));
+      setMessages((cur) => [
+        ...cur,
+        {
+          role: "assistant",
+          content: `Отчёт «${saved.title}» сохранён в базу знаний.`,
+          saved_report: { id: saved.id, title: saved.title },
+        },
+      ]);
+      setNotice(`Отчёт «${saved.title}» сохранён`);
+      await refreshReportLibrary();
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onExcelReport() {
+    setBusy("Excel…");
+    setError(null);
+    try {
+      const blob = await api.downloadReportExcel({
+        title: reportDoc.title || "Отчёт",
+        payload: { title: reportDoc.title, blocks: reportDoc.blocks },
+        filename: filename ?? undefined,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${(reportDoc.title || filename || "report").replace(/[\\/:*?"<>|]+/g, "_")}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onReportBlockPeriod(blockId: string, period: string) {
+    const block = reportDoc.blocks.find((b) => b.id === blockId);
+    if (!block?.file_id || !block.source) {
+      setReportDoc((doc) => ({
+        ...doc,
+        blocks: doc.blocks.map((b) =>
+          b.id === blockId
+            ? { ...b, period, source: b.source ? { ...b.source, period } : b.source }
+            : b,
+        ),
+      }));
+      return;
+    }
+    setBusy("Обновляю блок…");
+    setError(null);
+    try {
+      const rendered = await api.renderReportBlock({
+        file_id: block.file_id,
+        title: block.title,
+        source: { ...block.source, period },
+        period,
+      });
+      if (rendered.error) throw new Error(rendered.error);
+      setReportDoc((doc) => ({
+        ...doc,
+        blocks: doc.blocks.map((b) =>
+          b.id === blockId
+            ? {
+                ...b,
+                period,
+                source: { ...b.source!, period },
+                table: rendered.table ?? b.table,
+                plotly_json: rendered.plotly_json ?? b.plotly_json,
+              }
+            : b,
+        ),
+      }));
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function onOpenSavedReport(id: string) {
+    setBusy("Открываю отчёт…");
+    setError(null);
+    try {
+      const row = await api.getSavedReport(id);
+      const payload = row.payload ?? { title: row.title, blocks: [] };
+      setReportDoc({
+        id: row.id,
+        title: payload.title || row.title || "Отчёт",
+        blocks: Array.isArray(payload.blocks) ? payload.blocks : [],
+      });
       setView("report");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
@@ -2315,27 +2178,15 @@ export function App() {
     }
   }
 
-  async function onPdf() {
-    if (!fileId) return;
-    setBusy("PDF…");
+  async function onDeleteSavedReport(id: string) {
     try {
-      const blob = await api.downloadPdf(fileId, {
-        filename: filename ?? undefined,
-        narrative,
-        insights: insightsText,
-        comment,
-        report_charts: reportCharts.length ? reportCharts : undefined,
-      });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = (filename ?? "report").replace(/\.[^.]+$/, "") + ".pdf";
-      a.click();
-      URL.revokeObjectURL(url);
+      await api.deleteSavedReport(id);
+      if (reportDoc.id === id) {
+        setReportDoc((doc) => ({ ...doc, id: undefined }));
+      }
+      await refreshReportLibrary();
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));
-    } finally {
-      setBusy(null);
     }
   }
 
@@ -2355,8 +2206,8 @@ export function App() {
     setDashboard(null);
     setCtx(null);
     setMessages([]);
-    setReport(null);
-    setReportCharts([]);
+    setReportDoc(emptyReportDoc());
+    setReportLibrary([]);
     setChartEditor(null);
     setView("dash");
   }
@@ -2382,7 +2233,7 @@ export function App() {
           active={view === "report"}
           label="Отчёт"
           disabled={!fileId}
-          onClick={() => void openReport()}
+          onClick={() => openReport()}
         />
         <NavBtn
           active={chatOpen}
@@ -2480,23 +2331,23 @@ export function App() {
           </div>
         )}
 
-        {view === "report" && report ? (
-          <ReportPane
-            report={report}
-            narrative={narrative}
-            insightsText={insightsText}
-            comment={comment}
-            charts={reportCharts}
-            onNarrative={setNarrative}
-            onInsights={setInsightsText}
-            onComment={setComment}
-            onRemoveChart={(id) => {
-              const item = reportCharts.find((c) => c.id === id);
-              setReportCharts((cur) => cur.filter((c) => c.id !== id));
-              if (item) setNotice(reportChartNotice(item, true));
+        {view === "report" ? (
+          <ReportCanvas
+            doc={reportDoc}
+            busy={!!busy}
+            library={reportLibrary}
+            onChange={setReportDoc}
+            onSave={() => void onSaveReport()}
+            onExcel={() => void onExcelReport()}
+            onClear={() => {
+              setReportDoc((doc) => ({ ...doc, blocks: [] }));
+              setNotice("Отчёт очищен");
             }}
             onBack={() => setView("dash")}
-            onPdf={() => void onPdf()}
+            onPeriodChange={(blockId, period) => void onReportBlockPeriod(blockId, period)}
+            onOpenSaved={(id) => void onOpenSavedReport(id)}
+            onDeleteSaved={(id) => void onDeleteSavedReport(id)}
+            onRefreshLibrary={() => void refreshReportLibrary()}
           />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -2565,7 +2416,7 @@ export function App() {
                       ) : (
                       (tabs[tab]?.tiles ?? []).map((tile, tileI) => {
                         const id = `${tabs[tab]?.title ?? "tab"}::${tile.title}`;
-                        const inReport = reportCharts.some((c) => c.id === id);
+                        const inReport = reportDoc.blocks.some((c) => c.id === id);
                         const editing =
                           chartEditor?.mode === "edit" &&
                           chartEditor.tabI === tab &&
@@ -2729,11 +2580,16 @@ export function App() {
                                   type="button"
                                   className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
                                   onClick={() =>
-                                    toggleReportChart({
+                                    toggleReportBlock({
                                       id,
                                       title: tile.title,
-                                      plotly_json: conversionTile ? conversionOverview : tile.plotly_json,
+                                      plotly_json: conversionTile
+                                        ? conversionOverview
+                                        : tile.plotly_json,
                                       table: tile.table,
+                                      file_id: fileIdForTab(tab) ?? fileId ?? undefined,
+                                      source: specTile?.source as ReportBlockSource | undefined,
+                                      period: specTile?.source?.period ?? undefined,
                                     })
                                   }
                                 >
@@ -2842,15 +2698,8 @@ export function App() {
                                 />
                               ) : null}
                             </div>
-                          ) : deficitSalesTile && tile.table && specTile ? (
-                            <DeficitSalesBoardView
-                              table={tile.table}
-                              salesForecasts={specTile.source.sales_forecasts ?? {}}
-                              busy={!!busy}
-                              onSaveForecasts={(nextForecasts) =>
-                                void onDeficitSalesPatch(tab, tileI, nextForecasts)
-                              }
-                            />
+                          ) : deficitSalesTile && tile.table ? (
+                            <PivotTableView table={tile.table} />
                           ) : deficitPaymentReceiptTile && tile.table ? (
                             <DeficitPaymentReceiptView
                               table={tile.table}
@@ -2927,14 +2776,15 @@ export function App() {
                               type="button"
                               className="shrink-0 rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
                               onClick={() =>
-                                toggleReportChart({
+                                toggleReportBlock({
                                   id: `chart::${c.title ?? i}`,
                                   title: c.title ?? "График",
                                   plotly_json: c.plotly_json!,
+                                  file_id: fileId ?? undefined,
                                 })
                               }
                             >
-                              {reportCharts.some((x) => x.id === `chart::${c.title ?? i}`)
+                              {reportDoc.blocks.some((x) => x.id === `chart::${c.title ?? i}`)
                                 ? "В отчёте"
                                 : "В отчёт"}
                             </button>
@@ -2981,10 +2831,16 @@ export function App() {
         messages={messages}
         busy={busy === "Отвечаю…"}
         canPin={!!tabs.length}
-        reportChartIds={reportCharts.map((c) => c.id)}
+        reportChartIds={reportDoc.blocks.map((c) => c.id)}
         onSend={(q) => void onSend(q)}
         onPin={(spec) => void onPin(spec)}
-        onAddToReport={(chart) => toggleReportChart(chart)}
+        onAddToReport={(chart) =>
+          toggleReportBlock({
+            ...chart,
+            file_id: chart.file_id ?? fileId ?? undefined,
+          })
+        }
+        onOpenSavedReport={(id) => void onOpenSavedReport(id)}
         onClose={() => setChatOpen(false)}
       />
     </div>
@@ -3061,101 +2917,3 @@ function EmptyState({ onPick }: { onPick: () => void }) {
   );
 }
 
-function ReportPane({
-  report,
-  narrative,
-  insightsText,
-  comment,
-  charts,
-  onNarrative,
-  onInsights,
-  onComment,
-  onRemoveChart,
-  onBack,
-  onPdf,
-}: {
-  report: Report;
-  narrative: string;
-  insightsText: string;
-  comment: string;
-  charts: ReportChart[];
-  onNarrative: (v: string) => void;
-  onInsights: (v: string) => void;
-  onComment: (v: string) => void;
-  onRemoveChart: (id: string) => void;
-  onBack: () => void;
-  onPdf: () => void;
-}) {
-  const meta = report.metadata;
-  const q = report.data_quality;
-  return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-5">
-      <div className="mb-4 flex items-center gap-3">
-        <button type="button" className="text-sm text-zinc-400 hover:text-zinc-100" onClick={onBack}>
-          К дашборду
-        </button>
-        <h1 className="flex-1 text-lg font-medium">{typeName(report.report_type)}</h1>
-        <button
-          type="button"
-          className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-bg"
-          onClick={onPdf}
-        >
-          Скачать PDF
-        </button>
-      </div>
-      <p className="mb-4 text-xs text-zinc-500">
-        {meta?.filename} · {meta?.period ?? "—"} · {meta?.rows ?? 0} строк
-      </p>
-      <label className="mb-1 block text-xs text-zinc-500">Резюме</label>
-      <GrowingTextarea
-        value={narrative}
-        onChange={onNarrative}
-        className="mb-4 w-full rounded-xl border border-line bg-card p-3 text-sm outline-none focus:border-accent/60"
-      />
-      <label className="mb-1 block text-xs text-zinc-500">Выводы (по строке)</label>
-      <textarea
-        value={insightsText}
-        onChange={(e) => onInsights(e.target.value)}
-        className="mb-4 h-28 w-full rounded-xl border border-line bg-card p-3 text-sm outline-none focus:border-accent/60"
-      />
-      <label className="mb-1 block text-xs text-zinc-500">Комментарий</label>
-      <textarea
-        value={comment}
-        onChange={(e) => onComment(e.target.value)}
-        className="mb-4 h-20 w-full rounded-xl border border-line bg-card p-3 text-sm outline-none focus:border-accent/60"
-      />
-      {charts.length > 0 && (
-        <>
-          <div className="mb-2 text-xs text-zinc-500">Графики в отчёте</div>
-          <div className="mb-4 grid min-w-0 grid-cols-1 gap-4">
-            {charts.map((chart) => (
-              <div key={chart.id} className="min-w-0 overflow-hidden rounded-xl border border-line bg-card p-3">
-                <div className="mb-2 flex items-start justify-between gap-2">
-                  <div className="text-sm font-medium">{chart.title}</div>
-                  <button
-                    type="button"
-                    className="shrink-0 text-[11px] text-zinc-500 hover:text-red-300"
-                    onClick={() => onRemoveChart(chart.id)}
-                  >
-                    Убрать
-                  </button>
-                </div>
-                {chart.table ? (
-                  <PivotTableView table={chart.table} />
-                ) : chart.plotly_json ? (
-                  <PlotChart json={chart.plotly_json} />
-                ) : null}
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-      {q && (
-        <p className="text-xs text-zinc-500">
-          Ячеек {q.total_cells ?? 0} · пропуски {q.null_cells ?? 0} ({q.null_pct ?? 0}%) ·
-          дубликаты {q.duplicates ?? 0}
-        </p>
-      )}
-    </div>
-  );
-}

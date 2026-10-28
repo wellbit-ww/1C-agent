@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS saved_reports (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT,
+    file_id TEXT,
+    title TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_saved_reports_workspace
+    ON saved_reports(workspace_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_saved_reports_file
+    ON saved_reports(file_id, updated_at);
 """
 
 
@@ -206,13 +219,25 @@ def get_workspace_chat_history(workspace_id: str, limit: int = 50) -> list[dict]
 def _rows_to_messages(rows) -> list[dict]:
     messages = []
     for row in reversed(rows):
-        messages.append(
-            {
-                "role": row["role"],
-                "content": row["content"],
-                "charts": json.loads(row["charts_json"]) if row["charts_json"] else [],
-            }
-        )
+        charts = json.loads(row["charts_json"]) if row["charts_json"] else []
+        saved_report = None
+        plain_charts = []
+        for item in charts or []:
+            if isinstance(item, dict) and item.get("kind") == "saved_report":
+                saved_report = {
+                    "id": item.get("report_id") or item.get("id"),
+                    "title": item.get("title") or "Отчёт",
+                }
+            else:
+                plain_charts.append(item)
+        msg = {
+            "role": row["role"],
+            "content": row["content"],
+            "charts": plain_charts,
+        }
+        if saved_report and saved_report.get("id"):
+            msg["saved_report"] = saved_report
+        messages.append(msg)
     return messages
 
 
@@ -321,3 +346,76 @@ def get_file_context(file_id: str) -> dict | None:
             (file_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# --- Сохранённые отчёты (канвас) --------------------------------------------
+
+def upsert_saved_report(row: dict) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO saved_reports"
+            " (id, workspace_id, file_id, title, payload_json, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                row["id"],
+                row.get("workspace_id"),
+                row.get("file_id"),
+                row["title"],
+                json.dumps(row["payload"], ensure_ascii=False),
+                row["created_at"],
+                row["updated_at"],
+            ),
+        )
+
+
+def get_saved_report(report_id: str) -> dict | None:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT id, workspace_id, file_id, title, payload_json, created_at, updated_at"
+            " FROM saved_reports WHERE id = ?",
+            (report_id,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "workspace_id": row["workspace_id"],
+        "file_id": row["file_id"],
+        "title": row["title"],
+        "payload": json.loads(row["payload_json"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_saved_reports(
+    workspace_id: str | None = None,
+    file_id: str | None = None,
+) -> list[dict]:
+    with _connect() as conn:
+        if workspace_id:
+            rows = conn.execute(
+                "SELECT id, workspace_id, file_id, title, created_at, updated_at"
+                " FROM saved_reports WHERE workspace_id = ?"
+                " ORDER BY updated_at DESC",
+                (workspace_id,),
+            ).fetchall()
+        elif file_id:
+            rows = conn.execute(
+                "SELECT id, workspace_id, file_id, title, created_at, updated_at"
+                " FROM saved_reports WHERE file_id = ?"
+                " ORDER BY updated_at DESC",
+                (file_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, workspace_id, file_id, title, created_at, updated_at"
+                " FROM saved_reports ORDER BY updated_at DESC LIMIT 50"
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_saved_report(report_id: str) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM saved_reports WHERE id = ?", (report_id,))
+        return cur.rowcount > 0

@@ -1,4 +1,14 @@
-import type { ChatMessage, Dashboard, DashSpec, FileContext, Report, ReportChart } from "./types";
+import type {
+  ChatMessage,
+  Dashboard,
+  DashSpec,
+  FileContext,
+  Report,
+  ReportBlockSource,
+  ReportChart,
+  ReportDoc,
+  PivotTable,
+} from "./types";
 
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
 
@@ -143,6 +153,76 @@ export async function dashboardSaveSpec(fileId: string, spec: DashSpec): Promise
 
 export async function getReport(fileId: string, filename?: string): Promise<Report> {
   return postJson("/report", { file_id: fileId, filename });
+}
+
+export async function renderReportBlock(body: {
+  file_id: string;
+  title: string;
+  source: ReportBlockSource;
+  period?: string;
+}): Promise<{
+  title?: string;
+  table?: PivotTable;
+  plotly_json?: string;
+  bucket_period?: string;
+  error?: string;
+}> {
+  return postJson("/report/blocks/render", body);
+}
+
+export async function listSavedReports(params: {
+  workspace_id?: string;
+  file_id?: string;
+}): Promise<{ reports: { id: string; title: string; updated_at?: string }[] }> {
+  const q = new URLSearchParams();
+  if (params.workspace_id) q.set("workspace_id", params.workspace_id);
+  if (params.file_id) q.set("file_id", params.file_id);
+  const res = await fetch(`/api/reports?${q}`, { headers: headers(false) });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function getSavedReport(reportId: string): Promise<{
+  id: string;
+  title: string;
+  payload: ReportDoc;
+}> {
+  const res = await fetch(`/api/reports/${reportId}`, { headers: headers(false) });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.json();
+}
+
+export async function saveSavedReport(body: {
+  title: string;
+  payload: ReportDoc;
+  report_id?: string;
+  workspace_id?: string;
+  file_id?: string;
+  notify_chat?: boolean;
+}): Promise<{ id: string; title: string; payload: ReportDoc }> {
+  return postJson("/reports", body);
+}
+
+export async function deleteSavedReport(reportId: string): Promise<void> {
+  const res = await fetch(`/api/reports/${reportId}`, {
+    method: "DELETE",
+    headers: headers(false),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+}
+
+export async function downloadReportExcel(body: {
+  title: string;
+  payload: ReportDoc;
+  filename?: string;
+}): Promise<Blob> {
+  const res = await fetch("/api/report/excel", {
+    method: "POST",
+    headers: headers(true),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await readError(res));
+  return res.blob();
 }
 
 export async function downloadPdf(
