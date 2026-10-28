@@ -47,12 +47,13 @@ function normalizeChartTitle(raw: unknown) {
 function chartLayout(
   fig: PlotlyFigure,
   theme: "dark" | "light",
-  opts?: { forExport?: boolean },
+  opts?: { forExport?: boolean; compact?: boolean },
 ) {
   const src = fig.layout || {};
   const srcMargin = (src.margin || {}) as Record<string, number>;
   const light = theme === "light";
   const forExport = Boolean(opts?.forExport);
+  const compact = Boolean(opts?.compact);
   const layout: Record<string, unknown> = {
     ...src,
     // Одинаковый autosize в обеих темах: иначе в light график остаётся ~700px
@@ -106,10 +107,11 @@ function chartLayout(
     };
   } else {
     layout.margin = {
-      l: Math.max(64, srcMargin.l ?? 0),
-      r: Math.max(16, srcMargin.r ?? 0),
-      t: Math.max(48, srcMargin.t ?? 0),
-      b: Math.max(110, srcMargin.b ?? 0),
+      l: Math.max(compact ? 40 : 64, srcMargin.l ?? 0),
+      r: Math.max(compact ? 12 : 16, srcMargin.r ?? 0),
+      t: Math.max(compact ? 40 : 48, srcMargin.t ?? 0),
+      // На узких плитках отчёта огромный bottom съедает всю высоту графика.
+      b: Math.max(compact ? 56 : 110, srcMargin.b ?? 0),
     };
   }
   if (!isPie) {
@@ -223,7 +225,15 @@ function currentTheme(): "dark" | "light" {
   return document.documentElement.dataset.theme === "light" ? "light" : "dark";
 }
 
-export function PlotChart({ json, className }: { json: string; className?: string }) {
+export function PlotChart({
+  json,
+  className,
+  compact = false,
+}: {
+  json: string;
+  className?: string;
+  compact?: boolean;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const [copyState, setCopyState] = useState<"idle" | "busy" | "done" | "again" | "error">("idle");
   const [theme, setTheme] = useState<"dark" | "light">(currentTheme);
@@ -265,9 +275,10 @@ export function PlotChart({ json, className }: { json: string; className?: strin
     } catch {
       return;
     }
-    const { layout } = chartLayout(fig, theme);
+    const { layout } = chartLayout(fig, theme, { compact });
     let cancelled = false;
     const resize = () => {
+      if (cancelled || el.clientHeight < 40) return;
       const fn = Plotly.Plots?.resize;
       if (fn) fn(el);
     };
@@ -289,7 +300,7 @@ export function PlotChart({ json, className }: { json: string; className?: strin
       ro.disconnect();
       Plotly.purge(el);
     };
-  }, [json, theme]);
+  }, [json, theme, compact]);
 
   function copyReady() {
     const ready = readyPng.current;
@@ -338,7 +349,9 @@ export function PlotChart({ json, className }: { json: string; className?: strin
             : "Скопировать график";
 
   return (
-    <div className={`relative min-w-0 ${className ?? "h-72 w-full min-w-0"}`}>
+    <div
+      className={`relative min-w-0 shrink-0 ${className ?? "h-72 w-full min-w-0"}`}
+    >
       <button
         type="button"
         className="absolute left-2 top-2 z-10 rounded-md border border-line bg-card/90 px-2 py-1 text-[11px] text-zinc-200 hover:border-accent/50 hover:text-accent disabled:opacity-60"

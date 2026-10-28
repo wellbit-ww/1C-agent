@@ -2028,7 +2028,12 @@ export function App() {
       id: input.id,
       kind,
       title: input.title,
-      layout: nextBlockLayout(reportDoc.blocks),
+      layout: nextBlockLayout(reportDoc.blocks, {
+        kind,
+        hasTable: !!input.table,
+        hasChart: !!input.plotly_json,
+        rowCount: input.table?.rows?.length,
+      }),
       file_id: input.file_id,
       source: input.source,
       period: input.period || input.source?.period || undefined,
