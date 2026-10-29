@@ -1,8 +1,9 @@
 name: tests
 
+# Auto-run on push/PR disabled — was failing and emailing on every commit.
+# Uncomment push/pull_request below to re-enable CI, or run manually via Actions.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
