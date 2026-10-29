@@ -160,7 +160,7 @@ export type DashTab = {
   source_tab_index?: number;
 };
 
-export type Kpi = { label: string; value: string | number };
+export type Kpi = { label: string; value: string | number; name?: string };
 
 export type TileSpec = {
   title: string;

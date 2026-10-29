@@ -2383,8 +2383,11 @@ export function App() {
                 {kpis.length > 0 && (
                   <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-6">
                     {kpis.map((kpi) => (
-                      <div key={kpi.label} className="rounded-xl border border-line bg-card px-4 py-3">
-                        <div className="text-xs text-zinc-500">{kpi.label}</div>
+                      <div
+                        key={kpi.name || kpi.label}
+                        className="rounded-xl border border-line bg-card px-4 py-3"
+                      >
+                        <div className="text-xs leading-snug text-zinc-500">{kpi.label}</div>
                         <div className="mt-1 text-lg font-medium text-accent">{String(kpi.value)}</div>
                       </div>
                     ))}

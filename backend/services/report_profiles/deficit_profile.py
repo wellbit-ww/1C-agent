@@ -1,7 +1,8 @@
 """Профиль дефицита: KPI и дашборд по типовой выгрузке 1С.
 
-Типовая шапка: блок «К оплате» (До обеспечения / До отгрузки / После отгрузки),
-«Оплачено по заказу», «Неоплаченный остаток». Итог — сумма колонки
+Шапка KPI (6 карточек): прогноз продаж, сумма продаж, нарушенные сроки
+поставки, неоплаченный остаток, план и факт оплаты — с периодом из данных.
+Денежные колонки: «Оплачено по заказу», «Неоплаченный остаток», сумма заказа
 (строка «Итого» в парсере отбрасывается, чтобы не задвоить).
 """
 from dataclasses import dataclass
@@ -9,11 +10,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from models.dashboard_spec import DashboardSpec, Tab, Tile, TileSource
-from services.kpi_engine import (
-    _format_number,
-    calculate_unique_customers,
-    calculate_unique_departments,
-)
+from services.kpi_engine import _format_number
 from services.profile_registry import get_profile
 from services.report_engine import ReportEngine
 from services.report_profiles.base_profile import ReportProfile
@@ -168,49 +165,173 @@ def detect_deficit_money_layout(df: pd.DataFrame) -> DeficitMoneyLayout:
     )
 
 
-def deficit_kpis(df: pd.DataFrame) -> list[dict]:
-    layout = detect_deficit_money_layout(df)
-    kpis: list[dict] = []
+def _format_period_span(dates: pd.Series) -> str | None:
+    valid = pd.to_datetime(dates, errors="coerce", dayfirst=True).dropna()
+    if valid.empty:
+        return None
+    start = valid.min()
+    end = valid.max()
+    if start.year == end.year and start.month == end.month:
+        return start.strftime("%m.%Y")
+    return f"{start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
 
-    def add(name: str, label: str, col: str | None) -> None:
-        if not col:
-            return
-        val = _col_sum(df, col)
+
+def _kpi_period_label(df: pd.DataFrame) -> str | None:
+    """Период для подписей KPI — по датам заказов, иначе по любой дате файла."""
+    try:
+        from services.deficit_sales_table import _resolve_order_date_series
+
+        order_dates = _resolve_order_date_series(df)
+    except Exception:
+        order_dates = None
+    if order_dates is not None:
+        span = _format_period_span(order_dates)
+        if span:
+            return span
+    from services.insights_service import _get_date_period
+
+    return _get_date_period(df)
+
+
+def _label_with_period(base: str, period: str | None, prep: str) -> str:
+    if not period:
+        return base
+    return f"{base} {prep} {period}"
+
+
+def _sales_forecast_total(df: pd.DataFrame) -> float | None:
+    company = df.attrs.get("deficit_sales_forecast_company") or {}
+    raw = company.get("forecast") if isinstance(company, dict) else None
+    if raw is not None:
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            pass
+    by_dept = df.attrs.get("deficit_sales_forecast") or {}
+    if isinstance(by_dept, dict) and by_dept:
+        return float(sum(float(v or 0) for v in by_dept.values()))
+    return None
+
+
+def _payment_plan_total(df: pd.DataFrame) -> float | None:
+    from services.deficit_payment_table import _plan_total
+
+    return _plan_total(df)
+
+
+def _find_named_date_column(df: pd.DataFrame, *prefs: str) -> str | None:
+    by_name = {_norm(c): str(c) for c in df.columns}
+    for pref in prefs:
+        needle = _norm(pref)
+        if needle in by_name:
+            return by_name[needle]
+    for pref in prefs:
+        needle = _norm(pref)
+        for name, col in by_name.items():
+            if needle in name:
+                return col
+    return None
+
+
+def _late_delivery_count(df: pd.DataFrame) -> int | None:
+    """Число заказов, у которых дата реализации позже даты поставки."""
+    delivery_col = _find_named_date_column(df, "дата поставки")
+    if not delivery_col:
+        return None
+    realization_col = _find_named_date_column(df, "дата реализации")
+    if realization_col:
+        realization = pd.to_datetime(df[realization_col], errors="coerce", dayfirst=True)
+    else:
+        try:
+            from services.deficit_sales_table import _resolve_order_date_series
+
+            realization = _resolve_order_date_series(df)
+        except Exception:
+            realization = None
+    if realization is None:
+        return None
+    delivery = pd.to_datetime(df[delivery_col], errors="coerce", dayfirst=True)
+    both = realization.notna() & delivery.notna()
+    if not bool(both.any()):
+        return 0
+    return int((both & (realization > delivery)).sum())
+
+
+def _append_kpi(
+    kpis: list[dict],
+    *,
+    name: str,
+    label: str,
+    value: float | int | None,
+    as_int: bool = False,
+) -> None:
+    if value is None:
+        return
+    if as_int:
+        ival = int(value)
         kpis.append(
             {
                 "name": name,
                 "label": label,
-                "value": _format_number(val),
-                "raw_value": val,
+                "value": _format_number(float(ival)),
+                "raw_value": float(ival),
             }
         )
+        return
+    fval = float(value)
+    kpis.append(
+        {
+            "name": name,
+            "label": label,
+            "value": _format_number(fval),
+            "raw_value": fval,
+        }
+    )
 
-    add("total_deficit", "Неоплаченный остаток", layout.unpaid)
-    add("paid_on_order", "Оплачено по заказу", layout.paid)
-    for label, col in layout.stages:
-        add(f"to_pay_{label}", f"К оплате · {label}", col)
-    add("order_sum", "Сумма заказов, руб.", layout.order_sum)
 
-    customers = calculate_unique_customers(df)
-    if customers:
-        kpis.append(
-            {
-                "name": customers["name"],
-                "label": "Заказчики",
-                "value": customers["formatted"],
-                "raw_value": customers["value"],
-            }
-        )
-    departments = calculate_unique_departments(df)
-    if departments:
-        kpis.append(
-            {
-                "name": departments["name"],
-                "label": "Подразделения",
-                "value": departments["formatted"],
-                "raw_value": departments["value"],
-            }
-        )
+def deficit_kpis(df: pd.DataFrame) -> list[dict]:
+    layout = detect_deficit_money_layout(df)
+    period = _kpi_period_label(df)
+    kpis: list[dict] = []
+
+    _append_kpi(
+        kpis,
+        name="sales_forecast",
+        label=_label_with_period("Прогноз продаж", period, "на"),
+        value=_sales_forecast_total(df),
+    )
+    _append_kpi(
+        kpis,
+        name="order_sum",
+        label=_label_with_period("Общая сумма продаж", period, "в"),
+        value=_col_sum(df, layout.order_sum) if layout.order_sum else None,
+    )
+    late = _late_delivery_count(df)
+    _append_kpi(
+        kpis,
+        name="late_deliveries",
+        label="Нарушены сроки поставки",
+        value=late if late is not None else None,
+        as_int=True,
+    )
+    _append_kpi(
+        kpis,
+        name="total_deficit",
+        label=_label_with_period("Неоплаченный остаток по заказам", period, "в"),
+        value=_col_sum(df, layout.unpaid) if layout.unpaid else None,
+    )
+    _append_kpi(
+        kpis,
+        name="payment_plan",
+        label=_label_with_period("План оплаты", period, "в"),
+        value=_payment_plan_total(df),
+    )
+    _append_kpi(
+        kpis,
+        name="paid_on_order",
+        label=_label_with_period("Факт оплаты", period, "в"),
+        value=_col_sum(df, layout.paid) if layout.paid else None,
+    )
     return kpis
 
 

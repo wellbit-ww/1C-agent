@@ -117,8 +117,8 @@ class TestDeterministicContext:
         ctx = deterministic_context(deficit_df, filename="deficit.xlsx")
         joined = "\n".join(ctx.facts)
         assert any("Неоплаченный остаток" in f for f in ctx.facts)
-        assert any("Оплачено" in f for f in ctx.facts)
-        assert any("Сумма заказов" in f for f in ctx.facts)
+        assert any("Факт оплаты" in f for f in ctx.facts)
+        assert any("Общая сумма продаж" in f for f in ctx.facts)
         assert "Топ по неоплаченному остатку" in joined
         assert "Топ по сумме заказов" in joined
         unpaid_line = next(f for f in ctx.facts if f.startswith("Топ по неоплаченному остатку"))

@@ -59,14 +59,43 @@ class TestDeficitLayout:
 
 
 class TestDeficitKpis:
-    def test_payment_blocks_are_sums(self):
-        kpis = {item["label"]: item["raw_value"] for item in deficit_kpis(_ks_df())}
-        assert kpis["К оплате · До обеспечения"] == pytest.approx(15.0)
-        assert kpis["К оплате · До отгрузки"] == pytest.approx(120.0)
-        assert kpis["К оплате · После отгрузки"] == pytest.approx(215.0)
-        assert kpis["Оплачено по заказу"] == pytest.approx(180.0)
-        assert kpis["Неоплаченный остаток"] == pytest.approx(170.0)
-        assert kpis["Сумма заказов, руб."] == pytest.approx(350.0)
+    def test_six_header_cards(self):
+        df = _ks_df()
+        df.attrs["deficit_sales_forecast_company"] = {"label": "Совтест", "forecast": 900.0}
+        df.attrs["deficit_payment_plan_company"] = 500.0
+        by_name = {item["name"]: item for item in deficit_kpis(df)}
+        assert set(by_name) == {
+            "sales_forecast",
+            "order_sum",
+            "total_deficit",
+            "payment_plan",
+            "paid_on_order",
+        }
+        assert by_name["sales_forecast"]["raw_value"] == pytest.approx(900.0)
+        assert by_name["order_sum"]["raw_value"] == pytest.approx(350.0)
+        assert by_name["total_deficit"]["raw_value"] == pytest.approx(170.0)
+        assert by_name["payment_plan"]["raw_value"] == pytest.approx(500.0)
+        assert by_name["paid_on_order"]["raw_value"] == pytest.approx(180.0)
+        assert "Прогноз продаж" in by_name["sales_forecast"]["label"]
+        assert "Общая сумма продаж" in by_name["order_sum"]["label"]
+        assert "Неоплаченный остаток по заказам" in by_name["total_deficit"]["label"]
+        assert "План оплаты" in by_name["payment_plan"]["label"]
+        assert "Факт оплаты" in by_name["paid_on_order"]["label"]
+
+    def test_late_delivery_count(self):
+        df = pd.DataFrame(
+            {
+                "заказчик": ["А", "Б", "В"],
+                "сумма по заказу в рублях": [100.0, 200.0, 50.0],
+                "оплачено по заказу": [60.0, 100.0, 20.0],
+                "неоплаченный остаток": [40.0, 100.0, 30.0],
+                "дата реализации": ["10.02.2024", "15.03.2024", "01.01.2024"],
+                "дата поставки": ["01.02.2024", "20.03.2024", "01.01.2024"],
+            }
+        )
+        by_name = {item["name"]: item for item in deficit_kpis(df)}
+        assert by_name["late_deliveries"]["raw_value"] == pytest.approx(1.0)
+        assert by_name["late_deliveries"]["label"] == "Нарушены сроки поставки"
 
 
 def test_contract_deficit_uses_summa_vsego_not_stage_rub():
@@ -81,9 +110,9 @@ def test_contract_deficit_uses_summa_vsego_not_stage_rub():
     layout = detect_deficit_money_layout(df)
     assert layout.order_sum == "сумма всего"
     assert layout.unpaid == "сумма долга"
-    kpis = {item["label"]: item["raw_value"] for item in deficit_kpis(df)}
-    assert kpis["Сумма заказов, руб."] == pytest.approx(35_363_915.0)
-    assert kpis["Неоплаченный остаток"] == pytest.approx(17_495_275.0)
+    kpis = {item["name"]: item["raw_value"] for item in deficit_kpis(df)}
+    assert kpis["order_sum"] == pytest.approx(35_363_915.0)
+    assert kpis["total_deficit"] == pytest.approx(17_495_275.0)
     from services.report_engine import ReportEngine
     from services.profile_registry import get_profile
 
@@ -100,8 +129,8 @@ def test_sook_xls_order_sum_is_summa_zakaza_not_next_payment():
     df = read_excel(str(path))
     layout = detect_deficit_money_layout(df)
     assert layout.order_sum == "сумма заказа"
-    kpis = {item["label"]: item["raw_value"] for item in deficit_kpis(df)}
-    assert kpis["Сумма заказов, руб."] == pytest.approx(10_674_920.0)
+    kpis = {item["name"]: item["raw_value"] for item in deficit_kpis(df)}
+    assert kpis["order_sum"] == pytest.approx(10_674_920.0)
     spec = build_deficit_dashboard_spec(df)
     titles = [tile.title for tab in spec.tabs for tile in tab.tiles]
     assert all("Неоплаченный остаток" not in title for title in titles)
@@ -142,11 +171,12 @@ class TestDeficitDashboard:
 
     def test_real_deficit_file(self, deficit_df):
         _, profile = get_profile_for_df(deficit_df, filename="Дефицит по КС.xlsx")
-        kpis = {item["label"]: item["raw_value"] for item in profile.get_kpis(deficit_df)}
-        assert "К оплате · До обеспечения" in kpis
-        assert "К оплате · До отгрузки" in kpis
-        assert "К оплате · После отгрузки" in kpis
-        assert kpis["Неоплаченный остаток"] == pytest.approx(374_617_149.86, rel=1e-6)
+        kpis = {item["name"]: item for item in profile.get_kpis(deficit_df)}
+        assert "total_deficit" in kpis
+        assert "order_sum" in kpis
+        assert "paid_on_order" in kpis
+        assert kpis["total_deficit"]["raw_value"] == pytest.approx(374_617_149.86, rel=1e-6)
+        assert "Неоплаченный остаток по заказам" in kpis["total_deficit"]["label"]
         spec = profile.get_dashboard_spec(deficit_df)
         rendered = render_spec(deficit_df, spec)
         assert [tab["title"] for tab in rendered["tabs"]] == ["Платежи", "Структура"]
@@ -168,8 +198,8 @@ def test_desktop_ks_file_if_present():
     df = read_excel(str(path))
     layout = detect_deficit_money_layout(df)
     assert len(layout.stages) == 3
-    kpis = {item["label"]: item["raw_value"] for item in deficit_kpis(df)}
-    assert kpis["Неоплаченный остаток"] > 0
+    kpis = {item["name"]: item["raw_value"] for item in deficit_kpis(df)}
+    assert kpis["total_deficit"] > 0
     spec = build_deficit_dashboard_spec(df)
     rendered = render_spec(df, spec)
     pay_tab = next(tab for tab in rendered["tabs"] if tab["title"] == "Платежи")

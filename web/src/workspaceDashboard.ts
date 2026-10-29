@@ -34,11 +34,7 @@ export function flattenWorkspaceDashboard(payload: WorkspaceDashboardPayload): D
       return deficitDashboardTabTitle(title);
     };
     for (const kpi of src.kpis ?? []) {
-      kpis.push({
-        ...kpi,
-        label:
-          src.role === "deficit_report" ? `Дефицит · ${kpi.label}` : kpi.label,
-      });
+      kpis.push({ ...kpi, label: kpi.label });
     }
     const srcSpec = src.spec;
     (src.tabs ?? []).forEach((tab, ti) => {

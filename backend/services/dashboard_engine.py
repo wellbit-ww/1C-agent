@@ -40,6 +40,14 @@ def _auto_scale(max_value: float) -> tuple[float, str]:
     return (1.0, "")
 
 
+def _index_label(group_col: str | None) -> str:
+    """Подпись первой колонки сводной: «Подразделение», не «подразделение»."""
+    text = str(group_col or "").strip()
+    if not text:
+        return "Подразделение"
+    return text[:1].upper() + text[1:]
+
+
 def _resolve_scale(unit: str, values: list[float]) -> tuple[float, str]:
     peak = max((abs(v) for v in values), default=0.0)
     if unit in ("auto", "") or (unit == "rub" and peak >= 1_000_000):
@@ -464,7 +472,7 @@ def _pivot_data(df: pd.DataFrame, tile: Tile) -> dict:
         "group_column": group_col,
         "value_column": value_col,
         "table": {
-            "index_label": str(group_col),
+            "index_label": _index_label(group_col),
             "columns": columns,
             "year_spans": year_spans,
             "rows": rows,
@@ -540,7 +548,7 @@ def _pivot_half_data(
         "group_column": group_col,
         "value_column": value_col,
         "table": {
-            "index_label": str(group_col),
+            "index_label": _index_label(group_col),
             "columns": columns,
             "year_spans": year_spans,
             "rows": rows,

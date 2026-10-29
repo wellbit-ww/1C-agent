@@ -7,6 +7,8 @@ function Test-ExcelAgentProcess([string]$CommandLine) {
     if ($cmd -match 'uvicorn\s+app:app') { return $true }
     if ($cmd -match 'vite') { return $true }
     if ($cmd -match 'streamlit\s+run' -and $cmd -match 'ui\\app\.py|ui/app\.py') { return $true }
+    # uvicorn --reload: дочерний worker слушает порт, в cmdline только spawn_main
+    if ($cmd -match 'multiprocessing\.spawn' -and $cmd -match 'spawn_main') { return $true }
     return $false
 }
 
