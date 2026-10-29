@@ -9,7 +9,7 @@ import { BriefSummary } from "./BriefSummary";
 import { PlotChart } from "./PlotChart";
 import { dealsListToGrid, StagesDealListView, type DealsListFiltersPatch } from "./StagesDealList";
 import { ChartEditor, type ChartEditorMode } from "./SpecEditor";
-import { ReportCanvas, nextBlockLayout } from "./ReportCanvas";
+import { ReportCanvas, heightForReportBlock, nextBlockLayout } from "./ReportCanvas";
 import {
   clearSession,
   emptyReportDoc,
@@ -2023,7 +2023,9 @@ export function App() {
       setNotice(`В отчёт можно добавить не больше ${MAX_REPORT_BLOCKS} блоков`);
       return;
     }
-    const kind: ReportBlock["kind"] = input.table && !input.plotly_json ? "table" : "chart";
+    const hasChart =
+      typeof input.plotly_json === "string" && input.plotly_json.trim().length > 8;
+    const kind: ReportBlock["kind"] = input.table && !hasChart ? "table" : "chart";
     const block: ReportBlock = {
       id: input.id,
       kind,
@@ -2031,13 +2033,14 @@ export function App() {
       layout: nextBlockLayout(reportDoc.blocks, {
         kind,
         hasTable: !!input.table,
-        hasChart: !!input.plotly_json,
+        hasChart,
         rowCount: input.table?.rows?.length,
+        hasTotals: !!(input.table?.totals && input.table.totals.length > 0),
       }),
       file_id: input.file_id,
       source: input.source,
       period: input.period || input.source?.period || undefined,
-      plotly_json: input.plotly_json,
+      plotly_json: hasChart ? input.plotly_json : undefined,
       table: input.table,
     };
     setReportDoc((doc) => ({ ...doc, blocks: [...doc.blocks, block] }));
@@ -2145,17 +2148,27 @@ export function App() {
       if (rendered.error) throw new Error(rendered.error);
       setReportDoc((doc) => ({
         ...doc,
-        blocks: doc.blocks.map((b) =>
-          b.id === blockId
-            ? {
-                ...b,
-                period,
-                source: { ...b.source!, period },
-                table: rendered.table ?? b.table,
-                plotly_json: rendered.plotly_json ?? b.plotly_json,
-              }
-            : b,
-        ),
+        blocks: doc.blocks.map((b) => {
+          if (b.id !== blockId) return b;
+          const table = rendered.table ?? b.table;
+          const rawPlotly = rendered.plotly_json ?? b.plotly_json;
+          const hasChart = typeof rawPlotly === "string" && rawPlotly.trim().length > 8;
+          const plotly_json = hasChart ? rawPlotly : undefined;
+          const next = {
+            ...b,
+            period,
+            source: { ...b.source!, period },
+            table,
+            plotly_json,
+          };
+          return {
+            ...next,
+            layout: {
+              ...b.layout,
+              h: heightForReportBlock(next),
+            },
+          };
+        }),
       }));
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : String(exc));

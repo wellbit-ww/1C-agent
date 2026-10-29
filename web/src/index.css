@@ -85,3 +85,10 @@ body {
   background: #2a323c;
   border-radius: 99px;
 }
+
+/* Отчёт: карточка заполняет ячейку сетки вплотную — без белого хвоста. */
+.report-grid > .react-grid-item > .report-grid-item {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}

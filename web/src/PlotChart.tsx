@@ -350,7 +350,7 @@ export function PlotChart({
 
   return (
     <div
-      className={`relative min-w-0 shrink-0 ${className ?? "h-72 w-full min-w-0"}`}
+      className={`relative min-w-0 ${className ?? "h-72 w-full shrink-0"}`}
     >
       <button
         type="button"

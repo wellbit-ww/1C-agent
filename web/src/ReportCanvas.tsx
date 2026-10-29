@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import GridLayout, { type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
@@ -88,50 +88,108 @@ const PERIOD_CAPABLE = new Set([
   "deficit_payment_share",
 ]);
 
-const GRID_ROW_PX = 28;
-const GRID_MARGIN_Y = 12;
-/** Высота графика в отчёте — крупнее, читаемые подписи. */
-export const REPORT_CHART_PX = 420;
+/** Классическая сетка RGL: высота ячейки = h*row + (h−1)*margin. */
+const GRID_COLS = 12;
+const GRID_ROW_PX = 24;
+const GRID_MARGIN = 12;
+const GRID_STEP = GRID_ROW_PX + GRID_MARGIN; // 36
 
-/** Фактическая высота ячейки RGL: h*rowHeight + (h-1)*margin. */
+/** Целевая высота области графика внутри блока. */
+export const REPORT_CHART_PX = 320;
+
 export function gridHToPx(h: number): number {
-  return h * GRID_ROW_PX + Math.max(0, h - 1) * GRID_MARGIN_Y;
+  if (h <= 0) return 0;
+  return h * GRID_ROW_PX + Math.max(0, h - 1) * GRID_MARGIN;
 }
 
-/** Минимальный h, чтобы ячейка была не ниже contentPx (вплотную по низу). */
 export function pxToGridH(px: number): number {
-  const need = Math.max(1, px);
-  const h = Math.ceil((need + GRID_MARGIN_Y) / (GRID_ROW_PX + GRID_MARGIN_Y));
-  return Math.max(3, h);
+  return Math.max(3, Math.ceil((Math.max(1, px) + GRID_MARGIN) / GRID_STEP));
+}
+
+export type BlockSizeOpts = {
+  kind?: ReportBlock["kind"];
+  hasTable?: boolean;
+  hasChart?: boolean;
+  rowCount?: number;
+  hasTotals?: boolean;
+};
+
+function hasChartPayload(plotly?: string | null): boolean {
+  return typeof plotly === "string" && plotly.trim().length > 8;
+}
+
+/** Высота блока в рядах сетки строго по видимому контенту. */
+export function heightForBlock(opts: BlockSizeOpts): number {
+  const headerPx = 40;
+  const padPx = 16;
+  if (opts.kind === "text") {
+    return pxToGridH(headerPx + padPx + 128);
+  }
+  const rows = Math.max(0, opts.rowCount ?? 0);
+  const totalRow = opts.hasTotals ? 1 : 0;
+  // Шапка таблицы + строки + итого; без запаса «под график».
+  const tablePx = opts.hasTable ? 34 + (rows + totalRow) * 28 + 2 : 0;
+  const chartPx = opts.hasChart ? REPORT_CHART_PX : 0;
+  const gap = opts.hasTable && opts.hasChart ? 8 : 0;
+  const bodyPx = tablePx + chartPx + gap || 48;
+  return pxToGridH(headerPx + padPx + bodyPx);
+}
+
+export function heightForReportBlock(block: ReportBlock): number {
+  if (block.kind === "text") return heightForBlock({ kind: "text" });
+  return heightForBlock({
+    kind: block.kind,
+    hasTable: !!block.table,
+    hasChart: hasChartPayload(block.plotly_json),
+    rowCount: block.table?.rows?.length,
+    hasTotals: !!(block.table?.totals && block.table.totals.length > 0),
+  });
 }
 
 export function nextBlockLayout(
   blocks: ReportBlock[],
-  opts?: {
-    kind?: ReportBlock["kind"];
-    hasTable?: boolean;
-    hasChart?: boolean;
-    rowCount?: number;
-  },
+  opts?: BlockSizeOpts,
 ): { x: number; y: number; w: number; h: number } {
-  const maxY = blocks.reduce((m, b) => Math.max(m, (b.layout?.y ?? 0) + (b.layout?.h ?? 0)), 0);
-  const headerPx = 40;
-  const padPx = 16;
-  let bodyPx = 120;
-  if (opts?.kind === "text") {
-    bodyPx = 120;
-  } else {
-    const rows = Math.max(1, opts?.rowCount ?? 6);
-    const tablePx = opts?.hasTable ? 34 + rows * 24 + 28 : 0;
-    const chartPx = opts?.hasChart ? REPORT_CHART_PX : 0;
-    const gap = opts?.hasTable && opts?.hasChart ? 8 : 0;
-    bodyPx = tablePx + chartPx + gap;
-  }
-  return { x: 0, y: maxY, w: 6, h: pxToGridH(headerPx + padPx + bodyPx) };
+  const maxY = blocks.reduce(
+    (m, b) => Math.max(m, (b.layout?.y ?? 0) + heightForReportBlock(b)),
+    0,
+  );
+  return { x: 0, y: maxY, w: 6, h: heightForBlock(opts ?? {}) };
 }
 
 export function newBlockId(prefix = "block"): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** Упаковка по Y без дыр после смены высоты. */
+export function packBlocks(blocks: ReportBlock[]): ReportBlock[] {
+  const sorted = [...blocks].sort(
+    (a, b) => (a.layout?.y ?? 0) - (b.layout?.y ?? 0) || (a.layout?.x ?? 0) - (b.layout?.x ?? 0),
+  );
+  const placed: ReportBlock[] = [];
+  for (const b of sorted) {
+    const h = b.layout?.h ?? heightForReportBlock(b);
+    const w = b.layout?.w ?? 6;
+    const x = b.layout?.x ?? 0;
+    let y = 0;
+    let moved = true;
+    while (moved) {
+      moved = false;
+      for (const p of placed) {
+        const ph = p.layout.h;
+        const pw = p.layout.w ?? 6;
+        const px = p.layout.x ?? 0;
+        const py = p.layout.y;
+        if (x < px + pw && x + w > px && y < py + ph && y + h > py) {
+          y = py + ph;
+          moved = true;
+        }
+      }
+    }
+    placed.push({ ...b, layout: { x, y, w, h } });
+  }
+  const byId = new Map(placed.map((b) => [b.id, b]));
+  return blocks.map((b) => byId.get(b.id) ?? b);
 }
 
 type SavedMeta = { id: string; title: string; updated_at?: string };
@@ -171,6 +229,7 @@ export function ReportCanvas({
   const userResized = useRef(new Set<string>());
   const docRef = useRef(doc);
   docRef.current = doc;
+
   useEffect(() => {
     const el = canvasRef.current;
     if (!el) return;
@@ -180,17 +239,48 @@ export function ReportCanvas({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Высота ячейки = контент (таблица/график). Старый завышенный h сбрасываем.
+  useEffect(() => {
+    const current = docRef.current;
+    let changed = false;
+    const blocks = current.blocks.map((b) => {
+      if (userResized.current.has(b.id) || b.kind === "text") return b;
+      const h = heightForReportBlock(b);
+      if (b.layout?.h === h) return b;
+      changed = true;
+      return { ...b, layout: { ...b.layout, x: b.layout?.x ?? 0, w: b.layout?.w ?? 6, y: b.layout?.y ?? 0, h } };
+    });
+    if (!changed) return;
+    onChange({ ...current, blocks: packBlocks(blocks) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    doc.blocks
+      .map(
+        (b) =>
+          `${b.id}:${b.kind}:${b.table?.rows?.length ?? 0}:${hasChartPayload(b.plotly_json)}:${b.period ?? ""}`,
+      )
+      .join("|"),
+  ]);
+
   const layout: Layout[] = useMemo(
     () =>
-      doc.blocks.map((b) => ({
-        i: b.id,
-        x: b.layout?.x ?? 0,
-        y: b.layout?.y ?? 0,
-        w: b.layout?.w ?? 6,
-        h: b.layout?.h ?? 8,
-        minW: 3,
-        minH: 3,
-      })),
+      doc.blocks.map((b) => {
+        const auto = heightForReportBlock(b);
+        const h =
+          userResized.current.has(b.id) && b.kind !== "text"
+            ? Math.max(3, b.layout?.h ?? auto)
+            : auto;
+        return {
+          i: b.id,
+          x: b.layout?.x ?? 0,
+          y: b.layout?.y ?? 0,
+          w: b.layout?.w ?? 6,
+          h,
+          minW: 3,
+          minH: 3,
+        };
+      }),
     [doc.blocks],
   );
 
@@ -232,29 +322,6 @@ export function ReportCanvas({
       }),
     });
   }
-
-  const fitBlockHeight = useCallback(
-    (blockId: string, contentPx: number) => {
-      if (userResized.current.has(blockId)) return;
-      // +2px — чтобы нижняя граница графика не обрезалась рамкой.
-      const h = pxToGridH(contentPx + 2);
-      const current = docRef.current;
-      const block = current.blocks.find((b) => b.id === blockId);
-      if (!block || block.layout.h === h) return;
-      // Не раздувать блок, если уже почти впритык (лишний ряд пустоты).
-      const curPx = gridHToPx(block.layout.h);
-      if (curPx >= contentPx && curPx - contentPx < GRID_ROW_PX && block.layout.h <= h) {
-        return;
-      }
-      onChange({
-        ...current,
-        blocks: current.blocks.map((b) =>
-          b.id === blockId ? { ...b, layout: { ...b.layout, h } } : b,
-        ),
-      });
-    },
-    [onChange],
-  );
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -357,12 +424,12 @@ export function ReportCanvas({
           </div>
         ) : (
           <GridLayout
-            className="layout"
+            className="layout report-grid"
             layout={layout}
             width={gridWidth}
-            cols={12}
+            cols={GRID_COLS}
             rowHeight={GRID_ROW_PX}
-            margin={[GRID_MARGIN_Y, GRID_MARGIN_Y]}
+            margin={[GRID_MARGIN, GRID_MARGIN]}
             containerPadding={[0, 0]}
             onDragStop={(next) => applyLayout(next)}
             onResizeStop={(next, _old, item) => {
@@ -375,15 +442,17 @@ export function ReportCanvas({
             {doc.blocks.map((block) => (
               <div
                 key={block.id}
-                className="overflow-hidden rounded-xl border border-line bg-card"
+                className="report-grid-item overflow-hidden rounded-xl border border-line bg-card"
               >
                 <ReportBlockInner
                   block={block}
                   busy={busy}
-                  onPeriodChange={onPeriodChange}
+                  onPeriodChange={(id, period) => {
+                    userResized.current.delete(id);
+                    onPeriodChange(id, period);
+                  }}
                   onRemove={() => removeBlock(block.id)}
                   onUpdate={(patch) => updateBlock(block.id, patch)}
-                  onFitHeight={(px) => fitBlockHeight(block.id, px)}
                 />
               </div>
             ))}
@@ -400,41 +469,17 @@ function ReportBlockInner({
   onPeriodChange,
   onRemove,
   onUpdate,
-  onFitHeight,
 }: {
   block: ReportBlock;
   busy: boolean;
   onPeriodChange: (blockId: string, period: string) => void;
   onRemove: () => void;
   onUpdate: (patch: Partial<ReportBlock>) => void;
-  onFitHeight: (totalPx: number) => void;
 }) {
-  const rootRef = useRef<HTMLDivElement>(null);
-  const fitRef = useRef(onFitHeight);
-  fitRef.current = onFitHeight;
-
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el || block.kind === "text") return;
-    // offsetHeight = реальный контент, без растягивания под высокую ячейку сетки.
-    const measure = () => fitRef.current(el.offsetHeight);
-    measure();
-    const t1 = window.setTimeout(measure, 80);
-    const t2 = window.setTimeout(measure, 280);
-    const ro = new ResizeObserver(() => {
-      window.requestAnimationFrame(measure);
-    });
-    ro.observe(el);
-    return () => {
-      window.clearTimeout(t1);
-      window.clearTimeout(t2);
-      ro.disconnect();
-    };
-  }, [block.id, block.kind, block.table, block.plotly_json, block.period, block.text]);
-
+  const showChart = hasChartPayload(block.plotly_json);
   return (
-    <div ref={rootRef} className="h-fit w-full">
-      <div className="report-drag-handle flex cursor-move items-start gap-2 border-b border-line px-3 py-2">
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <div className="report-drag-handle flex shrink-0 cursor-move items-start gap-2 border-b border-line px-3 py-2">
         <div className="min-w-0 flex-1">
           {block.kind === "text" ? (
             <input
@@ -473,29 +518,37 @@ function ReportBlockInner({
           Убрать
         </button>
       </div>
-      <div className="p-2">
+      <div
+        className={
+          showChart
+            ? "flex min-h-0 flex-1 flex-col gap-2 p-2"
+            : "flex shrink-0 flex-col gap-2 p-2"
+        }
+      >
         {block.kind === "text" ? (
           <textarea
             value={block.text ?? ""}
             onChange={(e) => onUpdate({ text: e.target.value })}
             onMouseDown={(e) => e.stopPropagation()}
-            className="min-h-[6rem] w-full resize-y bg-transparent text-sm outline-none"
+            className="min-h-0 w-full flex-1 resize-none bg-transparent text-sm outline-none"
             placeholder="Напишите что угодно…"
           />
         ) : (
-          <div className="space-y-2">
-            {block.table ? <ReportTable table={block.table} /> : null}
-            {block.plotly_json ? (
-              <PlotChart
-                json={block.plotly_json}
-                compact
-                className="h-[420px] w-full min-h-[420px] shrink-0"
-              />
+          <>
+            {block.table ? (
+              <div className="shrink-0 overflow-auto">
+                <ReportTable table={block.table} />
+              </div>
             ) : null}
-            {!block.table && !block.plotly_json ? (
+            {showChart ? (
+              <div className="min-h-0 min-w-0 flex-1">
+                <PlotChart json={block.plotly_json!} compact className="h-full min-h-0 w-full" />
+              </div>
+            ) : null}
+            {!block.table && !showChart ? (
               <p className="text-xs text-zinc-500">Нет данных для отображения</p>
             ) : null}
-          </div>
+          </>
         )}
       </div>
     </div>
