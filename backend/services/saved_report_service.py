@@ -124,6 +124,7 @@ def render_block(
     return {
         "title": payload.get("title") or title,
         "table": payload.get("table"),
+        "sections": payload.get("sections"),
         "plotly_json": payload.get("plotly_json"),
         "bucket_period": payload.get("bucket_period") or period,
         "chart_type": payload.get("chart_type"),
@@ -167,7 +168,37 @@ def export_report_excel(payload: dict, filename: str | None = None) -> bytes:
             continue
 
         table = block.get("table")
-        if isinstance(table, dict) and (table.get("columns") or table.get("rows")):
+        sections = block.get("sections")
+        wrote_table = False
+        if isinstance(sections, list) and sections:
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                section_title = str(section.get("title") or "")
+                if section_title:
+                    ws.cell(row_i, 1, section_title).font = Font(bold=True)
+                    row_i += 1
+                for item in section.get("tables") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    item_title = str(item.get("title") or "")
+                    if item_title:
+                        ws.cell(row_i, 1, item_title).font = Font(bold=True)
+                        row_i += 1
+                    cols = list(item.get("columns") or [])
+                    index_label = item.get("index_label") or ""
+                    headers = ([index_label] if index_label else [""]) + cols
+                    for c, h in enumerate(headers, start=1):
+                        ws.cell(row_i, c, h).font = Font(bold=True)
+                    row_i += 1
+                    for r in item.get("rows") or []:
+                        values = [r.get("label"), *(r.get("values") or [])]
+                        for c, v in enumerate(values, start=1):
+                            ws.cell(row_i, c, v)
+                        row_i += 1
+                    row_i += 1
+            wrote_table = True
+        elif isinstance(table, dict) and (table.get("columns") or table.get("rows")):
             cols = list(table.get("columns") or [])
             index_label = table.get("index_label") or ""
             headers = ([index_label] if index_label else [""]) + cols
@@ -187,9 +218,10 @@ def export_report_excel(payload: dict, filename: str | None = None) -> bytes:
                     cell.font = Font(bold=True)
                 row_i += 1
             row_i += 1
+            wrote_table = True
 
         plotly_json = block.get("plotly_json")
-        if plotly_json and not table:
+        if plotly_json and not wrote_table:
             png = _plotly_to_png(plotly_json)
             if png:
                 img = XLImage(io.BytesIO(png))
@@ -200,7 +232,7 @@ def export_report_excel(payload: dict, filename: str | None = None) -> bytes:
             else:
                 ws.cell(row_i, 1, f"[график: {block_title}]")
                 row_i += 2
-        elif plotly_json and table:
+        elif plotly_json and wrote_table:
             # таблица уже выведена; график пропускаем на одном листе
             pass
 

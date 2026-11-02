@@ -8,6 +8,7 @@ import type {
   ReportChart,
   ReportDoc,
   PivotTable,
+  SectionBlock,
 } from "./types";
 
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? "";
@@ -163,6 +164,7 @@ export async function renderReportBlock(body: {
 }): Promise<{
   title?: string;
   table?: PivotTable;
+  sections?: SectionBlock[];
   plotly_json?: string;
   bucket_period?: string;
   error?: string;

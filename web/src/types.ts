@@ -43,6 +43,8 @@ export type ReportBlock = {
   period?: string;
   plotly_json?: string;
   table?: PivotTable;
+  /** Секционные таблицы (Сделки и ЗК и т.п.) */
+  sections?: SectionBlock[];
   text?: string;
 };
 

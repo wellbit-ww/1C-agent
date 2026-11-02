@@ -3,7 +3,8 @@ import GridLayout, { type Layout } from "react-grid-layout";
 import "react-grid-layout/css/styles.css";
 import "react-resizable/css/styles.css";
 import { PlotChart } from "./PlotChart";
-import type { PivotTable, ReportBlock, ReportDoc } from "./types";
+import { formatStageLabel } from "./stageLabel";
+import type { PivotTable, ReportBlock, ReportDoc, SectionBlock } from "./types";
 
 function formatCell(value: number | null | undefined, kind?: string) {
   if (value == null || Number.isNaN(Number(value))) return "—";
@@ -13,6 +14,87 @@ function formatCell(value: number | null | undefined, kind?: string) {
   }
   if (kind === "count") return String(Math.round(n));
   return n.toLocaleString("ru-RU", { maximumFractionDigits: 1 });
+}
+
+function ReportSections({ sections }: { sections: SectionBlock[] }) {
+  return (
+    <div className="space-y-4">
+      {sections.map((block) => (
+        <section key={block.title || "table-block"}>
+          {block.title ? (
+            <h3 className="mb-2 text-xs font-semibold text-zinc-100">{block.title}</h3>
+          ) : null}
+          <div className={`grid gap-2 ${block.tables.length > 1 ? "md:grid-cols-2" : ""}`}>
+            {block.tables.map((item, tableI) => (
+              <div
+                key={`${block.title}-${tableI}-${item.title}`}
+                className="overflow-hidden rounded-lg border border-line"
+              >
+                {item.title ? (
+                  <div className="border-b border-line bg-panel px-2 py-1 text-xs font-medium text-zinc-100">
+                    {item.title}
+                  </div>
+                ) : null}
+                <table className="w-full border-collapse text-right text-[11px]">
+                  <thead>
+                    <tr className="text-zinc-500">
+                      <th className="border-b border-line px-2 py-1 text-left font-medium">
+                        {item.index_label || ""}
+                      </th>
+                      {item.columns.map((col, i) => (
+                        <th
+                          key={`${i}-${col}`}
+                          className="border-b border-line px-2 py-1 font-medium whitespace-nowrap"
+                        >
+                          {col}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {item.rows.map((row) => (
+                      <tr key={`${row.label}-${row.indent ? "sub" : "main"}`} className="border-t border-line">
+                        <th
+                          className={`px-2 py-1 text-left font-medium text-zinc-200 ${
+                            row.label === "Всего" ? "font-semibold text-accent" : ""
+                          } ${row.indent ? "pl-4 text-[10px] font-normal italic text-zinc-400" : ""}`}
+                        >
+                          {formatStageLabel(row.label)}
+                        </th>
+                        {item.columns.map((_col, i) => (
+                          <td
+                            key={`${row.label}-${i}`}
+                            className={`px-2 py-1 tabular-nums text-zinc-100 ${
+                              row.label === "Всего" ? "font-semibold text-accent" : ""
+                            }`}
+                          >
+                            {formatCell(row.values[i], row.kinds?.[i])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function sectionsContentRows(sections?: SectionBlock[]): number {
+  if (!sections?.length) return 0;
+  let rows = 0;
+  for (const section of sections) {
+    if (section.title) rows += 1;
+    const heights = section.tables.map((t) => 1 + 1 + (t.rows?.length || 0));
+    for (let i = 0; i < heights.length; i += 2) {
+      rows += Math.max(heights[i] || 0, heights[i + 1] || 0);
+    }
+  }
+  return rows;
 }
 
 function ReportTable({ table }: { table: PivotTable }) {
@@ -109,9 +191,11 @@ export function pxToGridH(px: number): number {
 export type BlockSizeOpts = {
   kind?: ReportBlock["kind"];
   hasTable?: boolean;
+  hasSections?: boolean;
   hasChart?: boolean;
   rowCount?: number;
   hasTotals?: boolean;
+  sections?: SectionBlock[];
 };
 
 function hasChartPayload(plotly?: string | null): boolean {
@@ -125,24 +209,28 @@ export function heightForBlock(opts: BlockSizeOpts): number {
   if (opts.kind === "text") {
     return pxToGridH(headerPx + padPx + 128);
   }
-  const rows = Math.max(0, opts.rowCount ?? 0);
+  const sectionRows = opts.hasSections ? sectionsContentRows(opts.sections) : 0;
+  const rows = Math.max(0, opts.rowCount ?? 0, sectionRows);
   const totalRow = opts.hasTotals ? 1 : 0;
   // Шапка таблицы + строки + итого; без запаса «под график».
-  const tablePx = opts.hasTable ? 34 + (rows + totalRow) * 28 + 2 : 0;
+  const tablePx = opts.hasTable || opts.hasSections ? 34 + (rows + totalRow) * 28 + 2 : 0;
   const chartPx = opts.hasChart ? REPORT_CHART_PX : 0;
-  const gap = opts.hasTable && opts.hasChart ? 8 : 0;
+  const gap = (opts.hasTable || opts.hasSections) && opts.hasChart ? 8 : 0;
   const bodyPx = tablePx + chartPx + gap || 48;
   return pxToGridH(headerPx + padPx + bodyPx);
 }
 
 export function heightForReportBlock(block: ReportBlock): number {
   if (block.kind === "text") return heightForBlock({ kind: "text" });
+  const hasSections = !!(block.sections && block.sections.length > 0);
   return heightForBlock({
     kind: block.kind,
     hasTable: !!block.table,
+    hasSections,
     hasChart: hasChartPayload(block.plotly_json),
     rowCount: block.table?.rows?.length,
     hasTotals: !!(block.table?.totals && block.table.totals.length > 0),
+    sections: block.sections,
   });
 }
 
@@ -154,7 +242,12 @@ export function nextBlockLayout(
     (m, b) => Math.max(m, (b.layout?.y ?? 0) + heightForReportBlock(b)),
     0,
   );
-  return { x: 0, y: maxY, w: 6, h: heightForBlock(opts ?? {}) };
+  return {
+    x: 0,
+    y: maxY,
+    w: opts?.hasSections ? 12 : 6,
+    h: heightForBlock(opts ?? {}),
+  };
 }
 
 export function newBlockId(prefix = "block"): string {
@@ -535,7 +628,11 @@ function ReportBlockInner({
           />
         ) : (
           <>
-            {block.table ? (
+            {block.sections && block.sections.length > 0 ? (
+              <div className="shrink-0 overflow-auto">
+                <ReportSections sections={block.sections} />
+              </div>
+            ) : block.table ? (
               <div className="shrink-0 overflow-auto">
                 <ReportTable table={block.table} />
               </div>
@@ -545,7 +642,7 @@ function ReportBlockInner({
                 <PlotChart json={block.plotly_json!} compact className="h-full min-h-0 w-full" />
               </div>
             ) : null}
-            {!block.table && !showChart ? (
+            {!block.table && !(block.sections && block.sections.length) && !showChart ? (
               <p className="text-xs text-zinc-500">Нет данных для отображения</p>
             ) : null}
           </>

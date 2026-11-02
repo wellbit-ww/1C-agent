@@ -2006,6 +2006,7 @@ export function App() {
     title: string;
     plotly_json?: string;
     table?: PivotTable;
+    sections?: SectionBlock[];
     file_id?: string;
     source?: ReportBlockSource;
     period?: string;
@@ -2025,23 +2026,28 @@ export function App() {
     }
     const hasChart =
       typeof input.plotly_json === "string" && input.plotly_json.trim().length > 8;
-    const kind: ReportBlock["kind"] = input.table && !hasChart ? "table" : "chart";
+    const hasSections = !!(input.sections && input.sections.length > 0);
+    const kind: ReportBlock["kind"] =
+      (input.table || hasSections) && !hasChart ? "table" : "chart";
     const block: ReportBlock = {
       id: input.id,
       kind,
       title: input.title,
       layout: nextBlockLayout(reportDoc.blocks, {
         kind,
-        hasTable: !!input.table,
+        hasTable: !!input.table || hasSections,
+        hasSections,
         hasChart,
         rowCount: input.table?.rows?.length,
         hasTotals: !!(input.table?.totals && input.table.totals.length > 0),
+        sections: input.sections,
       }),
       file_id: input.file_id,
       source: input.source,
       period: input.period || input.source?.period || undefined,
       plotly_json: hasChart ? input.plotly_json : undefined,
       table: input.table,
+      sections: hasSections ? input.sections : undefined,
     };
     setReportDoc((doc) => ({ ...doc, blocks: [...doc.blocks, block] }));
     setNotice(reportBlockNotice(input, false));
@@ -2151,6 +2157,7 @@ export function App() {
         blocks: doc.blocks.map((b) => {
           if (b.id !== blockId) return b;
           const table = rendered.table ?? b.table;
+          const sections = rendered.sections ?? b.sections;
           const rawPlotly = rendered.plotly_json ?? b.plotly_json;
           const hasChart = typeof rawPlotly === "string" && rawPlotly.trim().length > 8;
           const plotly_json = hasChart ? rawPlotly : undefined;
@@ -2159,6 +2166,7 @@ export function App() {
             period,
             source: { ...b.source!, period },
             table,
+            sections,
             plotly_json,
           };
           return {
@@ -2596,7 +2604,7 @@ export function App() {
                                   Скопировать
                                 </button>
                               )}
-                              {(tile.plotly_json || tile.table) && (
+                              {(tile.plotly_json || tile.table || tile.sections) && (
                                 <button
                                   type="button"
                                   className="rounded-md border border-line px-2 py-0.5 text-[11px] text-zinc-300 hover:border-accent/50 hover:text-accent"
@@ -2608,6 +2616,7 @@ export function App() {
                                         ? conversionOverview
                                         : tile.plotly_json,
                                       table: tile.table,
+                                      sections: tile.sections,
                                       file_id: fileIdForTab(tab) ?? fileId ?? undefined,
                                       source: specTile?.source as ReportBlockSource | undefined,
                                       period: specTile?.source?.period ?? undefined,
